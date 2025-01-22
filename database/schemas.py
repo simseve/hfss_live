@@ -76,15 +76,50 @@ class FlightCreate(FlightBase):
     flight_metadata: Optional[Dict[str, Any]] = None
 
 class TrackMetadata(BaseModel):
-    duration: Optional[float] = None
+    duration: str  # Changed from Optional[float] to str to accept "00:00:04.521" format
     distance: Optional[float] = None
     avg_speed: Optional[float] = None
     max_speed: Optional[float] = None
     max_altitude: Optional[float] = None
     total_points: Optional[int] = None
-    start_time: Optional[datetime] = None
 
-    
+class TrackUploadRequest(BaseModel):
+    pilot_id: Optional[str] = None
+    race_id: Optional[str] = None
+    flight_id: str = Field(..., max_length=100)
+    start_time: datetime  # Added this field
+    duration: str  # Added this field
+    track_points: List[Dict[str, Any]]
+    metadata: TrackMetadata
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "pilot_id": "pilot123",
+                "race_id": "race456",
+                "flight_id": "flight_123",
+                "start_time": "2024-03-20T14:23:45.123Z",
+                "duration": "00:00:04.521",
+                "track_points": [
+                    {
+                        "datetime": "2024-03-20T14:23:45.123Z",
+                        "lat": 45.5231,
+                        "lon": -122.6765,
+                        "elevation": 1200.5,
+                        "speed": 32.4
+                    }
+                ],
+                "metadata": {
+                    "duration": "00:00:04.521",
+                    "distance": 50000,
+                    "avg_speed": 45.5,
+                    "max_speed": 65.3,
+                    "max_altitude": 1500.0,
+                    "total_points": 3600
+                }
+            }
+        }
+        
 class FlightResponse(FlightBase):
     id: UUID
     created_at: datetime
@@ -114,32 +149,3 @@ class UpdatedLiveTrackingRequest(BaseModel):
     flight_id: str
     track_points: List[Dict[str, Any]]
     
-class TrackUploadRequest(BaseModel):
-    flight_id: str = Field(..., max_length=100)
-    track_points: List[Dict[str, Any]]
-    metadata: TrackMetadata
-
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "flight_id": "flight_123",
-                "track_points": [
-                    {
-                        "datetime": "2024-03-20T14:23:45.123Z",
-                        "lat": 45.5231,
-                        "lon": -122.6765,
-                        "elevation": 1200.5,
-                        "speed": 32.4
-                    }
-                ],
-                "metadata": {
-                    "duration": 3600,
-                    "distance": 50000,
-                    "avg_speed": 45.5,
-                    "max_speed": 65.3,
-                    "max_altitude": 1500.0,
-                    "total_points": 3600,
-                    "start_time": "2024-03-20T14:23:45.123Z"
-                }
-            }
-        }
