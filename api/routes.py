@@ -266,7 +266,7 @@ async def get_flight_points(
     try:
         # Get flight from database
         flight = db.query(Flight).filter(
-            Flight.flight_id == flight_id,
+            Flight.flight_id == flight_id.rstrip('\t|'),
             Flight.source == collection_type
         ).first()
             
