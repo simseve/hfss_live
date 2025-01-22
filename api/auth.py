@@ -1,13 +1,19 @@
-from fastapi import Depends, HTTPException, Security
+from fastapi import Depends, HTTPException, Security, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from datetime import datetime, timezone, timedelta
 import jwt
-from typing import Dict
+from typing import Dict, Optional
 import logging
+from config import settings
+from fastapi.security import APIKeyQuery
+
 
 logger = logging.getLogger(__name__)
 
 security = HTTPBearer()
+
+# Create query parameter security scheme
+api_key_query = APIKeyQuery(name="token", auto_error=True)
 
 
 def create_tracking_token(
@@ -36,45 +42,57 @@ def create_tracking_token(
     return token
 
 
-
 class TokenVerifier:
-    def __init__(self, secret_key: str = "your-secret-key"):  # Get from environment variables in production
+    def __init__(self, secret_key: str = settings.SECRET_KEY):
         self.secret_key = secret_key
+        self.algorithm = settings.ALGORITHM
 
-    async def __call__(
-        self, 
-        credentials: HTTPAuthorizationCredentials = Security(security)
-    ) -> Dict:
-        """
-        Verify JWT token and return decoded payload
-        
-        Expected token payload structure:
-        {
-            "pilot_id": "123",
-            "race_id": "456",
-            "exp": 1234567890  # Expiration timestamp
-        }
-        """
+    async def __call__(self, token: str = Security(api_key_query)) -> Dict:
+        """Make the class callable as a dependency"""
+        return await self.verify_token(token)
+
+    async def verify_token(self, token: str) -> Dict:
+        """Verify a raw token string"""
         try:
-            token = credentials.credentials
             payload = jwt.decode(
                 token,
                 self.secret_key,
-                algorithms=["HS256"]
+                algorithms=[self.algorithm]
             )
 
-            # Verify required claims
-            if not all(k in payload for k in ["pilot_id", "race_id"]):
+            # Check for all required fields
+            required_fields = [
+                "pilot_id", 
+                "race_id", 
+                "pilot_name",
+                "exp",
+                "race",
+                "endpoints"
+            ]
+            
+            if not all(k in payload for k in required_fields):
                 raise HTTPException(
                     status_code=401,
                     detail="Invalid token payload structure"
                 )
 
-            return {
-                "pilot_id": payload["pilot_id"],
-                "race_id": payload["race_id"]
-            }
+            # Validate nested structures
+            race_fields = ["name", "date", "timezone", "location", "end_date"]
+            if not all(k in payload["race"] for k in race_fields):
+                raise HTTPException(
+                    status_code=401,
+                    detail="Invalid race data structure in token"
+                )
 
+            endpoint_fields = ["live", "upload"]
+            if not all(k in payload["endpoints"] for k in endpoint_fields):
+                raise HTTPException(
+                    status_code=401,
+                    detail="Invalid endpoints structure in token"
+                )
+
+            return payload
+            
         except jwt.ExpiredSignatureError:
             raise HTTPException(
                 status_code=401,
@@ -85,12 +103,6 @@ class TokenVerifier:
             raise HTTPException(
                 status_code=401,
                 detail="Invalid token"
-            )
-        except Exception as e:
-            logger.error(f"Unexpected error during token verification: {str(e)}")
-            raise HTTPException(
-                status_code=401,
-                detail="Token verification failed"
             )
 
 # Create dependency

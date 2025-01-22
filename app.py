@@ -57,11 +57,8 @@ app.add_middleware(
 )
 
 
-app.include_router(routes.router, tags=['Tracking'], prefix='/api/v1')
-# app.include_router(cards.router, tags=['Cards'], prefix='/api/v1')
-# app.include_router(users.router, tags=['Users'], prefix='/api/v1')
-# app.include_router(xcontest.router, tags=['Xcontest'], prefix='/api/v1')
-# app.include_router(utils.router, tags=['Utils'], prefix='/api/v1')
+app.include_router(routes.router, tags=['Tracking'], prefix='/tracking')
+
 
 # Attach the rate limiter as a middleware
 app.state.limiter = rate_limiter
@@ -76,11 +73,10 @@ def root():
     now = datetime.datetime.now()
     uptime = now - system_startup_time
     response = {
-        'message': 'Service up and running',
+        'status': 'healthy',
         'system_startup_time': system_startup_time,
         'current_time': now,
         'uptime': str(uptime),
-        'status': 'healthy'
     }
     logger.info(f"Healthcheck requested on {now}")
     return response
