@@ -1,0 +1,17 @@
+SQLAlchemy
+psycopg2-binary
+fastapi
+uvicorn
+alembic
+pydantic
+pydantic_settings
+requests
+pytest
+httpx
+limits
+pandas
+jinja2
+bcrypt
+minio
+pytz
+slowapi
