@@ -34,9 +34,19 @@ logger = logging.getLogger(__name__)
 
 
 origins = [
-    "http://hikeandfly.app",
-    "http://0.0.0.0"
+    "https://hikeandfly.app",
+    "https://api.hikeandfly.app",
+    "http://localhost:3000",  # For local development
 ]
+
+# Update CORS configuration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],  # Explicitly list allowed methods
+    allow_headers=["*"],
+)
 
 
 @app.middleware("http")
@@ -47,14 +57,6 @@ async def log_request(request: Request, call_next):
     return response
 
 
-# CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 app.include_router(routes.router, tags=['Tracking'], prefix='/tracking')

@@ -1,21 +1,33 @@
 {
-    "version": "0.2.0",
-    "configurations": [
-        {
-            "name": "Python Debugger: FastAPI",
-            "type": "debugpy",
-            "request": "launch",
-            "module": "uvicorn",
-            "args": [
-                "app:app",
-                "--reload"
-            ],
-            "jinja": true,
-            "justMyCode": true,  // Add this
-            "cwd": "${workspaceFolder}",  // Add this
-            "env": {
-                "PYTHONPATH": "${workspaceFolder}"  // Add this
-            }
-        }
-    ]
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Python Debugger: FastAPI",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "uvicorn",
+      "args": ["app:app", "--reload"],
+      "jinja": true,
+      "justMyCode": true,
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      }
+    },
+    {
+      "name": "Docker: Python - Fastapi",
+      "type": "docker",
+      "request": "launch",
+      "preLaunchTask": "docker-run: debug",
+      "python": {
+        "pathMappings": [
+          {
+            "localRoot": "${workspaceFolder}",
+            "remoteRoot": "/app"
+          }
+        ],
+        "projectType": "fastapi"
+      }
+    }
+  ]
 }
