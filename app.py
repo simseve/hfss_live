@@ -37,13 +37,14 @@ origins = [
     "https://hikeandfly.app",
     "https://api.hikeandfly.app",
     "http://localhost:3000",  # For local development
+    "*"
 ]
 
 # Update CORS configuration
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],  # Explicitly list allowed methods
     allow_headers=["*"],
 )
