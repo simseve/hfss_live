@@ -15,3 +15,7 @@ bcrypt
 minio
 pytz
 slowapi
+python-jose[cryptography] 
+python-multipart 
+python-dotenv
+PyJWT

@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     BUCKET_ACCESS: str
     BUCKET_SECRET: str
     BUCKET_NAME: str
+    HFSS_SERVER: str
 
 
 

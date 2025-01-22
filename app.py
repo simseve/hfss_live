@@ -13,6 +13,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi import FastAPI
 from fastapi.security import HTTPBasic
+import api.routes as routes
 
 app = FastAPI()
 
@@ -56,7 +57,7 @@ app.add_middleware(
 )
 
 
-# app.include_router(crudc.router, tags=['CRUD'], prefix='/api/v1')
+app.include_router(routes.router, tags=['Tracking'], prefix='/api/v1')
 # app.include_router(cards.router, tags=['Cards'], prefix='/api/v1')
 # app.include_router(users.router, tags=['Users'], prefix='/api/v1')
 # app.include_router(xcontest.router, tags=['Xcontest'], prefix='/api/v1')
