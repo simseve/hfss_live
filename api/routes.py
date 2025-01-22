@@ -9,14 +9,12 @@ import logging
 from datetime import datetime, timezone
 from api.auth import verify_tracking_token
 from datetime import datetime
-from sqlalchemy.exc import SQLAlchemyError  # Add this import
-
+from sqlalchemy.exc import SQLAlchemyError  
+from uuid import uuid4  
 
 logger = logging.getLogger(__name__)
 
-
 router = APIRouter()
-
 
 @router.post("/live", status_code=202)
 async def live_tracking(
@@ -127,10 +125,20 @@ async def upload_track(
         race_id = token_data['race_id']
 
         if not upload_data.track_points:
-            raise HTTPException(status_code=400, detail="No track points provided")
+            logger.info(f"Received empty track upload from pilot {pilot_id} - discarding")
+            return Flight(
+                id=uuid4(),  # Generate a new UUID
+                flight_id=upload_data.flight_id,
+                pilot_id=pilot_id,
+                race_id=race_id,
+                source='upload',
+                created_at=datetime.now(timezone.utc),
+                flight_metadata=upload_data.metadata.model_dump(exclude_none=True)
+            )
 
         logger.info(f"Received track upload from pilot {pilot_id} for race {race_id}")
         logger.info(f"Total points: {len(upload_data.track_points)}")
+
 
 
         try:
