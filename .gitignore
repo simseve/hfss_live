@@ -1,0 +1,64 @@
+# Environment variables and secrets
+.env
+.env.local
+.env.*
+
+# Dependencies
+/node_modules
+/vendor
+/.pnp
+.pnp.js
+
+# Build outputs
+/dist
+/build
+/out
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Testing
+/coverage
+.nyc_output
+
+# Cache directories
+.npm
+.eslintcache
+.cache
+.parcel-cache
+
+# Optional: Python specific
+__pycache__/
+*.py[cod]
+*.so
+.Python
+env/
+venv/
+ENV/
+.pytest_cache/
+
+# Optional: Java specific
+*.class
+*.jar
+target/
+.gradle/
+
+# Optional: Operating System
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
