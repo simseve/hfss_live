@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Float, DateTime, MetaData, CHAR, BigInteger, Index, Integer, JSON, ForeignKey
+from sqlalchemy import Column, String, Float, DateTime, MetaData, CHAR, BigInteger, Index, Integer, JSON, ForeignKey, UniqueConstraint
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import UUID
@@ -51,7 +51,7 @@ class LiveTrackPoint(Base):
     
     __table_args__ = (
         Index('idx_live_track_points_datetime_flight', 'datetime', 'flight_uuid'),
-        Index('idx_unique_track_point', 'flight_id', 'lat', 'lon', 'datetime', unique=True),
+        UniqueConstraint('flight_id', 'lat', 'lon', 'datetime', name='live_track_points_unique_parent'),
 
     )
     
@@ -73,8 +73,7 @@ class UploadedTrackPoint(Base):
     
     __table_args__ = (
         Index('idx_uploaded_track_points_datetime_flight', 'datetime', 'flight_uuid'),
-        Index('idx_unique_uploaded_track_point', 'flight_id', 'lat', 'lon', 'datetime', unique=True),
-    )
+        UniqueConstraint('flight_id', 'lat', 'lon', 'datetime', name='uploaded_track_points_unique_parent'),    )
     
     def __repr__(self):
         return f"<UploadedTrackPoint(id={self.id}, datetime={self.datetime}, flight_uuid={self.flight_uuid})>"
