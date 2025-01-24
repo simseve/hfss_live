@@ -11,6 +11,7 @@ from api.auth import verify_tracking_token
 from datetime import datetime
 from sqlalchemy.exc import SQLAlchemyError  
 from uuid import uuid4  
+from sqlalchemy.dialects.postgresql import insert
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +67,7 @@ async def live_tracking(
                     **LiveTrackPointCreate(
                         flight_id=data.flight_id,
                         flight_uuid=flight.id,
-                        datetime=point['datetime'],
+                        datetime=datetime.fromisoformat(point['datetime'].replace('Z', '+00:00')),  # Add timezone handling
                         lat=point['lat'],
                         lon=point['lon'],
                         elevation=point.get('elevation'),
@@ -78,7 +79,11 @@ async def live_tracking(
             logger.info(f"Saving {len(track_points)} track points for flight {data.flight_id}")
             
             try:
-                db.bulk_save_objects(track_points)
+                # Use insert().on_conflict_do_nothing() instead of bulk_save_objects
+                stmt = insert(LiveTrackPoint).on_conflict_do_nothing(
+                    index_elements=['flight_id', 'lat', 'lon', 'datetime']
+                )
+                db.execute(stmt, [vars(point) for point in track_points])
                 db.commit()
                 logger.info(f"Successfully saved track points for flight {data.flight_id}")
             except Exception as e:
@@ -188,7 +193,7 @@ async def upload_track(
                     UploadedTrackPoint(
                         flight_id=upload_data.flight_id,
                         flight_uuid=flight.id,
-                        datetime=datetime.fromisoformat(point['datetime'].replace('Z', '+00:00')),
+                        datetime=datetime.fromisoformat(point['datetime'].replace('Z', '+00:00')),  # Consistent timezone handling
                         lat=point['lat'],
                         lon=point['lon'],
                         elevation=point.get('elevation'),
@@ -198,7 +203,11 @@ async def upload_track(
                 ]
                 
                 try:
-                    db.bulk_save_objects(track_points_db)
+                    # Use insert().on_conflict_do_nothing() instead of bulk_save_objects
+                    stmt = insert(UploadedTrackPoint).on_conflict_do_nothing(
+                        index_elements=['flight_id', 'lat', 'lon', 'datetime']
+                    )
+                    db.execute(stmt, [vars(point) for point in track_points_db])
                     db.commit()
                     logger.info(f"Successfully processed upload for flight {upload_data.flight_id}")
                     return flight

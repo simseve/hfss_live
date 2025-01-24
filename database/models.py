@@ -51,6 +51,8 @@ class LiveTrackPoint(Base):
     
     __table_args__ = (
         Index('idx_live_track_points_datetime_flight', 'datetime', 'flight_uuid'),
+        Index('idx_unique_track_point', 'flight_id', 'lat', 'lon', 'datetime', unique=True),
+
     )
     
     def __repr__(self):
@@ -62,7 +64,7 @@ class UploadedTrackPoint(Base):
     
     datetime = Column(DateTime(timezone=True), primary_key=True, nullable=False)
     id = Column(BigInteger, primary_key=True, autoincrement=True)
-    flight_uuid = Column(UUID(as_uuid=True), ForeignKey('flights.id'), nullable=False)  # Changed from flight_id
+    flight_uuid = Column(UUID(as_uuid=True), ForeignKey('flights.id'), nullable=False)  
     flight_id = Column(CHAR(100), nullable=False)
     lat = Column(Float(precision=53), nullable=False)
     lon = Column(Float(precision=53), nullable=False)
@@ -71,6 +73,7 @@ class UploadedTrackPoint(Base):
     
     __table_args__ = (
         Index('idx_uploaded_track_points_datetime_flight', 'datetime', 'flight_uuid'),
+        Index('idx_unique_uploaded_track_point', 'flight_id', 'lat', 'lon', 'datetime', unique=True),
     )
     
     def __repr__(self):

@@ -15,6 +15,12 @@ GRANT ALL PRIVILEGES ON TABLE flights TO py_ll_user;```
 ```GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO py_ll_user;
 GRANT USAGE ON SCHEMA public TO py_ll_user;```
 
+-- DELETE ALL
+DELETE FROM public.live_track_points;
+DELETE FROM public.upload_track_points;
+DELETE FROM public.flights;
+
+
 
 ## Working with Alembic
 Run `alembic init alembic`
