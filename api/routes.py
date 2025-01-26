@@ -15,7 +15,8 @@ from datetime import datetime, timezone, timedelta
 import jwt
 from config import settings
 from math import radians, sin, cos, sqrt, atan2
-
+from uuid import UUID
+from sqlalchemy import func  # Add this at the top with other imports
 
 logger = logging.getLogger(__name__)
 
@@ -531,13 +532,12 @@ async def delete_track(
             detail=f"Failed to delete track: {str(e)}"
         )
         
-        
-@router.get("/live/points/{flight_id}")
+
+@router.get("/live/points/{flight_uuid}")
 async def get_live_points(
-    flight_id: str,
+    flight_uuid: UUID,
     credentials: HTTPAuthorizationCredentials = Security(security),
-    token_data: Dict = Depends(verify_tracking_token),
-    last_fix_time: Optional[datetime] = Query(None, description="Only return points after this time"),
+    last_fix_dt: Optional[str] = Query(None, description="Only return points after this time (ISO 8601 format, e.g. 2025-01-25T06:00:00Z)"),
     db: Session = Depends(get_db)
 ):
     """
@@ -546,11 +546,45 @@ async def get_live_points(
     Returns points with 1-second sampling and optional barometric altitude.
     """
     try:
-        # Get token from Authorization header
-        # token = credentials.credentials  # This extracts the token from "Bearer {token}"
+        # Get token from Authorization header and verify it
+        token = credentials.credentials
+        try:
+            token_data = jwt.decode(
+                token,
+                settings.SECRET_KEY,
+                algorithms=["HS256"],
+                audience="api.hikeandfly.app",
+                issuer="hikeandfly.app",
+                verify=True
+            )
+            
+            if not token_data.get("sub", "").startswith("contest:"):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Invalid token subject - must be contest-specific"
+                )
+            
+            race_id = token_data["sub"].split(":")[1]
+            
+        except jwt.ExpiredSignatureError:
+            raise HTTPException(
+                status_code=401,
+                detail="Token has expired"
+            )
+        except jwt.JWTError as e:
+            raise HTTPException(
+                status_code=401,
+                detail=f"Invalid token: {str(e)}"
+            )
+            
+        # Convert last_fix_time if provided
+        last_fix_datetime = None
+        if last_fix_dt:
+            last_fix_datetime = datetime.fromisoformat(last_fix_dt.replace('Z', '+00:00'))
+
         # Get flight from database
         flight = db.query(Flight).filter(
-            Flight.flight_id == flight_id.rstrip('\t|'),
+            Flight.id == flight_uuid,
             Flight.source == 'live'
         ).first()
             
@@ -560,29 +594,40 @@ async def get_live_points(
                 detail="Flight not found in live collection"
             )
 
-        # Verify pilot has access to this flight
-        pilot_id = token_data['pilot_id']
-        race_id = token_data['race_id']
         
-        if flight.pilot_id != pilot_id or flight.race_id != race_id:
-            raise HTTPException(
-                status_code=403,
-                detail="Not authorized to access this flight"
-            )
-        
-        # Convert last_fix_time if provided
-        last_fix_datetime = None
-        if last_fix_time:
-            last_fix_datetime = datetime.fromisoformat(last_fix_time.replace('Z', '+00:00'))
-        
-        # Build query for track points
-        if last_fix_datetime:
-            query = query.filter(LiveTrackPoint.datetime > last_fix_datetime)
+        if last_fix_dt:
+            last_fix_datetime = datetime.fromisoformat(last_fix_dt.replace('Z', '+00:00')).astimezone(timezone.utc)
 
-        
-        track_points = query.order_by(LiveTrackPoint.datetime).all()
+            # Get all points for this flight and log each comparison
+            all_points = db.query(LiveTrackPoint).filter(
+                LiveTrackPoint.flight_uuid == flight_uuid
+            ).order_by(LiveTrackPoint.datetime).all()
+            
+            for point in all_points:
+                # Ensure point datetime is timezone-aware
+                point_dt = point.datetime
+                if point_dt.tzinfo is None:
+                    point_dt = point_dt.replace(tzinfo=timezone.utc)
+
+            # Now apply the filter - ensure both sides of comparison are timezone-aware
+            query = db.query(LiveTrackPoint).filter(
+                LiveTrackPoint.flight_uuid == flight_uuid,
+                func.timezone('UTC', LiveTrackPoint.datetime) >= last_fix_datetime
+            ).order_by(LiveTrackPoint.datetime)
+            
+
+            
+        track_points = query.all()
+        if len(track_points) == 0:
+            # Log a few sample points around the filter time
+            sample_points = db.query(LiveTrackPoint).filter(
+                LiveTrackPoint.flight_uuid == flight_uuid
+            ).order_by(LiveTrackPoint.datetime).limit(5).all()
+            for point in sample_points:
+                logger.info(f"  {point.datetime} | lat: {point.lat}, lon: {point.lon}")
         
         if not track_points:
+            logger.warning(f"No track points found for flight_uuid: {flight_uuid}")
             return {
                 "type": "Feature",
                 "geometry": {
@@ -656,8 +701,6 @@ async def get_live_points(
 async def get_uploaded_points(
     flight_id: str,
     credentials: HTTPAuthorizationCredentials = Security(security),
-    token_data: Dict = Depends(verify_tracking_token),
-    last_fix_time: Optional[str] = Query(None, description="Only return points after this time (ISO 8601 format, e.g. 2025-01-25T06:00:00Z)"),
     db: Session = Depends(get_db)
 ):
     """
@@ -666,13 +709,38 @@ async def get_uploaded_points(
     Returns points with 1-second sampling and optional barometric altitude.
     """
     try:
-        # Convert last_fix_time if provided
-        last_fix_datetime = None
-        if last_fix_time:
-            last_fix_datetime = datetime.fromisoformat(last_fix_time.replace('Z', '+00:00'))
+        # Get token from Authorization header and verify it
+        token = credentials.credentials
+        try:
+            token_data = jwt.decode(
+                token,
+                settings.SECRET_KEY,
+                algorithms=["HS256"],
+                audience="api.hikeandfly.app",
+                issuer="hikeandfly.app",
+                verify=True
+            )
+            
+            if not token_data.get("sub", "").startswith("contest:"):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Invalid token subject - must be contest-specific"
+                )
+            
+        except jwt.ExpiredSignatureError:
+            raise HTTPException(
+                status_code=401,
+                detail="Token has expired"
+            )
+        except jwt.JWTError as e:
+            raise HTTPException(
+                status_code=401,
+                detail=f"Invalid token: {str(e)}"
+            )
 
+        # Get flight from database
         flight = db.query(Flight).filter(
-            Flight.flight_id == flight_id.rstrip('\t|'),
+            Flight.flight_id == flight_id,
             Flight.source == 'upload'
         ).first()
             
@@ -682,27 +750,13 @@ async def get_uploaded_points(
                 detail="Flight not found in upload collection"
             )
 
-        # Verify pilot has access to this flight
-        pilot_id = token_data['pilot_id']
-        race_id = token_data['race_id']
-        
-        if flight.pilot_id != pilot_id or flight.race_id != race_id:
-            raise HTTPException(
-                status_code=403,
-                detail="Not authorized to access this flight"
-            )
-        
-        # Build query for track points
-        query = db.query(UploadedTrackPoint).filter(
+        # Get all track points for this flight
+        track_points = db.query(UploadedTrackPoint).filter(
             UploadedTrackPoint.flight_id == flight_id
-        )
-
-        if last_fix_datetime:
-            query = query.filter(UploadedTrackPoint.datetime > last_fix_datetime)
-
-        track_points = query.order_by(UploadedTrackPoint.datetime).all()
+        ).order_by(UploadedTrackPoint.datetime).all()
         
         if not track_points:
+            logger.warning(f"No track points found for flight_id: {flight_id}")
             return {
                 "type": "Feature",
                 "geometry": {
@@ -723,21 +777,24 @@ async def get_uploaded_points(
         for point in track_points:
             current_time = point.datetime
             
+            # Basic coordinate array with required fields
             coordinate = [
-                float(point.lon),
-                float(point.lat),
-                int(point.elevation or 0)
+                float(point.lon),  # x/longitude
+                float(point.lat),  # y/latitude
+                int(point.elevation or 0)  # z/gps altitude
             ]
             
             if is_first_point:
+                # Only the very first point gets dt: 0
                 extra_data = {"dt": 0}
                 if hasattr(point, 'baro_altitude') and point.baro_altitude is not None:
                     extra_data["b"] = int(point.baro_altitude)
                 coordinate.append(extra_data)
                 is_first_point = False
             elif last_time is not None:
+                # Calculate time delta for subsequent points
                 dt = int((current_time - last_time).total_seconds())
-                if dt != 1:
+                if dt != 1:  # Only add dt if not 1 second
                     extra_data = {"dt": dt}
                     if hasattr(point, 'baro_altitude') and point.baro_altitude is not None:
                         extra_data["b"] = int(point.baro_altitude)
@@ -767,7 +824,7 @@ async def get_uploaded_points(
             status_code=500,
             detail=f"Failed to retrieve flight points: {str(e)}"
         )
-        
+
         
         
 def determine_if_landed(point) -> bool:
@@ -809,14 +866,14 @@ async def get_live_users(
     Requires JWT bearer token for authentication.
     """
     try:
-        # Convert ISO string to datetime
-        opentime_dt = datetime.fromisoformat(opentime.replace('Z', '+00:00'))
+        # Convert ISO string to datetime and strip any whitespace
+        opentime_dt = datetime.fromisoformat(opentime.strip().replace('Z', '+00:00'))
         
         # Set default closetime if not provided, otherwise convert from ISO
         if not closetime:
             closetime_dt = datetime.now(timezone.utc) + timedelta(hours=24)
         else:
-            closetime_dt = datetime.fromisoformat(closetime.replace('Z', '+00:00'))
+            closetime_dt = datetime.fromisoformat(closetime.strip().replace('Z', '+00:00'))
 
 
         # Validate JWT token
@@ -827,7 +884,8 @@ async def get_live_users(
                 settings.SECRET_KEY,
                 algorithms=["HS256"],
                 audience="api.hikeandfly.app",
-                issuer="hikeandfly.app"
+                issuer="hikeandfly.app",
+                verify=True
             )
             
             if not payload.get("sub", "").startswith("contest:"):
@@ -863,38 +921,36 @@ async def get_live_users(
             flights = flights.filter(Flight.source == source)
             
         flights = flights.all()
+        # Structure the response
 
         # Structure the response
         response = {
             "pilots": {}
         }
 
+        # First pass: Group flights by pilot and find most recent live fix
+        pilot_latest_fixes = {}  # Store the most recent live fix for each pilot
+        
+        for flight in flights:
+            pilot_id = str(flight.pilot_id)
+            # Only consider live flights for lastLoc
+            if flight.source == 'live':
+                current_fix_time = datetime.fromisoformat(flight.last_fix['datetime'].replace('Z', '+00:00'))
+                
+                if pilot_id not in pilot_latest_fixes or \
+                   current_fix_time > datetime.fromisoformat(pilot_latest_fixes[pilot_id]['datetime'].replace('Z', '+00:00')):
+                    pilot_latest_fixes[pilot_id] = {
+                        'fix': flight.last_fix,
+                        'datetime': flight.last_fix['datetime'],
+                        'pilot_name': flight.pilot_name
+                    }
+
+        # Second pass: Build response
+
         for flight in flights:
             pilot_id = str(flight.pilot_id)
             
-            # Add user info if not already present
-            if pilot_id not in response["users"]:
-                response["users"][pilot_id] = {
-                    "fullname": flight.pilot_name,
-                    "lastLoc": {
-                        "type": "Feature",
-                        "geometry": {
-                            "type": "Point",
-                            "coordinates": [
-                                flight.last_fix['lon'],
-                                flight.last_fix['lat'],
-                                flight.last_fix.get('elevation', 0)
-                            ]
-                        },
-                        "properties": {
-                            "source": flight.source,
-                            "landed": determine_if_landed(flight.last_fix)
-                        }
-                    },
-                    "flights": []  # Initialize empty flights array for each user
-                }
-
-            # Add flight info under the user's flights array
+            # Create flight_info dictionary
             flight_info = {
                 "uuid": str(flight.id),
                 "firstFix": [
@@ -915,11 +971,36 @@ async def get_live_users(
                 "source": flight.source,
                 "landed": determine_if_landed(flight.last_fix),
                 "clientId": "mobile",
-                "simulation": False,
                 "glider": "unknown"
             }
             
-            response["users"][pilot_id]["flights"].append(flight_info)
+            # Add lastLoc only for live flights
+            if flight.source == 'live':
+                flight_info["lastLoc"] = {
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "Point",
+                        "coordinates": [
+                            flight.last_fix['lon'],
+                            flight.last_fix['lat'],
+                            flight.last_fix.get('elevation', 0)
+                        ]
+                    },
+                    "properties": {
+                        "source": "live",
+                        "landed": determine_if_landed(flight.last_fix)
+                    }
+                }
+            
+            # Add pilot info if not already present
+            if pilot_id not in response["pilots"]:
+                response["pilots"][pilot_id] = {
+                    "fullname": flight.pilot_name,
+                    "flights": []
+                }
+
+            response["pilots"][pilot_id]["flights"].append(flight_info)
+
 
         return response
 
