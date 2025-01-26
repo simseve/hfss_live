@@ -610,7 +610,7 @@ async def get_live_points(
 
         # Apply the time filter and order the results
         query = query.filter(
-            func.timezone('UTC', LiveTrackPoint.datetime) >= filter_time
+            func.timezone('UTC', LiveTrackPoint.datetime) > filter_time
         ).order_by(LiveTrackPoint.datetime)
 
         track_points = query.all()
