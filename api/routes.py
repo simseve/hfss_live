@@ -546,15 +546,16 @@ async def get_live_points(
                 detail="Not authorized to access this flight"
             )
         
-        # Build query for track points
-        query = db.query(LiveTrackPoint).filter(
-            LiveTrackPoint.flight_id == flight_id
-        )
-
+        # Convert last_fix_time if provided
+        last_fix_datetime = None
         if last_fix_time:
-            query = query.filter(LiveTrackPoint.datetime > last_fix_time)
+            last_fix_datetime = datetime.fromisoformat(last_fix_time.replace('Z', '+00:00'))
         
+        # Build query for track points
+        if last_fix_datetime:
+            query = query.filter(LiveTrackPoint.datetime > last_fix_datetime)
 
+        
         track_points = query.order_by(LiveTrackPoint.datetime).all()
         
         if not track_points:
@@ -626,7 +627,125 @@ async def get_live_points(
             detail=f"Failed to retrieve flight points: {str(e)}"
         )
     
-    
+
+@router.get("/upload/points/{flight_id}")
+async def get_uploaded_points(
+    flight_id: str,
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    token_data: Dict = Depends(verify_tracking_token),
+    last_fix_time: Optional[str] = Query(None, description="Only return points after this time (ISO 8601 format, e.g. 2025-01-25T06:00:00Z)"),
+    db: Session = Depends(get_db)
+):
+    """
+    Get all uploaded track points for a specific flight in GeoJSON format.
+    Requires JWT token in Authorization header (Bearer token).
+    Returns points with 1-second sampling and optional barometric altitude.
+    """
+    try:
+        # Convert last_fix_time if provided
+        last_fix_datetime = None
+        if last_fix_time:
+            last_fix_datetime = datetime.fromisoformat(last_fix_time.replace('Z', '+00:00'))
+
+        flight = db.query(Flight).filter(
+            Flight.flight_id == flight_id.rstrip('\t|'),
+            Flight.source == 'upload'
+        ).first()
+            
+        if not flight:
+            raise HTTPException(
+                status_code=404,
+                detail="Flight not found in upload collection"
+            )
+
+        # Verify pilot has access to this flight
+        pilot_id = token_data['pilot_id']
+        race_id = token_data['race_id']
+        
+        if flight.pilot_id != pilot_id or flight.race_id != race_id:
+            raise HTTPException(
+                status_code=403,
+                detail="Not authorized to access this flight"
+            )
+        
+        # Build query for track points
+        query = db.query(UploadedTrackPoint).filter(
+            UploadedTrackPoint.flight_id == flight_id
+        )
+
+        if last_fix_datetime:
+            query = query.filter(UploadedTrackPoint.datetime > last_fix_datetime)
+
+        track_points = query.order_by(UploadedTrackPoint.datetime).all()
+        
+        if not track_points:
+            return {
+                "type": "Feature",
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": []
+                },
+                "properties": {
+                    "uuid": str(flight.id),
+                    "firstFixTime": None,
+                    "lastFixTime": None
+                }
+            }
+
+        coordinates = []
+        last_time = None
+        is_first_point = True
+        
+        for point in track_points:
+            current_time = point.datetime
+            
+            coordinate = [
+                float(point.lon),
+                float(point.lat),
+                int(point.elevation or 0)
+            ]
+            
+            if is_first_point:
+                extra_data = {"dt": 0}
+                if hasattr(point, 'baro_altitude') and point.baro_altitude is not None:
+                    extra_data["b"] = int(point.baro_altitude)
+                coordinate.append(extra_data)
+                is_first_point = False
+            elif last_time is not None:
+                dt = int((current_time - last_time).total_seconds())
+                if dt != 1:
+                    extra_data = {"dt": dt}
+                    if hasattr(point, 'baro_altitude') and point.baro_altitude is not None:
+                        extra_data["b"] = int(point.baro_altitude)
+                    coordinate.append(extra_data)
+            
+            coordinates.append(coordinate)
+            last_time = current_time
+
+        return {
+            "type": "Feature",
+            "geometry": {
+                "type": "LineString",
+                "coordinates": coordinates
+            },
+            "properties": {
+                "uuid": str(flight.id),
+                "firstFixTime": track_points[0].datetime.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "lastFixTime": track_points[-1].datetime.strftime("%Y-%m-%dT%H:%M:%SZ")
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving flight points: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve flight points: {str(e)}"
+        )
+        
+        
+        
 def determine_if_landed(point) -> bool:
     """Determine if a pilot has landed based on track point data"""
     # Implement your landing detection logic here
@@ -655,8 +774,8 @@ def get_first_fix(db: Session, flight_id: str) -> list:
 
 @router.get("/live/users")
 async def get_live_users(
-    opentime: datetime = Query(..., description="Start time for tracking window"),
-    closetime: Optional[datetime] = Query(None, description="End time for tracking window"),
+    opentime: str = Query(..., description="Start time for tracking window (ISO 8601 format, e.g. 2025-01-25T06:00:00Z)"),
+    closetime: Optional[str] = Query(None, description="End time for tracking window (ISO 8601 format, e.g. 2025-01-25T06:00:00Z)"),
     source: Optional[str] = Query(None, regex="^(live|upload)$"),
     credentials: HTTPAuthorizationCredentials = Security(security),
     db: Session = Depends(get_db)
@@ -666,9 +785,15 @@ async def get_live_users(
     Requires JWT bearer token for authentication.
     """
     try:
-        # Set default closetime if not provided
+        # Convert ISO string to datetime
+        opentime_dt = datetime.fromisoformat(opentime.replace('Z', '+00:00'))
+        
+        # Set default closetime if not provided, otherwise convert from ISO
         if not closetime:
-            closetime = datetime.now(timezone.utc) + timedelta(hours=24)
+            closetime_dt = datetime.now(timezone.utc) + timedelta(hours=24)
+        else:
+            closetime_dt = datetime.fromisoformat(closetime.replace('Z', '+00:00'))
+
 
         # Validate JWT token
         token = credentials.credentials
@@ -705,8 +830,8 @@ async def get_live_users(
             db.query(Flight)
             .filter(
                 Flight.race_id == race_id,
-                Flight.created_at >= opentime,
-                Flight.created_at <= closetime
+                Flight.created_at >= opentime_dt,
+                Flight.created_at <= closetime_dt
             )
         )
         
@@ -717,8 +842,7 @@ async def get_live_users(
 
         # Structure the response
         response = {
-            "users": {},
-            "flights": []
+            "pilots": {}
         }
 
         for flight in flights:
@@ -742,10 +866,11 @@ async def get_live_users(
                             "source": flight.source,
                             "landed": determine_if_landed(flight.last_fix)
                         }
-                    }
+                    },
+                    "flights": []  # Initialize empty flights array for each user
                 }
 
-            # Add flight info
+            # Add flight info under the user's flights array
             flight_info = {
                 "uuid": str(flight.id),
                 "firstFix": [
@@ -770,7 +895,7 @@ async def get_live_users(
                 "glider": "unknown"
             }
             
-            response["flights"].append(flight_info)
+            response["users"][pilot_id]["flights"].append(flight_info)
 
         return response
 

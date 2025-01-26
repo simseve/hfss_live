@@ -19,6 +19,7 @@ GRANT USAGE ON SCHEMA public TO py_ll_user;```
 DELETE FROM public.live_track_points;
 DELETE FROM public.uploaded_track_points;
 DELETE FROM public.flights;
+DELETE FROM public.races;
 
 
 
