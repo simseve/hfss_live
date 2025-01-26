@@ -17,7 +17,7 @@ GRANT USAGE ON SCHEMA public TO py_ll_user;```
 
 -- DELETE ALL
 DELETE FROM public.live_track_points;
-DELETE FROM public.upload_track_points;
+DELETE FROM public.uploaded_track_points;
 DELETE FROM public.flights;
 
 
@@ -26,3 +26,9 @@ DELETE FROM public.flights;
 Run `alembic init alembic`
 Then `alembic revision -m "description of the migration" --autogenerate`
 Finally `alembic upgrade head`
+
+
+For logging
+
+npx react-native log-android
+

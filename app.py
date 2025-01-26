@@ -23,7 +23,6 @@ router = APIRouter()
 
 security = HTTPBasic()
 
-
 session_id_run = str(uuid.uuid4())
 
 # Initialize logging at the start of your application

@@ -12,46 +12,13 @@ logger = logging.getLogger(__name__)
 
 security = HTTPBearer()
 
-# Create query parameter security scheme
-api_key_query = APIKeyQuery(name="token", auto_error=True)
-
-
-def create_tracking_token(
-    pilot_id: str,
-    race_id: str,
-    secret_key: str = "your-secret-key",  # Get from environment variables in production
-    expiration_minutes: int = 60
-) -> str:
-    """
-    Create a JWT token for tracking authentication
-    """
-    expiration = datetime.now(timezone.utc) + timedelta(minutes=expiration_minutes)
-    
-    payload = {
-        "pilot_id": pilot_id,
-        "race_id": race_id,
-        "exp": expiration.timestamp()
-    }
-    
-    token = jwt.encode(
-        payload,
-        secret_key,
-        algorithm="HS256"
-    )
-    
-    return token
-
 
 class TokenVerifier:
-    def __init__(self, secret_key: str = settings.SECRET_KEY):
-        self.secret_key = secret_key
-        self.algorithm = settings.ALGORITHM
+    def __init__(self):
+        self.secret_key = settings.SECRET_KEY
+        self.algorithm = "HS256"
 
-    async def __call__(self, token: str = Security(api_key_query)) -> Dict:
-        """Make the class callable as a dependency"""
-        return await self.verify_token(token)
-
-    async def verify_token(self, token: str) -> Dict:
+    async def __call__(self, token: str) -> Dict:
         """Verify a raw token string"""
         try:
             payload = jwt.decode(
@@ -91,7 +58,24 @@ class TokenVerifier:
                     detail="Invalid endpoints structure in token"
                 )
 
-            return payload
+            # Return a validated payload with explicit field structure
+            return {
+                "pilot_id": payload["pilot_id"],
+                "race_id": payload["race_id"],
+                "pilot_name": payload["pilot_name"],
+                "exp": payload["exp"],
+                "race": {
+                    "name": payload["race"]["name"],
+                    "date": payload["race"]["date"],
+                    "timezone": payload["race"]["timezone"],
+                    "location": payload["race"]["location"],
+                    "end_date": payload["race"]["end_date"]
+                },
+                "endpoints": {
+                    "live": payload["endpoints"]["live"],
+                    "upload": payload["endpoints"]["upload"]
+                }
+            }
             
         except jwt.ExpiredSignatureError:
             raise HTTPException(

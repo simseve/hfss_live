@@ -3,6 +3,25 @@ from typing import Optional, Literal, Dict, Any, List
 from uuid import UUID
 from pydantic import BaseModel, Field
 
+class RaceBase(BaseModel):
+    race_id: str
+    name: str
+    date: datetime
+    end_date: datetime
+    timezone: str
+    location: str
+
+class RaceCreate(RaceBase):
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+class RaceResponse(RaceBase):
+    id: UUID
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+        
+        
 # Base schemas with common fields
 class TrackPointBase(BaseModel):
     flight_id: str  # Changed from flight_id
@@ -10,7 +29,6 @@ class TrackPointBase(BaseModel):
     lat: float
     lon: float
     elevation: Optional[float] = None
-    speed: Optional[float] = None
 
 
 class LiveTrackPointCreate(TrackPointBase):
@@ -32,14 +50,12 @@ class LiveTrackingRequest(BaseModel):
                         "lat": 45.5231,
                         "lon": -122.6765,
                         "elevation": 1200.5,
-                        "speed": 32.4,
                         "datetime": "2024-03-20T14:23:45.123Z"
                     },
                     {
                         "lat": 45.5233,
                         "lon": -122.6768,
                         "elevation": 1205.0,
-                        "speed": 33.1,
                         "datetime": "2024-03-20T14:23:46.123Z"
                     }
                 ]
@@ -66,13 +82,16 @@ class FlightBase(BaseModel):
     flight_id: str = Field(..., max_length=100)
     race_id: str
     pilot_id: str
+    pilot_name: str
     source: Literal['live', 'upload']
 
 class FlightCreate(FlightBase):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    first_fix: Optional[Dict[str, Any]] = None
+    last_fix: Optional[Dict[str, Any]] = None
+    total_points: Optional[int] = None
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
-    total_points: Optional[int] = None
     flight_metadata: Optional[Dict[str, Any]] = None
 
 class TrackMetadata(BaseModel):
@@ -87,10 +106,7 @@ class TrackUploadRequest(BaseModel):
     pilot_id: Optional[str] = None
     race_id: Optional[str] = None
     flight_id: str = Field(..., max_length=100)
-    start_time: datetime  # Added this field
-    duration: str  # Added this field
     track_points: List[Dict[str, Any]]
-    metadata: TrackMetadata
 
     class Config:
         json_schema_extra = {
@@ -98,15 +114,12 @@ class TrackUploadRequest(BaseModel):
                 "pilot_id": "pilot123",
                 "race_id": "race456",
                 "flight_id": "flight_123",
-                "start_time": "2024-03-20T14:23:45.123Z",
-                "duration": "00:00:04.521",
                 "track_points": [
                     {
                         "datetime": "2024-03-20T14:23:45.123Z",
                         "lat": 45.5231,
                         "lon": -122.6765,
-                        "elevation": 1200.5,
-                        "speed": 32.4
+                        "elevation": 1200.5
                     }
                 ],
                 "metadata": {
@@ -122,11 +135,16 @@ class TrackUploadRequest(BaseModel):
         
 class FlightResponse(FlightBase):
     id: UUID
+    race_uuid: UUID
     created_at: datetime
+    first_fix: Optional[Dict[str, Any]]
+    last_fix: Optional[Dict[str, Any]]
+    total_points: Optional[int]
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
-    total_points: Optional[int] = None
-    flight_metadata: Optional[Dict[str, Any]] = None  # Use Dict[str, Any] for more flexible JSON handling
+    flight_metadata: Optional[Dict[str, Any]] = None
+    race: RaceResponse
+
 
     class Config:
         from_attributes = True

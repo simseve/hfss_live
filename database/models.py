@@ -3,51 +3,75 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import UUID
 import uuid
-
+from datetime import datetime, timezone
 metadata = MetaData()
 Base = declarative_base(metadata=metadata)
 
 
+class Race(Base):
+    __tablename__ = 'races'
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, nullable=False, default=uuid.uuid4)
+    race_id = Column(String, nullable=False, unique=True)
+    name = Column(String, nullable=False)
+    date = Column(DateTime(timezone=False), nullable=False)
+    end_date = Column(DateTime(timezone=False), nullable=False)
+    timezone = Column(String, nullable=False)
+    location = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=False), nullable=False, default=lambda: datetime.now(timezone.utc))
+    
+    # Relationship with flights
+    flights = relationship("Flight", back_populates="race")
+    
+    __table_args__ = (
+        Index('idx_race_id', 'race_id'),
+    )
 
+    def __repr__(self):
+        return f"<Race(race_id={self.race_id}, name={self.name})>"
+    
+    
 class Flight(Base):
     __tablename__ = 'flights'
     
     id = Column(UUID(as_uuid=True), primary_key=True, nullable=False, default=uuid.uuid4)
     flight_id = Column(String, nullable=False)
+    race_uuid = Column(UUID(as_uuid=True), ForeignKey('races.id'), nullable=False)
     race_id = Column(String, nullable=False)
     pilot_id = Column(String, nullable=False)
-    created_at = Column(DateTime(timezone=True), nullable=False)
+    pilot_name = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=False), nullable=False, default=lambda: datetime.now(timezone.utc))
     source = Column(String, nullable=False)  # 'live' or 'upload'
     
-    # Metadata fields for uploaded flights
-    start_time = Column(DateTime(timezone=True))
-    end_time = Column(DateTime(timezone=True))
-    total_points = Column(Integer)
-    flight_metadata = Column(JSON)
-
-    live_track_points = relationship("LiveTrackPoint", backref="flight")
-    uploaded_track_points = relationship("UploadedTrackPoint", backref="flight")
+    # Tracking state
+    first_fix = Column(JSON, nullable=True)  # {lat, lon, elevation, datetime}
+    last_fix = Column(JSON, nullable=True)   # {lat, lon, elevation, datetime}
+    total_points = Column(Integer, default=0)
+    
+    # Relationships
+    race = relationship("Race", back_populates="flights")
+    live_track_points = relationship("LiveTrackPoint", backref="flight", cascade="all, delete-orphan")
+    uploaded_track_points = relationship("UploadedTrackPoint", backref="flight", cascade="all, delete-orphan")
     
     __table_args__ = (
         Index('idx_flight_ids', 'race_id', 'pilot_id'),
-        Index('uq_flight_id_source', 'flight_id', 'source', unique=True),
+        Index('idx_flight_source', 'flight_id', 'source', unique=True),
     )
-    
+
     def __repr__(self):
-        return f"<Flight(flight_id={self.flight_id}, source={self.source})>"
+        return f"<Flight(flight_id={self.flight_id}, pilot={self.pilot_name}, source={self.source})>"
     
     
 class LiveTrackPoint(Base):
     __tablename__ = 'live_track_points'
     
-    datetime = Column(DateTime(timezone=True), primary_key=True, nullable=False)
+    datetime = Column(DateTime(timezone=False), primary_key=True, nullable=False)
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     flight_uuid = Column(UUID(as_uuid=True), ForeignKey('flights.id'), nullable=False)  # Changed from flight_id
     flight_id = Column(String, nullable=False)
     lat = Column(Float(precision=53), nullable=False)
     lon = Column(Float(precision=53), nullable=False)
     elevation = Column(Float(precision=53))
-    speed = Column(Float(precision=53))
     
     __table_args__ = (
         Index('idx_live_track_points_datetime_flight', 'datetime', 'flight_uuid'),
@@ -62,14 +86,13 @@ class LiveTrackPoint(Base):
 class UploadedTrackPoint(Base):
     __tablename__ = 'uploaded_track_points'
     
-    datetime = Column(DateTime(timezone=True), primary_key=True, nullable=False)
+    datetime = Column(DateTime(timezone=False), primary_key=True, nullable=False)
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     flight_uuid = Column(UUID(as_uuid=True), ForeignKey('flights.id'), nullable=False)  
     flight_id = Column(CHAR(100), nullable=False)
     lat = Column(Float(precision=53), nullable=False)
     lon = Column(Float(precision=53), nullable=False)
     elevation = Column(Float(precision=53))
-    speed = Column(Float(precision=53))
     
     __table_args__ = (
         Index('idx_uploaded_track_points_datetime_flight', 'datetime', 'flight_uuid'),

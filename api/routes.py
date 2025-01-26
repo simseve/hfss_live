@@ -1,21 +1,26 @@
-from fastapi import APIRouter, Depends, HTTPException, Request, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Security
 from sqlalchemy.orm import Session
 from database.schemas import LiveTrackingRequest, LiveTrackPointCreate, FlightResponse, TrackUploadRequest
 from pydantic import ValidationError
-from database.models import UploadedTrackPoint, Flight, LiveTrackPoint
+from database.models import UploadedTrackPoint, Flight, LiveTrackPoint, Race
 from typing import List, Dict, Any, Optional
 from database.db_conf import get_db
 import logging
-from datetime import datetime, timezone
 from api.auth import verify_tracking_token
-from datetime import datetime
 from sqlalchemy.exc import SQLAlchemyError  
 from uuid import uuid4  
 from sqlalchemy.dialects.postgresql import insert
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from datetime import datetime, timezone, timedelta
+import jwt
+from config import settings
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+security = HTTPBearer()
+
 
 @router.post("/live", status_code=202)
 async def live_tracking(
@@ -24,81 +29,133 @@ async def live_tracking(
     token_data: Dict = Depends(verify_tracking_token),
     db: Session = Depends(get_db)
 ):
-    """Handle live tracking data updates from mobile devices"""
     try:
         pilot_id = token_data['pilot_id']
         race_id = token_data['race_id']
+        pilot_name = token_data['pilot_name']
+        race_data = token_data['race']
         
-        logger.info(f"Processing live tracking data for flight_id: {data.flight_id}")
-        
-        # Check if flight exists
-        try:
-            flight = db.query(Flight).filter(Flight.flight_id == data.flight_id).first()
-            
-            if not flight:
-                logger.info(f"Creating new flight record for flight_id: {data.flight_id}")
-                flight = Flight(
-                    flight_id=data.flight_id,
-                    pilot_id=pilot_id,
-                    race_id=race_id,
-                    created_at=datetime.now(timezone.utc),
-                    source='live',
-                )
-                db.add(flight)
-                try:
-                    db.commit()
-                    logger.info(f"Successfully created new flight record: {data.flight_id}")
-                except Exception as e:
-                    db.rollback()
-                    logger.error(f"Failed to commit new flight: {str(e)}")
-                    raise HTTPException(
-                        status_code=500,
-                        detail="Failed to create flight record"
-                    )
-            elif flight.pilot_id != pilot_id:
-                raise HTTPException(
-                    status_code=403,
-                    detail="Not authorized to update this flight"
-                )
-
-            # Convert track points using Pydantic model
-            track_points = [
-                LiveTrackPoint(
-                    **LiveTrackPointCreate(
-                        flight_id=data.flight_id,
-                        flight_uuid=flight.id,
-                        datetime=datetime.fromisoformat(point['datetime'].replace('Z', '+00:00')),  # Add timezone handling
-                        lat=point['lat'],
-                        lon=point['lon'],
-                        elevation=point.get('elevation'),
-                        speed=point.get('speed')
-                    ).model_dump()
-                ) for point in data.track_points
-            ]
-
-            logger.info(f"Saving {len(track_points)} track points for flight {data.flight_id}")
-            
+        # Check/create race record
+        race = db.query(Race).filter(Race.race_id == race_id).first()
+        if not race:
+            race = Race(
+                race_id=race_id,
+                name=race_data['name'],
+                date=datetime.fromisoformat(race_data['date']),
+                end_date=datetime.fromisoformat(race_data['end_date']),
+                timezone=race_data['timezone'],
+                location=race_data['location']
+            )
+            db.add(race)
             try:
-                # Use insert().on_conflict_do_nothing() instead of bulk_save_objects
-                stmt = insert(LiveTrackPoint).on_conflict_do_nothing(
-                    index_elements=['flight_id', 'lat', 'lon', 'datetime']
-                )
-                db.execute(stmt, [vars(point) for point in track_points])
                 db.commit()
-                logger.info(f"Successfully saved track points for flight {data.flight_id}")
-            except Exception as e:
+            except SQLAlchemyError as e:
                 db.rollback()
-                logger.error(f"Failed to save track points: {str(e)}")
-                raise HTTPException(
-                    status_code=500,
-                    detail="Failed to save track points"
-                )
+                logger.error(f"Failed to create race record: {str(e)}")
+                raise HTTPException(status_code=500, detail="Failed to create race record")
 
+        flight = db.query(Flight).filter(Flight.flight_id == data.flight_id).first()
+        
+        latest_point = data.track_points[-1]
+        latest_datetime = datetime.fromisoformat(latest_point['datetime'].replace('Z', '+00:00')).astimezone(timezone.utc)
+        
+        if not flight:
+            first_point = data.track_points[0]
+            first_datetime = datetime.fromisoformat(first_point['datetime'].replace('Z', '+00:00')).astimezone(timezone.utc)
+            
+            
+            flight = Flight(
+                flight_id=data.flight_id,
+                race_uuid=race.id,
+                race_id=race_id,
+                pilot_id=pilot_id,
+                pilot_name=pilot_name,
+                created_at=datetime.now(timezone.utc),
+                source='live',
+                first_fix={
+                    'lat': first_point['lat'],
+                    'lon': first_point['lon'],
+                    'elevation': first_point.get('elevation'),
+                    'datetime': first_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
+                },
+                last_fix={
+                    'lat': latest_point['lat'],
+                    'lon': latest_point['lon'],
+                    'elevation': latest_point.get('elevation'),
+                    'datetime': latest_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
+                },
+                total_points=len(data.track_points)
+            )
+            db.add(flight)
+
+        elif flight.pilot_id != pilot_id:
+            raise HTTPException(
+                status_code=403,
+                detail="Not authorized to update this flight"
+            )
+        else:
+            # Update last_fix, total_points and ensure pilot_name is current
+            flight.last_fix = {
+                'lat': latest_point['lat'],
+                'lon': latest_point['lon'],
+                'elevation': latest_point.get('elevation'),
+                'datetime': latest_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
+            }
+            flight.total_points = flight.total_points + len(data.track_points)
+            flight.pilot_name = pilot_name  # Update pilot name in case it changed
+
+        try:
+            db.commit()
+            logger.info(f"Successfully updated flight record: {data.flight_id}")
+        except SQLAlchemyError as e:
+            db.rollback()
+            logger.error(f"Failed to update flight: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to update flight record"
+            )
+
+        # Convert track points using Pydantic model
+        track_points = [
+            LiveTrackPoint(
+                **LiveTrackPointCreate(
+                    flight_id=data.flight_id,
+                    flight_uuid=flight.id,
+                    datetime=datetime.fromisoformat(point['datetime'].replace('Z', '+00:00'))
+                             .astimezone(timezone.utc)
+                             .strftime('%Y-%m-%dT%H:%M:%SZ'),  # Format as ISO 8601 with Z suffix
+                    lat=point['lat'],
+                    lon=point['lon'],
+                    elevation=point.get('elevation')
+                ).model_dump()
+            ) for point in data.track_points
+        ]
+
+        logger.info(f"Saving {len(track_points)} track points for flight {data.flight_id}")
+        
+        try:
+            # Use insert().on_conflict_do_nothing() instead of bulk_save_objects
+            stmt = insert(LiveTrackPoint).on_conflict_do_nothing(
+                index_elements=['flight_id', 'lat', 'lon', 'datetime']
+            )
+            db.execute(stmt, [vars(point) for point in track_points])
+            db.commit()
+            logger.info(f"Successfully saved track points for flight {data.flight_id}")
+            
             return {
                 'success': True,
                 'message': f'Live tracking data processed ({len(track_points)} points)',
-                'flight_id': data.flight_id
+                'flight_id': data.flight_id,
+                'pilot_name': pilot_name,
+                'total_points': flight.total_points
             }
+        except SQLAlchemyError as e:
+            db.rollback()
+            logger.error(f"Failed to save track points: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to save track points"
+            )
 
         except SQLAlchemyError as e:
             db.rollback()
@@ -114,7 +171,7 @@ async def live_tracking(
             status_code=500,
             detail="Failed to process tracking data"
         )
-
+        
 
 @router.post("/upload", status_code=202, response_model=FlightResponse)
 async def upload_track(
@@ -125,108 +182,128 @@ async def upload_track(
 ):
     """Handle complete track upload from mobile devices"""
     try:
-        # Get pilot and race IDs from token
+        # Get data from token
         pilot_id = token_data['pilot_id']
         race_id = token_data['race_id']
+        pilot_name = token_data['pilot_name']
+        race_data = token_data['race']
+
+        # Check/create race record
+        race = db.query(Race).filter(Race.race_id == race_id).first()
+        if not race:
+            race = Race(
+                race_id=race_id,
+                name=race_data['name'],
+                date=datetime.fromisoformat(race_data['date']),
+                end_date=datetime.fromisoformat(race_data['end_date']),
+                timezone=race_data['timezone'],
+                location=race_data['location']
+            )
+            db.add(race)
+            try:
+                db.commit()
+            except SQLAlchemyError as e:
+                db.rollback()
+                logger.error(f"Failed to create race record: {str(e)}")
+                raise HTTPException(status_code=500, detail="Failed to create race record")
 
         if not upload_data.track_points:
             logger.info(f"Received empty track upload from pilot {pilot_id} - discarding")
             return Flight(
-                id=uuid4(),  # Generate a new UUID
+                id=uuid4(),
                 flight_id=upload_data.flight_id,
-                pilot_id=pilot_id,
+                race_uuid=race.id,
                 race_id=race_id,
+                pilot_id=pilot_id,
+                pilot_name=pilot_name,
                 source='upload',
-                created_at=datetime.now(timezone.utc),
-                flight_metadata=upload_data.metadata.model_dump(exclude_none=True)
+                created_at=datetime.now(timezone.utc)
             )
 
         logger.info(f"Received track upload from pilot {pilot_id} for race {race_id}")
         logger.info(f"Total points: {len(upload_data.track_points)}")
 
-
-
         try:
-            # Create flight record
+            # Check for existing flight
             flight = db.query(Flight).filter(
                 Flight.flight_id == upload_data.flight_id,
                 Flight.source == 'upload'
             ).first()            
-            
-            # Convert metadata to dict and handle datetime serialization
-            metadata_dict = upload_data.metadata.model_dump(exclude_none=True)
-            if 'start_time' in metadata_dict:
-                metadata_dict['start_time'] = metadata_dict['start_time'].isoformat()
 
             if flight:
-                  raise HTTPException(
-                    status_code=409,  # Conflict status code
+                raise HTTPException(
+                    status_code=409,
                     detail="Flight ID with source upload already exists. Each flight must have a unique ID."
                 )
-                  
-            else:
-                # Create new flight
-                flight = Flight(
+
+            # Process first and last points
+            first_point = upload_data.track_points[0]
+            last_point = upload_data.track_points[-1]
+            first_datetime = datetime.fromisoformat(first_point['datetime'].replace('Z', '+00:00')).astimezone(timezone.utc)
+            last_datetime = datetime.fromisoformat(last_point['datetime'].replace('Z', '+00:00')).astimezone(timezone.utc)
+
+            # Create new flight with all fields aligned
+            flight = Flight(
+                flight_id=upload_data.flight_id,
+                race_uuid=race.id,
+                race_id=race_id,
+                pilot_id=pilot_id,
+                pilot_name=pilot_name,
+                created_at=datetime.now(timezone.utc),
+                source='upload',
+                first_fix={
+                    'lat': first_point['lat'],
+                    'lon': first_point['lon'],
+                    'elevation': first_point.get('elevation'),
+                    'datetime': first_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
+                },
+                last_fix={
+                    'lat': last_point['lat'],
+                    'lon': last_point['lon'],
+                    'elevation': last_point.get('elevation'),
+                    'datetime': last_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
+                },
+                total_points=len(upload_data.track_points)
+            )
+            db.add(flight)
+            
+            try:
+                db.commit()
+            except SQLAlchemyError as e:
+                db.rollback()
+                logger.error(f"Failed to create flight record: {str(e)}")
+                raise HTTPException(status_code=500, detail="Failed to create flight record")
+
+            # Convert and store track points
+            track_points_db = [
+                UploadedTrackPoint(
                     flight_id=upload_data.flight_id,
-                    race_id=race_id,
-                    pilot_id=pilot_id,
-                    created_at=datetime.now(timezone.utc),
-                    source='upload',
-                    flight_metadata=metadata_dict,
-                    start_time=datetime.fromisoformat(upload_data.track_points[0]['datetime'].replace('Z', '+00:00')),
-                    end_time=datetime.fromisoformat(upload_data.track_points[-1]['datetime'].replace('Z', '+00:00')),
-                    total_points=len(upload_data.track_points)
+                    flight_uuid=flight.id,
+                    datetime=datetime.fromisoformat(point['datetime'].replace('Z', '+00:00')).astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+                    lat=point['lat'],
+                    lon=point['lon'],
+                    elevation=point.get('elevation')
                 )
-                db.add(flight)
-                try:
-                    db.commit()  # Commit to get the flight.id
-                except SQLAlchemyError as e:
-                    db.rollback()
-                    logger.error(f"Failed to create flight record: {str(e)}")
-                    raise HTTPException(
-                        status_code=500,
-                        detail="Failed to create flight record"
-                    )
-
-                # Convert and store track points
-                track_points_db = [
-                    UploadedTrackPoint(
-                        flight_id=upload_data.flight_id,
-                        flight_uuid=flight.id,
-                        datetime=datetime.fromisoformat(point['datetime'].replace('Z', '+00:00')),  # Consistent timezone handling
-                        lat=point['lat'],
-                        lon=point['lon'],
-                        elevation=point.get('elevation'),
-                        speed=point.get('speed')
-                    )
-                    for point in upload_data.track_points
-                ]
-                
-                try:
-                    # Use insert().on_conflict_do_nothing() instead of bulk_save_objects
-                    stmt = insert(UploadedTrackPoint).on_conflict_do_nothing(
-                        index_elements=['flight_id', 'lat', 'lon', 'datetime']
-                    )
-                    db.execute(stmt, [vars(point) for point in track_points_db])
-                    db.commit()
-                    logger.info(f"Successfully processed upload for flight {upload_data.flight_id}")
-                    return flight
-                except SQLAlchemyError as e:
-                    db.rollback()
-                    logger.error(f"Failed to save track points: {str(e)}")
-                    raise HTTPException(
-                        status_code=500,
-                        detail="Failed to save track points"
-                    )
-
+                for point in upload_data.track_points
+            ]
+            
+            try:
+                stmt = insert(UploadedTrackPoint).on_conflict_do_nothing(
+                    index_elements=['flight_id', 'lat', 'lon', 'datetime']
+                )
+                db.execute(stmt, [vars(point) for point in track_points_db])
+                db.commit()
+                logger.info(f"Successfully processed upload for flight {upload_data.flight_id}")
+                return flight
+            except SQLAlchemyError as e:
+                db.rollback()
+                logger.error(f"Failed to save track points: {str(e)}")
+                raise HTTPException(status_code=500, detail="Failed to save track points")
 
         except SQLAlchemyError as e:
             db.rollback()
             logger.error(f"Database error while processing upload: {str(e)}")
-            raise HTTPException(
-                status_code=500,
-                detail="Database error while processing upload"
-            )
+            raise HTTPException(status_code=500, detail="Database error while processing upload")
             
     except HTTPException:
         raise
@@ -234,96 +311,7 @@ async def upload_track(
         logger.error(f"Error processing track upload: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to process track data")
         
-        
 
-@router.get("/check_assignment", status_code=200)
-async def check_assignment(
-    token: str = Query(..., description="Authentication token"),
-    token_data: Dict = Depends(verify_tracking_token),
-    db: Session = Depends(get_db)
-):
-    """Check if pilot has an active assignment"""
-    try:
-        pilot_id = token_data['pilot_id']
-        race_id = token_data['race_id']
-        
- 
-        return {
-            'success': True,
-            'assignment_id': 'fake'
-        }
-
-            
-    except Exception as e:
-        logger.error(f"Error checking assignment: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to check assignment"
-        )
-        
-
-@router.get("/points/{flight_id}")
-async def get_flight_points(
-    flight_id: str,
-    collection_type: str = Query('upload', description="Type of tracking ('upload' or 'live')"),
-    db: Session = Depends(get_db)
-):
-    """
-    Get all tracking points for a specific flight up to the current moment.
-    For admin/testing use only.
-    """
-    try:
-        # Get flight from database
-        flight = db.query(Flight).filter(
-            Flight.flight_id == flight_id.rstrip('\t|'),
-            Flight.source == collection_type
-        ).first()
-            
-        if not flight:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Flight not found in {collection_type} collection"
-            )
-
-        # Choose the correct table model based on collection type
-        TrackModel = UploadedTrackPoint if collection_type == 'upload' else LiveTrackPoint
-        
-        # Get track points
-        track_points = db.query(TrackModel).filter(
-            TrackModel.flight_id == flight_id
-        ).order_by(TrackModel.datetime).all()
-        
-        # Convert track points to dictionary format
-        points = [{
-            'datetime': point.datetime.isoformat(),
-            'lat': point.lat,
-            'lon': point.lon,
-            'elevation': point.elevation,
-            'speed': point.speed
-        } for point in track_points]
-        
-        return {
-            'success': True,
-            'flight_id': flight_id,
-            'pilot_id': flight.pilot_id,
-            'race_id': flight.race_id,
-            'type': flight.source,  # 'live' or 'upload'
-            'metadata': flight.flight_metadata or {},
-            'created_at': flight.created_at.isoformat() if flight.created_at else None,
-            'track_points': points,
-            'total_points': len(points),
-            'storage_type': 'timescaledb',
-            'collection': collection_type
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error retrieving flight points: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to retrieve flight points: {str(e)}"
-        )
 
         
 @router.get("/flights")
@@ -404,11 +392,11 @@ async def get_pilot_race_tracks(
             metadata = flight.flight_metadata or {}
             tracks.append({
                 'flight_id': flight.flight_id,
-                'created_at': flight.created_at.isoformat() if flight.created_at else None,
+                'created_at': flight.created_at.strftime('%Y-%m-%dT%H:%M:%SZ') if flight.created_at else None,
                 'type': flight.source,
                 'collection': 'uploads' if flight.source == 'upload' else 'live',
-                'start_time': flight.start_time.isoformat() if flight.start_time else None,
-                'end_time': flight.end_time.isoformat() if flight.end_time else None,
+                'start_time': flight.start_time.strftime('%Y-%m-%dT%H:%M:%SZ') if flight.start_time else None,
+                'end_time': flight.end_time.strftime('%Y-%m-%dT%H:%M:%SZ') if flight.end_time else None,
                 'duration': metadata.get('duration'),
                 'distance': metadata.get('distance'),
                 'avg_speed': metadata.get('avg_speed'),
@@ -517,3 +505,280 @@ async def delete_track(
             'error': 'Failed to delete track',
             'details': str(e)
         }
+        
+        
+        
+@router.get("/live/points/{flight_id}")
+async def get_live_points(
+    flight_id: str,
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    token_data: Dict = Depends(verify_tracking_token),
+    last_fix_time: Optional[datetime] = Query(None, description="Only return points after this time"),
+    db: Session = Depends(get_db)
+):
+    """
+    Get all live tracking points for a specific flight in GeoJSON format.
+    Requires JWT token in Authorization header (Bearer token).
+    Returns points with 1-second sampling and optional barometric altitude.
+    """
+    try:
+        # Get token from Authorization header
+        # token = credentials.credentials  # This extracts the token from "Bearer {token}"
+        # Get flight from database
+        flight = db.query(Flight).filter(
+            Flight.flight_id == flight_id.rstrip('\t|'),
+            Flight.source == 'live'
+        ).first()
+            
+        if not flight:
+            raise HTTPException(
+                status_code=404,
+                detail="Flight not found in live collection"
+            )
+
+        # Verify pilot has access to this flight
+        pilot_id = token_data['pilot_id']
+        race_id = token_data['race_id']
+        
+        if flight.pilot_id != pilot_id or flight.race_id != race_id:
+            raise HTTPException(
+                status_code=403,
+                detail="Not authorized to access this flight"
+            )
+        
+        # Build query for track points
+        query = db.query(LiveTrackPoint).filter(
+            LiveTrackPoint.flight_id == flight_id
+        )
+
+        if last_fix_time:
+            query = query.filter(LiveTrackPoint.datetime > last_fix_time)
+        
+
+        track_points = query.order_by(LiveTrackPoint.datetime).all()
+        
+        if not track_points:
+            return {
+                "type": "Feature",
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": []
+                },
+                "properties": {
+                    "uuid": str(flight.id),
+                    "firstFixTime": None,
+                    "lastFixTime": None
+                }
+            }
+
+        coordinates = []
+        last_time = None
+        is_first_point = True
+        
+        for point in track_points:
+            current_time = point.datetime
+            
+            # Basic coordinate array with required fields
+            coordinate = [
+                float(point.lon),  # x/longitude
+                float(point.lat),  # y/latitude
+                int(point.elevation or 0)  # z/gps altitude
+            ]
+            
+            if is_first_point:
+                # Only the very first point gets dt: 0
+                extra_data = {"dt": 0}
+                if hasattr(point, 'baro_altitude') and point.baro_altitude is not None:
+                    extra_data["b"] = int(point.baro_altitude)
+                coordinate.append(extra_data)
+                is_first_point = False
+            elif last_time is not None:
+                # Calculate time delta for subsequent points
+                dt = int((current_time - last_time).total_seconds())
+                if dt != 1:  # Only add dt if not 1 second
+                    extra_data = {"dt": dt}
+                    if hasattr(point, 'baro_altitude') and point.baro_altitude is not None:
+                        extra_data["b"] = int(point.baro_altitude)
+                    coordinate.append(extra_data)
+            
+            coordinates.append(coordinate)
+            last_time = current_time
+
+        return {
+            "type": "Feature",
+            "geometry": {
+                "type": "LineString",
+                "coordinates": coordinates
+            },
+            "properties": {
+                "uuid": str(flight.id),
+                "firstFixTime": track_points[0].datetime.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "lastFixTime": track_points[-1].datetime.strftime("%Y-%m-%dT%H:%M:%SZ")
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving flight points: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve flight points: {str(e)}"
+        )
+    
+    
+def determine_if_landed(point) -> bool:
+    """Determine if a pilot has landed based on track point data"""
+    # Implement your landing detection logic here
+    return False
+
+def get_first_fix(db: Session, flight_id: str) -> list:
+    """Get the first fix for a flight"""
+    first_point = (
+        db.query(LiveTrackPoint)
+        .filter(LiveTrackPoint.flight_id == flight_id)
+        .order_by(LiveTrackPoint.datetime.asc())
+        .first()
+    )
+    
+    if first_point:
+        return [
+            first_point.lon,
+            first_point.lat,
+            first_point.elevation or 0,
+            {
+                "b": first_point.elevation or 0
+            }
+        ]
+    return []
+
+
+@router.get("/live/users")
+async def get_live_users(
+    opentime: datetime = Query(..., description="Start time for tracking window"),
+    closetime: Optional[datetime] = Query(None, description="End time for tracking window"),
+    source: Optional[str] = Query(None, regex="^(live|upload)$"),
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    db: Session = Depends(get_db)
+):
+    """
+    Return active users and their flights within the specified time window.
+    Requires JWT bearer token for authentication.
+    """
+    try:
+        # Set default closetime if not provided
+        if not closetime:
+            closetime = datetime.now(timezone.utc) + timedelta(hours=24)
+
+        # Validate JWT token
+        token = credentials.credentials
+        try:
+            payload = jwt.decode(
+                token,
+                settings.SECRET_KEY,
+                algorithms=["HS256"],
+                audience="api.hikeandfly.app",
+                issuer="hikeandfly.app"
+            )
+            
+            if not payload.get("sub", "").startswith("contest:"):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Invalid token subject - must be contest-specific"
+                )
+            
+            race_id = payload["sub"].split(":")[1]
+            
+        except jwt.ExpiredSignatureError:
+            raise HTTPException(
+                status_code=401,
+                detail="Token has expired"
+            )
+        except jwt.JWTError as e:
+            raise HTTPException(
+                status_code=401,
+                detail=f"Invalid token: {str(e)}"
+            )
+
+        # Get all active flights for this race within the time window
+        flights = (
+            db.query(Flight)
+            .filter(
+                Flight.race_id == race_id,
+                Flight.created_at >= opentime,
+                Flight.created_at <= closetime
+            )
+        )
+        
+        if source:
+            flights = flights.filter(Flight.source == source)
+            
+        flights = flights.all()
+
+        # Structure the response
+        response = {
+            "users": {},
+            "flights": []
+        }
+
+        for flight in flights:
+            pilot_id = str(flight.pilot_id)
+            
+            # Add user info if not already present
+            if pilot_id not in response["users"]:
+                response["users"][pilot_id] = {
+                    "fullname": flight.pilot_name,
+                    "lastLoc": {
+                        "type": "Feature",
+                        "geometry": {
+                            "type": "Point",
+                            "coordinates": [
+                                flight.last_fix['lon'],
+                                flight.last_fix['lat'],
+                                flight.last_fix.get('elevation', 0)
+                            ]
+                        },
+                        "properties": {
+                            "source": flight.source,
+                            "landed": determine_if_landed(flight.last_fix)
+                        }
+                    }
+                }
+
+            # Add flight info
+            flight_info = {
+                "uuid": str(flight.id),
+                "firstFix": [
+                    flight.first_fix['lon'],
+                    flight.first_fix['lat'],
+                    flight.first_fix.get('elevation', 0),
+                    {"t": flight.first_fix['datetime']}
+                ],
+                "lastFix": [
+                    flight.last_fix['lon'],
+                    flight.last_fix['lat'],
+                    flight.last_fix.get('elevation', 0),
+                    {
+                        "t": flight.last_fix['datetime'],
+                        "b": flight.last_fix.get('elevation', 0)
+                    }
+                ],
+                "source": flight.source,
+                "landed": determine_if_landed(flight.last_fix),
+                "clientId": "mobile",
+                "simulation": False,
+                "glider": "unknown"
+            }
+            
+            response["flights"].append(flight_info)
+
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching live users: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch live users: {str(e)}"
+        )
