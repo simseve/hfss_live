@@ -14,6 +14,8 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from datetime import datetime, timezone, timedelta
 import jwt
 from config import settings
+from math import radians, sin, cos, sqrt, atan2
+
 
 logger = logging.getLogger(__name__)
 
@@ -389,19 +391,53 @@ async def get_pilot_race_tracks(
         # Format track information
         tracks = []
         for flight in flights:
-            metadata = flight.flight_metadata or {}
+            # Calculate metrics from first_fix and last_fix
+            first_datetime = datetime.fromisoformat(flight.first_fix['datetime'].replace('Z', '+00:00'))
+            last_datetime = datetime.fromisoformat(flight.last_fix['datetime'].replace('Z', '+00:00'))
+            
+            duration_td = last_datetime - first_datetime
+            hours, remainder = divmod(int(duration_td.total_seconds()), 3600)
+            minutes, seconds = divmod(remainder, 60)
+            duration = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+            
+
+            
+            def calculate_distance(lat1, lon1, lat2, lon2):
+                R = 6371000  # Earth's radius in meters
+                φ1 = radians(lat1)
+                φ2 = radians(lat2)
+                Δφ = radians(lat2 - lat1)
+                Δλ = radians(lon2 - lon1)
+                
+                a = sin(Δφ/2) * sin(Δφ/2) + \
+                    cos(φ1) * cos(φ2) * \
+                    sin(Δλ/2) * sin(Δλ/2)
+                c = 2 * atan2(sqrt(a), sqrt(1-a))
+                
+                return R * c  # Distance in meters
+
+            distance = calculate_distance(
+                float(flight.first_fix['lat']),
+                float(flight.first_fix['lon']),
+                float(flight.last_fix['lat']),
+                float(flight.last_fix['lon'])
+            )
+            
+            # Calculate speeds (m/s)
+            avg_speed = distance / duration_td.total_seconds() if duration_td.total_seconds() > 0 else 0
+            
             tracks.append({
                 'flight_id': flight.flight_id,
                 'created_at': flight.created_at.strftime('%Y-%m-%dT%H:%M:%SZ') if flight.created_at else None,
                 'type': flight.source,
                 'collection': 'uploads' if flight.source == 'upload' else 'live',
-                'start_time': flight.start_time.strftime('%Y-%m-%dT%H:%M:%SZ') if flight.start_time else None,
-                'end_time': flight.end_time.strftime('%Y-%m-%dT%H:%M:%SZ') if flight.end_time else None,
-                'duration': metadata.get('duration'),
-                'distance': metadata.get('distance'),
-                'avg_speed': metadata.get('avg_speed'),
-                'max_speed': metadata.get('max_speed'),
-                'max_altitude': metadata.get('max_altitude'),
+                'start_time': first_datetime.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                'end_time': last_datetime.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                'duration': duration,
+                'distance': round(distance, 2),  # Distance in meters
+                'avg_speed': round(avg_speed * 3.6, 2),  # Convert to km/h
+                'max_altitude': 0,
+                'max_speed': 0,
                 'total_points': flight.total_points
             })
         
@@ -419,9 +455,8 @@ async def get_pilot_race_tracks(
             status_code=500,
             detail=f"Failed to retrieve pilot tracks: {str(e)}"
         )
-        
-        
-        
+
+
 @router.delete("/tracks/{flight_id}")
 async def delete_track(
     flight_id: str,
@@ -439,73 +474,62 @@ async def delete_track(
         race_id = token_data['race_id']
         
         # First verify the track belongs to this pilot and race
-        flight = db.query(Flight).filter(
+        flights = db.query(Flight).filter(
             Flight.flight_id == flight_id,
             Flight.pilot_id == pilot_id,
             Flight.race_id == race_id
-        ).first()
+        ).all()
         
-        if not flight:
+        if not flights:
             return {
                 'success': False,
                 'message': 'Track not found or not authorized to delete it'
             }
         
-        try:
-            # Delete points from both tables
-            live_points = db.query(LiveTrackPoint).filter(
-                LiveTrackPoint.flight_id == flight_id
-            ).delete()
+        total_points = 0
+        deleted_info = {'live': 0, 'upload': 0}
+        race_uuid = None
+        
+        # Delete all matching flights
+        for flight in flights:
+            total_points += flight.total_points
+            deleted_info[flight.source] = flight.total_points
+            race_uuid = flight.race_uuid
+            db.delete(flight)
+        
+        # Check if this was the last flight for this race
+        if race_uuid:
+            remaining_flights = db.query(Flight).filter(Flight.race_uuid == race_uuid).count()
+            if remaining_flights == 0:
+                # If no more flights reference this race, delete it
+                race = db.query(Race).filter(Race.id == race_uuid).first()
+                if race:
+                    db.delete(race)
+                    logger.info(f"Deleted race {race_id} as it had no more associated flights")
+        
+        db.commit()
             
-            uploaded_points = db.query(UploadedTrackPoint).filter(
-                UploadedTrackPoint.flight_id == flight_id
-            ).delete()
+        logger.info(f"Deleted {len(flights)} flights with id {flight_id} and {total_points} track points")
+        
+        return {
+            'success': True,
+            'message': f'Successfully deleted {len(flights)} flights with {total_points} track points',
+            'deleted_points': deleted_info
+        }
             
-            # Delete the flight records
-            flight_result = db.query(Flight).filter(
-                Flight.flight_id == flight_id
-            ).delete()
-            
-            db.commit()
-            
-            total_points_deleted = live_points + uploaded_points
-            logger.info(f"Deleted {total_points_deleted} track points from TimescaleDB for flight {flight_id}")
-            
-            if flight_result > 0:
-                return {
-                    'success': True,
-                    'message': f'Track {flight_id} deleted successfully',
-                    'details': {
-                        'points_deleted': {
-                            'total': total_points_deleted,
-                            'live': live_points,
-                            'uploaded': uploaded_points
-                        },
-                        'metadata_deleted': {
-                            'total': flight_result,
-                            'live': flight_result if flight.source == 'live' else 0,
-                            'uploaded': flight_result if flight.source == 'upload' else 0
-                        }
-                    }
-                }
-            
-            return {
-                'success': False,
-                'message': 'Failed to delete track metadata'
-            }
-            
-        except SQLAlchemyError as e:
-            db.rollback()
-            logger.error(f"Error deleting track points from TimescaleDB: {str(e)}")
-            raise
-            
+    except SQLAlchemyError as e:
+        db.rollback()
+        logger.error(f"Error deleting track: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Database error while deleting track: {str(e)}"
+        )
     except Exception as e:
         logger.error(f"Error deleting track: {str(e)}")
-        return {
-            'error': 'Failed to delete track',
-            'details': str(e)
-        }
-        
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete track: {str(e)}"
+        )
         
         
 @router.get("/live/points/{flight_id}")

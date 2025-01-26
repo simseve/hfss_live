@@ -21,7 +21,8 @@ class Race(Base):
     created_at = Column(DateTime(timezone=False), nullable=False, default=lambda: datetime.now(timezone.utc))
     
     # Relationship with flights
-    flights = relationship("Flight", back_populates="race")
+
+    flights = relationship("Flight", back_populates="race", cascade="all, delete-orphan")
     
     __table_args__ = (
         Index('idx_race_id', 'race_id'),
@@ -36,7 +37,7 @@ class Flight(Base):
     
     id = Column(UUID(as_uuid=True), primary_key=True, nullable=False, default=uuid.uuid4)
     flight_id = Column(String, nullable=False)
-    race_uuid = Column(UUID(as_uuid=True), ForeignKey('races.id'), nullable=False)
+    race_uuid = Column(UUID(as_uuid=True), ForeignKey('races.id', ondelete='CASCADE'), nullable=False)
     race_id = Column(String, nullable=False)
     pilot_id = Column(String, nullable=False)
     pilot_name = Column(String, nullable=False)
@@ -67,7 +68,7 @@ class LiveTrackPoint(Base):
     
     datetime = Column(DateTime(timezone=False), primary_key=True, nullable=False)
     id = Column(BigInteger, primary_key=True, autoincrement=True)
-    flight_uuid = Column(UUID(as_uuid=True), ForeignKey('flights.id'), nullable=False)  # Changed from flight_id
+    flight_uuid = Column(UUID(as_uuid=True), ForeignKey('flights.id', ondelete='CASCADE'), nullable=False)  # Added ondelete='CASCADE'
     flight_id = Column(String, nullable=False)
     lat = Column(Float(precision=53), nullable=False)
     lon = Column(Float(precision=53), nullable=False)
@@ -88,7 +89,7 @@ class UploadedTrackPoint(Base):
     
     datetime = Column(DateTime(timezone=False), primary_key=True, nullable=False)
     id = Column(BigInteger, primary_key=True, autoincrement=True)
-    flight_uuid = Column(UUID(as_uuid=True), ForeignKey('flights.id'), nullable=False)  
+    flight_uuid = Column(UUID(as_uuid=True), ForeignKey('flights.id', ondelete='CASCADE'), nullable=False)
     flight_id = Column(CHAR(100), nullable=False)
     lat = Column(Float(precision=53), nullable=False)
     lon = Column(Float(precision=53), nullable=False)
