@@ -595,36 +595,35 @@ async def get_live_points(
             )
 
         
+
+        # Base query
+        query = db.query(LiveTrackPoint).filter(
+            LiveTrackPoint.flight_uuid == flight_uuid
+        )
+
+        # If last_fix_dt is provided, use it as filter
+        # Otherwise, use the flight's first fix time
         if last_fix_dt:
-            last_fix_datetime = datetime.fromisoformat(last_fix_dt.replace('Z', '+00:00')).astimezone(timezone.utc)
+            filter_time = datetime.fromisoformat(last_fix_dt.replace('Z', '+00:00')).astimezone(timezone.utc)
+        else:
+            filter_time = datetime.fromisoformat(flight.first_fix['datetime'].replace('Z', '+00:00')).astimezone(timezone.utc)
 
-            # Get all points for this flight and log each comparison
-            all_points = db.query(LiveTrackPoint).filter(
-                LiveTrackPoint.flight_uuid == flight_uuid
-            ).order_by(LiveTrackPoint.datetime).all()
-            
-            for point in all_points:
-                # Ensure point datetime is timezone-aware
-                point_dt = point.datetime
-                if point_dt.tzinfo is None:
-                    point_dt = point_dt.replace(tzinfo=timezone.utc)
+        # Apply the time filter and order the results
+        query = query.filter(
+            func.timezone('UTC', LiveTrackPoint.datetime) >= filter_time
+        ).order_by(LiveTrackPoint.datetime)
 
-            # Now apply the filter - ensure both sides of comparison are timezone-aware
-            query = db.query(LiveTrackPoint).filter(
-                LiveTrackPoint.flight_uuid == flight_uuid,
-                func.timezone('UTC', LiveTrackPoint.datetime) >= last_fix_datetime
-            ).order_by(LiveTrackPoint.datetime)
-            
-
-            
         track_points = query.all()
-        if len(track_points) == 0:
-            # Log a few sample points around the filter time
-            sample_points = db.query(LiveTrackPoint).filter(
-                LiveTrackPoint.flight_uuid == flight_uuid
-            ).order_by(LiveTrackPoint.datetime).limit(5).all()
-            for point in sample_points:
-                logger.info(f"  {point.datetime} | lat: {point.lat}, lon: {point.lon}")
+
+        # Ensure all points have timezone information
+        all_points = []
+        for point in track_points:
+            point_dt = point.datetime
+            if point_dt.tzinfo is None:
+                point_dt = point_dt.replace(tzinfo=timezone.utc)
+            point.datetime = point_dt
+            all_points.append(point)
+
         
         if not track_points:
             logger.warning(f"No track points found for flight_uuid: {flight_uuid}")
