@@ -134,7 +134,8 @@ async def live_tracking(
                 ).model_dump()
             ) for point in data.track_points
         ]
-
+        logger.info(data)
+        logger.info(track_points)
         logger.info(f"Saving {len(track_points)} track points for flight {data.flight_id}")
         
         try:

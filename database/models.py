@@ -14,11 +14,11 @@ class Race(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, nullable=False, default=uuid.uuid4)
     race_id = Column(String, nullable=False, unique=True)
     name = Column(String, nullable=False)
-    date = Column(DateTime(timezone=False), nullable=False)
-    end_date = Column(DateTime(timezone=False), nullable=False)
+    date = Column(DateTime(timezone=True), nullable=False)
+    end_date = Column(DateTime(timezone=True), nullable=False)
     timezone = Column(String, nullable=False)
     location = Column(String, nullable=False)
-    created_at = Column(DateTime(timezone=False), nullable=False, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     
     # Relationship with flights
 
@@ -41,7 +41,7 @@ class Flight(Base):
     race_id = Column(String, nullable=False)
     pilot_id = Column(String, nullable=False)
     pilot_name = Column(String, nullable=False)
-    created_at = Column(DateTime(timezone=False), nullable=False, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     source = Column(String, nullable=False)  # 'live' or 'upload'
     
     # Tracking state
@@ -66,7 +66,7 @@ class Flight(Base):
 class LiveTrackPoint(Base):
     __tablename__ = 'live_track_points'
     
-    datetime = Column(DateTime(timezone=False), primary_key=True, nullable=False)
+    datetime = Column(DateTime(timezone=True), primary_key=True, nullable=False)
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     flight_uuid = Column(UUID(as_uuid=True), ForeignKey('flights.id', ondelete='CASCADE'), nullable=False)  # Added ondelete='CASCADE'
     flight_id = Column(String, nullable=False)
@@ -87,7 +87,7 @@ class LiveTrackPoint(Base):
 class UploadedTrackPoint(Base):
     __tablename__ = 'uploaded_track_points'
     
-    datetime = Column(DateTime(timezone=False), primary_key=True, nullable=False)
+    datetime = Column(DateTime(timezone=True), primary_key=True, nullable=False)
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     flight_uuid = Column(UUID(as_uuid=True), ForeignKey('flights.id', ondelete='CASCADE'), nullable=False)
     flight_id = Column(CHAR(100), nullable=False)
