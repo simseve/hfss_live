@@ -17,6 +17,7 @@ from config import settings
 from math import radians, sin, cos, sqrt, atan2
 from uuid import UUID
 from sqlalchemy import func  # Add this at the top with other imports
+from aiohttp import ClientSession
 
 logger = logging.getLogger(__name__)
 
@@ -402,6 +403,32 @@ async def get_pilot_race_tracks(
             duration = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
             
 
+            # Get location name from Google Geocoding API
+            lat = float(flight.first_fix['lat'])
+            lon = float(flight.first_fix['lon'])
+            location_name = None
+            
+            try:
+                async with ClientSession() as session:  # Create new session for each request
+                    url = f"https://maps.googleapis.com/maps/api/geocode/json?latlng={lat},{lon}&key={settings.GOOGLE_MAPS_API_KEY}"
+                    async with session.get(url) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            if data['results']:
+                                # Get the most relevant result (first one)
+                                address_components = data['results'][0]['address_components']
+                                for component in address_components:
+                                    if 'locality' in component['types']:
+                                        location_name = component['long_name']
+                                        break
+                                    elif 'administrative_area_level_2' in component['types']:
+                                        location_name = component['long_name']
+                                        break
+                                    elif 'administrative_area_level_1' in component['types']:
+                                        location_name = component['long_name']
+                                        break
+            except Exception as e:
+                logger.error(f"Error fetching location name: {str(e)}")
             
             def calculate_distance(lat1, lon1, lat2, lon2):
                 R = 6371000  # Earth's radius in meters
@@ -439,7 +466,9 @@ async def get_pilot_race_tracks(
                 'avg_speed': round(avg_speed * 3.6, 2),  # Convert to km/h
                 'max_altitude': 0,
                 'max_speed': 0,
-                'total_points': flight.total_points
+                'total_points': flight.total_points,
+                'location': location_name  # Add the location name to the response
+
             })
         
         return {
@@ -682,7 +711,10 @@ async def get_live_points(
             "properties": {
                 "uuid": str(flight.id),
                 "firstFixTime": track_points[0].datetime.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "lastFixTime": track_points[-1].datetime.strftime("%Y-%m-%dT%H:%M:%SZ")
+                "lastFixTime": track_points[-1].datetime.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "totalPoints": len(track_points),  # Number of points in filtered result
+                "flightFirstFix": flight.first_fix['datetime'],  # From flight object
+                "flightTotalPoints": flight.total_points         # Total points in flight
             }
         }
         

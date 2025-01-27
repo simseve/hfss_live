@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     BUCKET_SECRET: str
     BUCKET_NAME: str
     HFSS_SERVER: str
+    GOOGLE_MAPS_API_KEY: str
 
 
 
