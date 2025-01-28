@@ -729,9 +729,9 @@ async def get_live_points(
         )
     
 
-@router.get("/upload/points/{flight_id}")
+@router.get("/upload/points/{flight_uuid}")
 async def get_uploaded_points(
-    flight_id: str,
+    flight_uuid: UUID,
     credentials: HTTPAuthorizationCredentials = Security(security),
     db: Session = Depends(get_db)
 ):
@@ -772,7 +772,7 @@ async def get_uploaded_points(
 
         # Get flight from database
         flight = db.query(Flight).filter(
-            Flight.flight_id == flight_id,
+            Flight.id == flight_uuid,
             Flight.source == 'upload'
         ).first()
             
@@ -784,11 +784,11 @@ async def get_uploaded_points(
 
         # Get all track points for this flight
         track_points = db.query(UploadedTrackPoint).filter(
-            UploadedTrackPoint.flight_id == flight_id
+            UploadedTrackPoint.flight_uuid == flight_uuid
         ).order_by(UploadedTrackPoint.datetime).all()
         
         if not track_points:
-            logger.warning(f"No track points found for flight_id: {flight_id}")
+            logger.warning(f"No track points found for flight_id: {flight_uuid}")
             return {
                 "type": "Feature",
                 "geometry": {
