@@ -819,17 +819,17 @@ async def get_uploaded_points(
             if is_first_point:
                 # Only the very first point gets dt: 0
                 extra_data = {"dt": 0}
-                if hasattr(point, 'baro_altitude') and point.baro_altitude is not None:
-                    extra_data["b"] = int(point.baro_altitude)
-                coordinate.append(extra_data)
+                # if hasattr(point, 'baro_altitude') and point.baro_altitude is not None:
+                #     extra_data["b"] = int(point.baro_altitude)
+                # coordinate.append(extra_data)
                 is_first_point = False
             elif last_time is not None:
                 # Calculate time delta for subsequent points
                 dt = int((current_time - last_time).total_seconds())
                 if dt != 1:  # Only add dt if not 1 second
                     extra_data = {"dt": dt}
-                    if hasattr(point, 'baro_altitude') and point.baro_altitude is not None:
-                        extra_data["b"] = int(point.baro_altitude)
+                    # if hasattr(point, 'baro_altitude') and point.baro_altitude is not None:
+                    #     extra_data["b"] = int(point.baro_altitude)
                     coordinate.append(extra_data)
             
             coordinates.append(coordinate)
