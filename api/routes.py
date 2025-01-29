@@ -162,13 +162,6 @@ async def live_tracking(
                 detail="Failed to save track points"
             )
 
-        except SQLAlchemyError as e:
-            db.rollback()
-            logger.error(f"Database error: {str(e)}")
-            raise HTTPException(
-                status_code=500,
-                detail="Database error while processing request"
-            )
             
     except Exception as e:
         logger.error(f"Unexpected error in live_tracking: {str(e)}")
@@ -639,8 +632,9 @@ async def get_live_points(
             filter_time = datetime.fromisoformat(flight.first_fix['datetime'].replace('Z', '+00:00')).astimezone(timezone.utc)
 
         # Apply the time filter and order the results
+        # Remove the func.timezone() call since we're already handling UTC conversion
         query = query.filter(
-            func.timezone('UTC', LiveTrackPoint.datetime) > filter_time
+            LiveTrackPoint.datetime > filter_time
         ).order_by(LiveTrackPoint.datetime)
 
         track_points = query.all()
@@ -844,7 +838,10 @@ async def get_uploaded_points(
             "properties": {
                 "uuid": str(flight.id),
                 "firstFixTime": track_points[0].datetime.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "lastFixTime": track_points[-1].datetime.strftime("%Y-%m-%dT%H:%M:%SZ")
+                "lastFixTime": track_points[-1].datetime.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "totalPoints": len(track_points),  # Number of points in filtered result
+                "flightTotalPoints": flight.total_points         # Total points in flight
+
             }
         }
         
