@@ -556,6 +556,105 @@ async def delete_track(
         )
         
 
+
+@router.delete("/tracks/fuuid/{flight_uuid}")
+async def delete_track_uuid(
+    flight_uuid: UUID,  # Changed from flight_id to flight_uuid with UUID type
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    db: Session = Depends(get_db)
+):
+    """
+    Delete a specific uploaded track from the database.
+    Verifies that the track belongs to the pilot from the token.
+    Only deletes tracks with source='upload'.
+    """
+    try:
+    # Get token from Authorization header and verify it
+        token = credentials.credentials
+        try:
+            token_data = jwt.decode(
+                token,
+                settings.SECRET_KEY,
+                algorithms=["HS256"],
+                audience="api.hikeandfly.app",
+                issuer="hikeandfly.app",
+                verify=True
+            )
+            
+            if not token_data.get("sub", "").startswith("contest:"):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Invalid token subject - must be contest-specific"
+                )
+            
+            race_id = token_data["sub"].split(":")[1]
+            
+        except jwt.ExpiredSignatureError:
+            raise HTTPException(
+                status_code=401,
+                detail="Token has expired"
+            )
+        except jwt.JWTError as e:
+            raise HTTPException(
+                status_code=401,
+                detail=f"Invalid token: {str(e)}"
+            )
+        
+        # First verify the track belongs to this pilot and race
+        # Only get upload source flights
+        flight = db.query(Flight).filter(
+            Flight.id == flight_uuid,
+            Flight.race_id == race_id,
+            Flight.source == 'upload'  # Only delete upload source flights
+        ).first()
+        
+        if not flight:
+            return {
+                'success': False,
+                'message': 'Track not found or not authorized to delete it'
+            }
+        
+        total_points = flight.total_points
+        race_uuid = flight.race_uuid
+        
+        # Delete the flight
+        db.delete(flight)
+        
+        # Check if this was the last flight for this race
+        if race_uuid:
+            remaining_flights = db.query(Flight).filter(Flight.race_uuid == race_uuid).count()
+            if remaining_flights == 0:
+                # If no more flights reference this race, delete it
+                race = db.query(Race).filter(Race.id == race_uuid).first()
+                if race:
+                    db.delete(race)
+                    logger.info(f"Deleted race {race_id} as it had no more associated flights")
+        
+        db.commit()
+            
+        logger.info(f"Deleted flight {flight_uuid} with {total_points} track points")
+        
+        return {
+            'success': True,
+            'message': f'Successfully deleted flight with {total_points} track points',
+            'deleted_points': {'upload': total_points}
+        }
+            
+    except SQLAlchemyError as e:
+        db.rollback()
+        logger.error(f"Error deleting track: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Database error while deleting track: {str(e)}"
+        )
+    except Exception as e:
+        logger.error(f"Error deleting track: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete track: {str(e)}"
+        )
+        
+        
 @router.get("/live/points/{flight_uuid}")
 async def get_live_points(
     flight_uuid: UUID,
