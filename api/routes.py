@@ -555,21 +555,20 @@ async def delete_track(
             detail=f"Failed to delete track: {str(e)}"
         )
         
-
-
 @router.delete("/tracks/fuuid/{flight_uuid}")
 async def delete_track_uuid(
-    flight_uuid: UUID,  # Changed from flight_id to flight_uuid with UUID type
+    flight_uuid: UUID,
+    source: str = Query(..., regex="^(live|upload)$", description="Track source ('live' or 'upload')"),
     credentials: HTTPAuthorizationCredentials = Security(security),
     db: Session = Depends(get_db)
 ):
     """
-    Delete a specific uploaded track from the database.
-    Verifies that the track belongs to the pilot from the token.
-    Only deletes tracks with source='upload'.
+    Delete a specific track from the database.
+    Verifies that the track belongs to the specified race.
+    Source parameter determines whether to delete 'live' or 'upload' track.
     """
     try:
-    # Get token from Authorization header and verify it
+        # Get token from Authorization header and verify it
         token = credentials.credentials
         try:
             token_data = jwt.decode(
@@ -600,18 +599,17 @@ async def delete_track_uuid(
                 detail=f"Invalid token: {str(e)}"
             )
         
-        # First verify the track belongs to this pilot and race
-        # Only get upload source flights
+        # Verify the track belongs to this race and matches the specified source
         flight = db.query(Flight).filter(
             Flight.id == flight_uuid,
             Flight.race_id == race_id,
-            Flight.source == 'upload'  # Only delete upload source flights
+            Flight.source == source
         ).first()
         
         if not flight:
             return {
                 'success': False,
-                'message': 'Track not found or not authorized to delete it'
+                'message': f'Track not found or not authorized to delete it (source: {source})'
             }
         
         total_points = flight.total_points
@@ -632,12 +630,12 @@ async def delete_track_uuid(
         
         db.commit()
             
-        logger.info(f"Deleted flight {flight_uuid} with {total_points} track points")
+        logger.info(f"Deleted {source} flight {flight_uuid} with {total_points} track points")
         
         return {
             'success': True,
-            'message': f'Successfully deleted flight with {total_points} track points',
-            'deleted_points': {'upload': total_points}
+            'message': f'Successfully deleted {source} flight with {total_points} track points',
+            'deleted_points': {source: total_points}
         }
             
     except SQLAlchemyError as e:
