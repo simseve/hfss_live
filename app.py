@@ -10,7 +10,6 @@ from rate_limiter import rate_limiter
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
-from fastapi.staticfiles import StaticFiles
 from fastapi import FastAPI
 from fastapi.security import HTTPBasic
 import api.routes as routes

@@ -993,10 +993,10 @@ async def get_live_users(
                     flight.last_fix['lat'],
                     flight.last_fix.get('elevation', 0),
                     {
-                        "t": flight.last_fix['datetime'],
-                        "b": flight.last_fix.get('elevation', 0)
+                        "t": flight.last_fix['datetime']
                     }
                 ],
+                "firstFixTime": flight.first_fix['datetime'],
                 "source": flight.source,
                 "landed": determine_if_landed(flight.last_fix),
                 "clientId": "mobile",
