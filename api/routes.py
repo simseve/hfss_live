@@ -898,7 +898,7 @@ async def get_live_points_raw(
 
         # Format points as simple dictionaries
         points = [{
-            "datetime": point.datetime.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "datetime": point.datetime.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "lat": float(point.lat),
             "lon": float(point.lon),
             "elevation": float(point.elevation) if point.elevation is not None else None
