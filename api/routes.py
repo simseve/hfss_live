@@ -819,7 +819,108 @@ async def get_live_points(
             detail=f"Failed to retrieve flight points: {str(e)}"
         )
     
+@router.get("/live/points/{flight_uuid}/raw")
+async def get_live_points_raw(
+    flight_uuid: UUID,
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    last_fix_dt: Optional[str] = Query(None, description="Only return points after this time (ISO 8601 format, e.g. 2025-01-25T06:00:00Z)"),
+    db: Session = Depends(get_db)
+):
+    """
+    Get all live tracking points for a specific flight in raw format.
+    Requires JWT token in Authorization header (Bearer token).
+    Returns points with datetime, lat, lon, and elevation.
+    """
+    try:
+        # Get token from Authorization header and verify it
+        token = credentials.credentials
+        try:
+            token_data = jwt.decode(
+                token,
+                settings.SECRET_KEY,
+                algorithms=["HS256"],
+                audience="api.hikeandfly.app",
+                issuer="hikeandfly.app",
+                verify=True
+            )
+            
+            if not token_data.get("sub", "").startswith("contest:"):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Invalid token subject - must be contest-specific"
+                )
+            
+        except jwt.ExpiredSignatureError:
+            raise HTTPException(
+                status_code=401,
+                detail="Token has expired"
+            )
+        except jwt.JWTError as e:
+            raise HTTPException(
+                status_code=401,
+                detail=f"Invalid token: {str(e)}"
+            )
 
+        # Get flight from database
+        flight = db.query(Flight).filter(
+            Flight.id == flight_uuid,
+            Flight.source == 'live'
+        ).first()
+            
+        if not flight:
+            raise HTTPException(
+                status_code=404,
+                detail="Flight not found in live collection"
+            )
+
+        # Base query
+        query = db.query(LiveTrackPoint).filter(
+            LiveTrackPoint.flight_uuid == flight_uuid
+        )
+
+        # If last_fix_dt is provided, use it as filter
+        if last_fix_dt:
+            filter_time = datetime.fromisoformat(last_fix_dt.replace('Z', '+00:00')).astimezone(timezone.utc)
+            query = query.filter(LiveTrackPoint.datetime > filter_time)
+
+        # Order the results by datetime
+        query = query.order_by(LiveTrackPoint.datetime)
+        track_points = query.all()
+
+        if not track_points:
+            logger.warning(f"No track points found for flight_uuid: {flight_uuid}")
+            return {
+                "success": True,
+                "flight_id": str(flight.flight_id),
+                "total_points": 0,
+                "points": []
+            }
+
+        # Format points as simple dictionaries
+        points = [{
+            "datetime": point.datetime.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "lat": float(point.lat),
+            "lon": float(point.lon),
+            "elevation": float(point.elevation) if point.elevation is not None else None
+        } for point in track_points]
+
+        return {
+            "success": True,
+            "flight_id": str(flight.flight_id),
+            "total_points": len(points),
+            "points": points
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving flight points: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve flight points: {str(e)}"
+        )
+        
+        
 @router.get("/upload/points/{flight_uuid}")
 async def get_uploaded_points(
     flight_uuid: UUID,
