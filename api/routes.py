@@ -1052,7 +1052,99 @@ async def get_uploaded_points(
             detail=f"Failed to retrieve flight points: {str(e)}"
         )
 
+
+@router.get("/upload/points/{flight_uuid}/raw")
+async def get_uploaded_points_raw(
+    flight_uuid: UUID,
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    db: Session = Depends(get_db)
+):
+    """
+    Get all uploaded track points for a specific flight in raw format.
+    Requires JWT token in Authorization header (Bearer token).
+    Returns points with datetime, lat, lon, and elevation.
+    """
+    try:
+        # Get token from Authorization header and verify it
+        token = credentials.credentials
+        try:
+            token_data = jwt.decode(
+                token,
+                settings.SECRET_KEY,
+                algorithms=["HS256"],
+                audience="api.hikeandfly.app",
+                issuer="hikeandfly.app",
+                verify=True
+            )
+            
+            if not token_data.get("sub", "").startswith("contest:"):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Invalid token subject - must be contest-specific"
+                )
+            
+        except jwt.ExpiredSignatureError:
+            raise HTTPException(
+                status_code=401,
+                detail="Token has expired"
+            )
+        except jwt.JWTError as e:
+            raise HTTPException(
+                status_code=401,
+                detail=f"Invalid token: {str(e)}"
+            )
+
+        # Get flight from database
+        flight = db.query(Flight).filter(
+            Flight.id == flight_uuid,
+            Flight.source == 'upload'
+        ).first()
+            
+        if not flight:
+            raise HTTPException(
+                status_code=404,
+                detail="Flight not found in upload collection"
+            )
+
+        # Get all track points for this flight
+        track_points = db.query(UploadedTrackPoint).filter(
+            UploadedTrackPoint.flight_uuid == flight_uuid
+        ).order_by(UploadedTrackPoint.datetime).all()
         
+        if not track_points:
+            logger.warning(f"No track points found for flight_uuid: {flight_uuid}")
+            return {
+                "success": True,
+                "flight_id": str(flight.flight_id),
+                "total_points": 0,
+                "points": []
+            }
+
+        # Format points as simple dictionaries
+        points = [{
+            "datetime": point.datetime.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "lat": float(point.lat),
+            "lon": float(point.lon),
+            "elevation": float(point.elevation) if point.elevation is not None else None
+        } for point in track_points]
+
+        return {
+            "success": True,
+            "flight_id": str(flight.flight_id),
+            "total_points": len(points),
+            "points": points
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving flight points: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve flight points: {str(e)}"
+        )
+        
+                
         
 def determine_if_landed(point) -> bool:
     """Determine if a pilot has landed based on track point data"""
