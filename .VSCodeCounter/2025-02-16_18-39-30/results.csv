@@ -1,0 +1,25 @@
+"filename", "language", "Python", "YAML", "Markdown", "Docker", "Ignore", "pip requirements", "Ini", "comment", "blank", "total"
+"/Users/simone/Apps/hfss_live/.dockerignore", "Ignore", 0, 0, 0, 0, 27, 0, 0, 0, 1, 28
+"/Users/simone/Apps/hfss_live/Dockerfile", "Docker", 0, 0, 0, 12, 0, 0, 0, 7, 8, 27
+"/Users/simone/Apps/hfss_live/README.md", "Markdown", 0, 0, 22, 0, 0, 0, 0, 0, 14, 36
+"/Users/simone/Apps/hfss_live/alembic.ini", "Ini", 0, 0, 0, 0, 0, 0, 95, 0, 25, 120
+"/Users/simone/Apps/hfss_live/alembic/env.py", "Python", 47, 0, 0, 0, 0, 0, 0, 12, 21, 80
+"/Users/simone/Apps/hfss_live/alembic/versions/2589d3077d07_introduing_cascade_delete.py", "Python", 79, 0, 0, 0, 0, 0, 0, 5, 10, 94
+"/Users/simone/Apps/hfss_live/alembic/versions/4f9416c17fa3_re_introducing_timezone.py", "Python", 79, 0, 0, 0, 0, 0, 0, 5, 10, 94
+"/Users/simone/Apps/hfss_live/api/__init_.py", "Python", 0, 0, 0, 0, 0, 0, 0, 0, 1, 1
+"/Users/simone/Apps/hfss_live/api/auth.py", "Python", 76, 0, 0, 0, 0, 0, 0, 4, 13, 93
+"/Users/simone/Apps/hfss_live/api/routes.py", "Python", 1083, 0, 0, 0, 0, 0, 0, 76, 174, 1333
+"/Users/simone/Apps/hfss_live/app.py", "Python", 59, 0, 0, 0, 0, 0, 0, 5, 26, 90
+"/Users/simone/Apps/hfss_live/config.py", "Python", 21, 0, 0, 0, 0, 0, 0, 0, 6, 27
+"/Users/simone/Apps/hfss_live/database/__init__.py", "Python", 0, 0, 0, 0, 0, 0, 0, 0, 1, 1
+"/Users/simone/Apps/hfss_live/database/db_conf.py", "Python", 20, 0, 0, 0, 0, 0, 0, 5, 10, 35
+"/Users/simone/Apps/hfss_live/database/models.py", "Python", 75, 0, 0, 0, 0, 0, 0, 3, 26, 104
+"/Users/simone/Apps/hfss_live/database/schemas.py", "Python", 140, 0, 0, 0, 0, 0, 0, 3, 26, 169
+"/Users/simone/Apps/hfss_live/docker-compose.debug.yml", "YAML", 0, 11, 0, 0, 0, 0, 0, 0, 2, 13
+"/Users/simone/Apps/hfss_live/docker-compose.yml", "YAML", 0, 26, 0, 0, 0, 0, 0, 0, 4, 30
+"/Users/simone/Apps/hfss_live/logs/__init__.py", "Python", 0, 0, 0, 0, 0, 0, 0, 0, 1, 1
+"/Users/simone/Apps/hfss_live/logs/logconfig.py", "Python", 45, 0, 0, 0, 0, 0, 0, 2, 6, 53
+"/Users/simone/Apps/hfss_live/minio_service.py", "Python", 163, 0, 0, 0, 0, 0, 0, 6, 31, 200
+"/Users/simone/Apps/hfss_live/rate_limiter.py", "Python", 6, 0, 0, 0, 0, 0, 0, 0, 4, 10
+"/Users/simone/Apps/hfss_live/requirements.txt", "pip requirements", 0, 0, 0, 0, 0, 22, 0, 0, 0, 22
+"Total", "-", 1893, 37, 22, 12, 27, 22, 95, 133, 420, 2661
