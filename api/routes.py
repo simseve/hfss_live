@@ -18,7 +18,7 @@ from math import radians, sin, cos, sqrt, atan2
 from uuid import UUID
 from sqlalchemy import func  # Add this at the top with other imports
 from aiohttp import ClientSession
-from jwt.exceptions import JWTError
+from jwt.exceptions import PyJWTError
 
 
 
@@ -596,7 +596,7 @@ async def delete_track_uuid(
                 status_code=401,
                 detail="Token has expired"
             )
-        except jwt.PyJWTError as e:
+        except PyJWTError as e:
             raise HTTPException(
                 status_code=401,
                 detail=f"Invalid token: {str(e)}"
@@ -694,7 +694,7 @@ async def get_live_points(
                 status_code=401,
                 detail="Token has expired"
             )
-        except jwt.PyJWTError as e:
+        except PyJWTError as e:
             raise HTTPException(
                 status_code=401,
                 detail=f"Invalid token: {str(e)}"
@@ -858,7 +858,7 @@ async def get_live_points_raw(
                 status_code=401,
                 detail="Token has expired"
             )
-        except jwt.PyJWTError as e:
+        except PyJWTError as e:
             raise HTTPException(
                 status_code=401,
                 detail=f"Invalid token: {str(e)}"
@@ -959,7 +959,7 @@ async def get_uploaded_points(
                 status_code=401,
                 detail="Token has expired"
             )
-        except jwt.PyJWTError as e:
+        except PyJWTError as e:
             raise HTTPException(
                 status_code=401,
                 detail=f"Invalid token: {str(e)}"
@@ -1091,7 +1091,7 @@ async def get_uploaded_points_raw(
                 status_code=401,
                 detail="Token has expired"
             )
-        except jwt.PyJWTError as e:
+        except PyJWTError as e:
             raise HTTPException(
                 status_code=401,
                 detail=f"Invalid token: {str(e)}"
@@ -1223,7 +1223,7 @@ async def get_live_users(
                 status_code=401,
                 detail="Token has expired"
             )
-        except jwt.PyJWTError as e:
+        except PyJWTError as e:
             raise HTTPException(
                 status_code=401,
                 detail=f"Invalid token: {str(e)}"
