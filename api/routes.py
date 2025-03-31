@@ -1334,3 +1334,65 @@ async def get_live_users(
             status_code=500,
             detail=f"Failed to fetch live users: {str(e)}"
         )
+    
+
+@router.get("/debug/points")
+async def get_debug_points(
+    source: str = Query(..., regex="^(live|upload)$", description="Track source ('live' or 'upload')"),
+    limit: int = Query(1000, description="Maximum number of points to return"),
+    flight_uuid: str = Query(None, description="Flight UUID"),
+    db: Session = Depends(get_db)
+):
+    """
+    Debug endpoint to get all track points from either live or uploaded flights.
+    Requires JWT token in Authorization header (Bearer token).
+    Returns raw points with pagination for performance.
+    """
+    try:
+     
+        # Select the appropriate model based on the source
+        PointModel = LiveTrackPoint if source == 'live' else UploadedTrackPoint
+        
+        # Start building the query
+        query = db.query(PointModel)
+        
+        # Apply filters if provided
+        if flight_uuid:
+            query = query.filter(PointModel.flight_id == flight_uuid)
+            
+        # Order by datetime for consistency
+        query = query.order_by(PointModel.datetime.desc())
+        
+        # Apply limit for performance
+        query = query.limit(limit)
+        
+        # Execute query
+        points = query.all()
+        
+        # Format points as simple dictionaries
+        formatted_points = [{
+            "id": str(point.id),
+            "flight_id": point.flight_id,
+            "flight_uuid": str(point.flight_uuid) if hasattr(point, 'flight_uuid') else None,
+            "datetime": point.datetime.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "lat": float(point.lat),
+            "lon": float(point.lon),
+            "elevation": float(point.elevation) if point.elevation is not None else None
+        } for point in points]
+
+        return {
+            "success": True,
+            "source": source,
+            "limit": limit,
+            "count": len(formatted_points),
+            "points": formatted_points
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving debug points: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve debug points: {str(e)}"
+        )
