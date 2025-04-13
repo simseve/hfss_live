@@ -183,7 +183,7 @@ class NotificationCommand(BaseModel):
     message: str = Field(..., description="Content of the notification message")
     
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "type": "notification",
                 "priority": "warning",
