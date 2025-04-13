@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Security, WebSocket, WebSocketDisconnect, Body
 from sqlalchemy.orm import Session
-from database.schemas import LiveTrackingRequest, LiveTrackPointCreate, FlightResponse, TrackUploadRequest
+from database.schemas import LiveTrackingRequest, LiveTrackPointCreate, FlightResponse, TrackUploadRequest, NotificationCommand
 from pydantic import ValidationError
 from database.models import UploadedTrackPoint, Flight, LiveTrackPoint, Race
 from typing import List, Dict, Any, Optional
@@ -1533,11 +1533,10 @@ async def websocket_tracking_endpoint(
 
 
 
-
 @router.post("/command/{race_id}")
 async def send_command_notification(
     race_id: str,
-    command: dict = Body(...),
+    command: NotificationCommand,
     credentials: HTTPAuthorizationCredentials = Security(security),
     db: Session = Depends(get_db)
 ):
@@ -1573,12 +1572,10 @@ async def send_command_notification(
                 detail=f"Invalid token: {str(e)}"
             )
         
-        # Process the command
-        command_type = command.get("type", "notification")
+        # Process the command - use dot notation for Pydantic models, not .get()
         command_data = {
-            "priority": command.get("priority", "info"),
-            "message": command.get("message", ""),
-            "action": command.get("action"),
+            "priority": command.priority,  # Access directly with dot notation
+            "message": command.message,    # Access directly with dot notation
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
         
@@ -1589,7 +1586,7 @@ async def send_command_notification(
         return {
             "success": True,
             "recipients": manager.get_active_viewers(race_id),
-            "command": command_type,
+            "command": command.type,       # Access directly with dot notation
             "timestamp": command_data["timestamp"]
         }
         

@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from typing import Optional, Literal, Dict, Any, List
 from uuid import UUID
 from pydantic import BaseModel, Field
+from enum import Enum
 
 class RaceBase(BaseModel):
     race_id: str
@@ -166,4 +167,26 @@ class UpdatedLiveTrackingRequest(BaseModel):
     race_id: Optional[str] = None
     flight_id: str
     track_points: List[Dict[str, Any]]
+
+
+
+
+class NotificationPriority(str, Enum):
+    INFO = "info"
+    WARNING = "warning"
+    ALERT = "alert"
+    EMERGENCY = "emergency"
+
+class NotificationCommand(BaseModel):
+    type: str = Field("notification", description="Type of command, defaults to 'notification'")
+    priority: NotificationPriority = Field(default=NotificationPriority.INFO, description="Priority level of the notification")
+    message: str = Field(..., description="Content of the notification message")
     
+    class Config:
+        schema_extra = {
+            "example": {
+                "type": "notification",
+                "priority": "warning",
+                "message": "Weather conditions are deteriorating. Use caution."
+            }
+        }
