@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, Security
+from fastapi import APIRouter, Depends, HTTPException, Query, Security, WebSocket, WebSocketDisconnect, Body
 from sqlalchemy.orm import Session
 from database.schemas import LiveTrackingRequest, LiveTrackPointCreate, FlightResponse, TrackUploadRequest
 from pydantic import ValidationError
@@ -19,7 +19,12 @@ from uuid import UUID
 from sqlalchemy import func  # Add this at the top with other imports
 from aiohttp import ClientSession
 from jwt.exceptions import PyJWTError
-
+from fastapi.responses import HTMLResponse
+from starlette.websockets import WebSocketState
+import asyncio
+import json
+from typing import Dict, Set, List
+from ws_conn import manager
 
 
 logger = logging.getLogger(__name__)
@@ -1395,4 +1400,204 @@ async def get_debug_points(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to retrieve debug points: {str(e)}"
+        )
+    
+
+
+@router.websocket("/ws/track/{race_id}")
+async def websocket_tracking_endpoint(
+    websocket: WebSocket, 
+    race_id: str, 
+    client_id: str = Query(...),
+    token: str = Query(...),
+    db: Session = Depends(get_db)
+):
+    """WebSocket endpoint for real-time tracking updates"""
+    try:
+        # Verify token
+        try:
+            token_data = jwt.decode(
+                token,
+                settings.SECRET_KEY,
+                algorithms=["HS256"],
+                audience="api.hikeandfly.app",
+                issuer="hikeandfly.app",
+                verify=True
+            )
+            
+            if not token_data.get("sub", "").startswith("contest:"):
+                await websocket.close(code=1008, reason="Invalid token")
+                return
+                
+            token_race_id = token_data["sub"].split(":")[1]
+            
+            # Verify race_id matches token
+            if race_id != token_race_id:
+                await websocket.close(code=1008, reason="Token not valid for this race")
+                return
+                
+        except (PyJWTError, jwt.ExpiredSignatureError) as e:
+            await websocket.close(code=1008, reason="Invalid token")
+            return
+        
+        # Connect this client to the race
+        await manager.connect(websocket, race_id, client_id)
+        
+        # Send initial data - get active flights for this race
+        current_time = datetime.now(timezone.utc)
+        opentime = current_time - timedelta(hours=24)  # Look back 24 hours
+        
+        # Query flights using existing get_live_users logic
+        flights = (
+            db.query(Flight)
+            .filter(
+                Flight.race_id == race_id,
+                Flight.created_at >= opentime,
+                Flight.source == 'live'
+            )
+            .all()
+        )
+        
+        # Convert to the expected format
+        flight_data = []
+        for flight in flights:
+            flight_info = {
+                "uuid": str(flight.id),
+                "pilot_id": flight.pilot_id,
+                "pilot_name": flight.pilot_name,
+                "firstFix": {
+                    "lat": flight.first_fix['lat'],
+                    "lon": flight.first_fix['lon'],
+                    "elevation": flight.first_fix.get('elevation', 0),
+                    "datetime": flight.first_fix['datetime']
+                },
+                "lastFix": {
+                    "lat": flight.last_fix['lat'],
+                    "lon": flight.last_fix['lon'],
+                    "elevation": flight.last_fix.get('elevation', 0),
+                    "datetime": flight.last_fix['datetime']
+                },
+                "source": flight.source,
+            }
+            flight_data.append(flight_info)
+        
+        # Send initial data to the client
+        await websocket.send_json({
+            "type": "initial_data",
+            "race_id": race_id,
+            "flights": flight_data,
+            "active_viewers": manager.get_active_viewers(race_id)
+        })
+        
+        # Keep connection alive and handle client messages
+        while True:
+            try:
+                # Wait for messages with timeout
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=30)
+                
+                # Message handling remains unchanged...
+                try:
+                    message = json.loads(data)
+                    message_type = message.get("type")
+                    
+                    if message_type == "ping":
+                        await websocket.send_json({"type": "pong", "timestamp": datetime.now(timezone.utc).isoformat()})
+                    
+                    elif message_type == "request_refresh":
+                        # Handle refresh
+                        pass
+                        
+                except json.JSONDecodeError:
+                    await websocket.send_json({"type": "error", "message": "Invalid message format"})
+                    
+            except asyncio.TimeoutError:
+                # No message received within timeout period
+                # Send a heartbeat to check if connection is still alive
+                try:
+                    await websocket.send_json({"type": "heartbeat", "timestamp": datetime.now(timezone.utc).isoformat()})
+                except Exception:
+                    # Connection is likely dead
+                    logger.warning(f"Connection to client {client_id} timed out")
+                    break
+                
+    except WebSocketDisconnect:
+        # Client disconnected
+        await manager.disconnect(websocket, client_id)
+    except Exception as e:
+        logger.error(f"WebSocket error: {str(e)}")
+        try:
+            await websocket.close(code=1011, reason="Server error")
+        except:
+            pass
+        await manager.disconnect(websocket, client_id)
+
+
+
+
+@router.post("/command/{race_id}")
+async def send_command_notification(
+    race_id: str,
+    command: dict = Body(...),
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    db: Session = Depends(get_db)
+):
+    """Send a command notification to all clients connected to a specific race"""
+    try:
+        # Verify token
+        token = credentials.credentials
+        try:
+            token_data = jwt.decode(
+                token,
+                settings.SECRET_KEY,
+                algorithms=["HS256"],
+                audience="api.hikeandfly.app",
+                issuer="hikeandfly.app",
+                verify=True
+            )
+            
+            # # Check for admin privileges
+            # if not token_data.get("admin", False):
+            #     raise HTTPException(
+            #         status_code=403,
+            #         detail="Insufficient privileges for sending commands"
+            #     )
+                
+        except jwt.ExpiredSignatureError:
+            raise HTTPException(
+                status_code=401,
+                detail="Token has expired"
+            )
+        except PyJWTError as e:
+            raise HTTPException(
+                status_code=401,
+                detail=f"Invalid token: {str(e)}"
+            )
+        
+        # Process the command
+        command_type = command.get("type", "notification")
+        command_data = {
+            "priority": command.get("priority", "info"),
+            "message": command.get("message", ""),
+            "action": command.get("action"),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        
+        # Send the command to all connected clients for this race
+        await manager.send_command_notification(race_id, command_data)
+        
+        # Return success response
+        return {
+            "success": True,
+            "recipients": manager.get_active_viewers(race_id),
+            "command": command_type,
+            "timestamp": command_data["timestamp"]
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error sending command: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to send command: {str(e)}"
         )

@@ -20,3 +20,6 @@ python-multipart
 python-dotenv
 PyJWT
 aiohttp
+python-socketio
+websockets
+redis[hiredis]

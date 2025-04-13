@@ -6,6 +6,7 @@ import logging
 import uvicorn
 from fastapi.middleware.cors import CORSMiddleware
 import datetime
+import asyncio  # Add this import for background tasks
 from rate_limiter import rate_limiter
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -13,8 +14,32 @@ from slowapi.middleware import SlowAPIMiddleware
 from fastapi import FastAPI
 from fastapi.security import HTTPBasic
 import api.routes as routes
+from background_tracking import periodic_tracking_update
+from contextlib import asynccontextmanager
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app):
+    # Start the background task when the application starts
+    task = asyncio.create_task(periodic_tracking_update(30))  # Update every 30 seconds
+    
+    # Yield control back to FastAPI
+    yield
+    
+    # Cleanup when the application shuts down
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        # Task was successfully cancelled
+        pass
+
+
+
+
+app = FastAPI(lifespan=lifespan)
+# Apply the lifespan context
+app.router.lifespan_context = lifespan
+
 
 system_startup_time = datetime.datetime.now()
 
@@ -43,7 +68,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=False,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],  # Explicitly list allowed methods
+    allow_methods=["GET", "POST", "PUT", "DELETE",
+                   "OPTIONS"],  # Explicitly list allowed methods
     allow_headers=["*"],
 )
 
@@ -66,7 +92,8 @@ app.state.limiter = rate_limiter
 app.add_middleware(SlowAPIMiddleware)
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# app.mount("/static", StaticFiles(directory="static"), name="static")
+
+
 
 
 @app.get('/health')
@@ -83,7 +110,5 @@ def root():
     return response
 
 
-
 if __name__ == "__main__":
     uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
-
