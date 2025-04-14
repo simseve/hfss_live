@@ -1,9 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Security, WebSocket, WebSocketDisconnect, Body
 from sqlalchemy.orm import Session
-from database.schemas import LiveTrackingRequest, LiveTrackPointCreate, FlightResponse, TrackUploadRequest, NotificationCommand
-from pydantic import ValidationError
+from database.schemas import LiveTrackingRequest, LiveTrackPointCreate, FlightResponse, TrackUploadRequest, NotificationCommand, NotificationToken, SubscriptionRequest, UnsubscriptionRequest, NotificationRequest
 from database.models import UploadedTrackPoint, Flight, LiveTrackPoint, Race
-from typing import List, Dict, Any, Optional
+from typing import Dict, Optional
 from database.db_conf import get_db
 import logging
 from api.auth import verify_tracking_token
@@ -23,7 +22,6 @@ from fastapi.responses import HTMLResponse
 from starlette.websockets import WebSocketState
 import asyncio
 import json
-from typing import Dict, Set, List
 from ws_conn import manager
 
 
@@ -1598,3 +1596,95 @@ async def send_command_notification(
             status_code=500,
             detail=f"Failed to send command: {str(e)}"
         )
+    
+
+
+# In-memory storage (replace with database in production)
+tokens_db = []
+
+
+@router.post("/notifications/subscribe")
+async def subscribe_to_notifications(request: SubscriptionRequest):
+    # Check if token already exists for this race
+    for token_entry in tokens_db:
+        if token_entry.token == request.token and token_entry.raceId == request.raceId:
+            return {"success": True, "message": "Already subscribed"}
+    
+    # Store new token
+    new_token = NotificationToken(
+        token=request.token,
+        raceId=request.raceId,
+        deviceId=request.deviceId,
+        platform=request.platform,
+        created_at=datetime.now().isoformat()
+    )
+    tokens_db.append(new_token)
+    
+    return {"success": True, "message": "Successfully subscribed to race notifications"}
+
+@router.post("/notifications/unsubscribe")
+async def unsubscribe_from_notifications(request: UnsubscriptionRequest):
+    initial_count = len(tokens_db)
+    
+    # Remove matching tokens
+    global tokens_db
+    tokens_db = [
+        token for token in tokens_db 
+        if not (token.token == request.token and token.raceId == request.raceId)
+    ]
+    
+    removed = initial_count - len(tokens_db)
+    return {"success": True, "message": f"Unsubscribed from race notifications", "removed": removed}
+
+@router.post("/notifications/send")
+async def send_notification(request: NotificationRequest):
+    # Find all tokens for this race
+    race_tokens = [token.token for token in tokens_db if token.raceId == request.raceId]
+    
+    if not race_tokens:
+        raise HTTPException(status_code=404, detail="No subscribers found for this race")
+    
+    # Send notifications
+    tickets = []
+    errors = []
+    
+    for token in race_tokens:
+        try:
+            ticket = await send_push_message(
+                token=token,
+                title=request.title,
+                message=request.body,
+                extra_data=request.data
+            )
+            tickets.append(ticket)
+        except Exception as e:
+            errors.append({"token": token, "error": str(e)})
+    
+    return {
+        "success": len(errors) == 0,
+        "sent": len(tickets),
+        "errors": len(errors),
+        "error_details": errors if errors else None
+    }
+
+# Expo Push Notification Helper Function
+async def send_push_message(token: str, title: str, message: str, extra_data: dict = None):
+    try:
+        response = await PushClient().publish(
+            PushMessage(
+                to=token,
+                title=title,
+                body=message,
+                data=extra_data or {},
+            )
+        )
+        return response
+    except DeviceNotRegisteredError:
+        # Remove the invalid token
+        global tokens_db
+        tokens_db = [t for t in tokens_db if t.token != token]
+        raise ValueError(f"Device not registered")
+    except PushServerError as e:
+        raise ValueError(f"Push server error: {e}")
+    except Exception as e:
+        raise ValueError(f"Error sending push notification: {e}")

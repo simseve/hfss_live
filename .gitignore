@@ -16,7 +16,6 @@
 
 # IDE and editor files
 .idea/
-.vscode/
 *.swp
 *.swo
 .DS_Store
@@ -67,3 +66,9 @@ Thumbs.db
 .VScodeCounter/
 __pycache__/
 alembic/
+
+# Python bytecode files
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/

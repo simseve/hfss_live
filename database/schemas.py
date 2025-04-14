@@ -190,3 +190,29 @@ class NotificationCommand(BaseModel):
                 "message": "Weather conditions are deteriorating. Use caution."
             }
         }
+
+
+# Database models - replace with your actual database solution
+class NotificationToken(BaseModel):
+    token: str
+    raceId: str
+    deviceId: Optional[str] = None
+    platform: Optional[str] = None
+    created_at: Optional[str] = None
+
+# Request models
+class SubscriptionRequest(BaseModel):
+    token: str
+    raceId: str
+    deviceId: Optional[str] = None
+    platform: Optional[str] = "android"  # Default to iOS
+
+class UnsubscriptionRequest(BaseModel):
+    token: str
+    raceId: str
+
+class NotificationRequest(BaseModel):
+    raceId: str
+    title: str
+    body: str
+    data: Optional[dict] = None
