@@ -41,6 +41,7 @@ class UploadedTrackPointCreate(TrackPointBase):
 class LiveTrackingRequest(BaseModel):
     track_points: List[Dict[str, Any]]  # Raw track points data
     flight_id: Optional[str] = None
+    device_id: Optional[str] = None
 
     class Config:
         json_schema_extra = {
@@ -107,6 +108,7 @@ class TrackUploadRequest(BaseModel):
     pilot_id: Optional[str] = None
     race_id: Optional[str] = None
     flight_id: str = Field(..., max_length=100)
+    device_id: Optional[str] = None
     track_points: List[Dict[str, Any]]
 
     class Config:

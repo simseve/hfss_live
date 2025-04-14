@@ -75,10 +75,9 @@ async def live_tracking(
         flight = db.query(Flight).filter(
             Flight.flight_id == data.flight_id).first()
 
-        try:
-            device_id = data.track_points[0].get('device_id', 'anonymous')
-        except (IndexError, AttributeError, TypeError):
-            device_id = 'anonymous'
+
+        device_id = data.device_id if hasattr(data, 'device_id') else 'anonymous'
+
         
         latest_point = data.track_points[-1]
         latest_datetime = datetime.fromisoformat(
@@ -155,8 +154,7 @@ async def live_tracking(
                     .strftime('%Y-%m-%dT%H:%M:%SZ'),
                     lat=point['lat'],
                     lon=point['lon'],
-                    elevation=point.get('elevation'),
-                    device_id=device_id
+                    elevation=point.get('elevation')
                 ).model_dump()
             ) for point in data.track_points
         ]
@@ -264,10 +262,7 @@ async def upload_track(
                     detail="Flight ID with source upload already exists. Each flight must have a unique ID."
                 )
 
-            try:
-                device_id = upload_data.track_points[0].get('device_id', 'anonymous')
-            except (IndexError, AttributeError, TypeError):
-                device_id = 'anonymous'
+            device_id = upload_data.device_id if hasattr(upload_data, 'device_id') else 'anonymous'
 
             # Process first and last points
             first_point = upload_data.track_points[0]
@@ -320,8 +315,7 @@ async def upload_track(
                         'Z', '+00:00')).astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
                     lat=point['lat'],
                     lon=point['lon'],
-                    elevation=point.get('elevation'),
-                    device_id=device_id
+                    elevation=point.get('elevation')
                 )
                 for point in upload_data.track_points
             ]
@@ -393,8 +387,7 @@ async def get_flights(
                 'start_time': flight.start_time.isoformat() if flight.start_time else None,
                 'end_time': flight.end_time.isoformat() if flight.end_time else None,
                 'total_points': flight.total_points,
-                'metadata': flight.flight_metadata,
-                'device_id': flight.device_id
+                'metadata': flight.flight_metadata
             } for flight in flights]
         }
 
