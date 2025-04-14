@@ -1822,14 +1822,15 @@ async def send_notification(
 async def send_push_message(token: str, title: str, message: str, extra_data: dict = None):
     """Send a push notification using Expo's push notification service"""
     try:
-        response = await PushClient().publish(
-            PushMessage(
-                to=token,
-                title=title,
-                body=message,
-                data=extra_data or {},
-            )
+        # PushClient().publish() returns a PushTicket directly, not a coroutine
+        # so we shouldn't await it
+        message = PushMessage(
+            to=token,
+            title=title,
+            body=message,
+            data=extra_data or {},
         )
+        response = PushClient().publish(message)
         return response
     except DeviceNotRegisteredError:
         raise ValueError("Device not registered")

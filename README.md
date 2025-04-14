@@ -11,6 +11,7 @@ SELECT create_hypertable('uploaded_track_points', 'datetime', chunk_time_interva
 GRANT ALL PRIVILEGES ON TABLE uploaded_track_points TO py_ll_user;
 GRANT ALL PRIVILEGES ON TABLE flights TO py_ll_user;
 GRANT ALL PRIVILEGES ON TABLE races TO py_ll_user;
+GRANT ALL PRIVILEGES ON TABLE notification_tokens TO py_ll_user;
 ```
 
 -- Common privileges needed for both tables
