@@ -1538,21 +1538,21 @@ async def websocket_tracking_endpoint(
         )
 
         # Further filter to only pilots who have been active in the last hour
-        active_threshold = current_time - timedelta(minutes=60)
-        active_flights = []
+        # active_threshold = current_time - timedelta(minutes=60)
+        # active_flights = []
 
-        for flight in flights:
-            last_fix_time = datetime.fromisoformat(
-                flight.last_fix['datetime'].replace('Z', '+00:00')
-            ).astimezone(timezone.utc)
+        # for flight in flights:
+        #     last_fix_time = datetime.fromisoformat(
+        #         flight.last_fix['datetime'].replace('Z', '+00:00')
+        #     ).astimezone(timezone.utc)
 
-            if last_fix_time >= active_threshold:
-                active_flights.append(flight)
+        #     if last_fix_time >= active_threshold:
+        #         active_flights.append(flight)
 
         # Process flights as before, but only using active_flights
         pilot_latest_flights = {}
 
-        for flight in active_flights:
+        for flight in flights:
             pilot_id = str(flight.pilot_id)
 
             # If we haven't seen this pilot yet, this is their most recent flight

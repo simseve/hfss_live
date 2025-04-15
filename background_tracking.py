@@ -1,9 +1,10 @@
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, time
 from database.models import Flight, LiveTrackPoint, Race
 import asyncio
 from ws_conn import manager
 from database.db_conf import Session
 import logging
+from zoneinfo import ZoneInfo
 
 
 logger = logging.getLogger(__name__)
@@ -32,46 +33,73 @@ async def periodic_tracking_update(interval_seconds: int = 30):
 
                 # Get a DB session
                 with Session() as db:
-                    # Query for latest tracking data
+                    # Current server time in UTC
                     current_time = datetime.now(timezone.utc)
-                    lookback_time = current_time - \
-                        timedelta(minutes=10)  # Last 10 minutes
 
-                    # Get flights with recent updates
+                    # Get race information including timezone
+                    race = db.query(Race).filter(
+                        Race.race_id == race_id).first()
+                    if not race or not race.timezone:
+                        race_timezone = timezone.utc  # Default to UTC if race timezone not found
+                    else:
+                        # Get the timezone object from the race
+                        race_timezone = ZoneInfo(race.timezone)
+
+                    # Convert current time to race's local timezone
+                    race_local_time = current_time.astimezone(race_timezone)
+
+                    # Calculate the start and end of the current day in race's timezone
+                    race_day_start = datetime.combine(
+                        race_local_time.date(), time.min, tzinfo=race_timezone)
+                    race_day_end = datetime.combine(
+                        race_local_time.date(), time.max, tzinfo=race_timezone)
+
+                    # Convert back to UTC for database query
+                    utc_day_start = race_day_start.astimezone(timezone.utc)
+                    utc_day_end = race_day_end.astimezone(timezone.utc)
+
+                    # Get flights active today (with a small buffer before race day)
+                    # Allow pilots who started slightly before race day
+                    lookback_buffer = timedelta(hours=4)
                     flights = (
                         db.query(Flight)
                         .filter(
-                            Flight.race_id == race_id
+                            Flight.race_id == race_id,
+                            Flight.created_at >= utc_day_start - lookback_buffer,
+                            Flight.created_at <= utc_day_end,
+                            Flight.source == 'live'
                         )
+                        .order_by(Flight.created_at.desc())
                         .all()
                     )
 
-                    # Filter flights with recent updates
-                    active_flights = []
+                    # # Further filter to only pilots who have been active in the last hour
+                    # active_threshold = current_time - timedelta(minutes=60)
+                    # active_flights = []
+
+                    # for flight in flights:
+                    #     last_fix_time = datetime.fromisoformat(
+                    #         flight.last_fix['datetime'].replace('Z', '+00:00')
+                    #     ).astimezone(timezone.utc)
+
+                    #     if last_fix_time >= active_threshold:
+                    #         active_flights.append(flight)
+
+                    # Process flights to get the most recent one per pilot
+                    pilot_latest_flights = {}
+
                     for flight in flights:
-                        # Skip flights without last_fix
-                        if not flight.last_fix or 'datetime' not in flight.last_fix:
-                            continue
+                        pilot_id = str(flight.pilot_id)
 
-                        try:
-                            # Parse last_fix datetime and compare with lookback time
-                            last_fix_time = datetime.fromisoformat(
-                                flight.last_fix['datetime'].replace(
-                                    'Z', '+00:00')
-                            ).astimezone(timezone.utc)
-
-                            if last_fix_time >= lookback_time:
-                                active_flights.append(flight)
-                        except (ValueError, KeyError) as e:
-                            logger.error(
-                                f"Error parsing datetime for flight {flight.id}: {e}")
-
-                    if not active_flights:
-                        continue
+                        # If we haven't seen this pilot yet, this is their most recent flight
+                        # (since flights are already ordered by created_at DESC)
+                        if pilot_id not in pilot_latest_flights:
+                            pilot_latest_flights[pilot_id] = flight
 
                     # Format flight data for the update
                     flight_updates = []
-                    for flight in active_flights:
+
+                    for pilot_id, flight in pilot_latest_flights.items():
                         flight_info = {
                             "uuid": str(flight.id),
                             "pilot_id": flight.pilot_id,
@@ -93,25 +121,13 @@ async def periodic_tracking_update(interval_seconds: int = 30):
                                 flight.last_fix['datetime'].replace('Z', '+00:00')).astimezone(timezone.utc)
 
                             flight_id_str = str(flight.id)
-                            race_pilots_sent = manager.get_pilots_with_sent_data(
-                                race_id)
 
-                            # Check if we've seen this pilot before
-                            first_update = flight_id_str not in race_pilots_sent
-
-                            # Get just new points since last update
+                            # Get last sent time for this flight
                             last_sent_time = manager.get_last_update_time(
                                 race_id, flight_id_str)
 
-                            if first_update:
-                                # If this is the first update since connection, we don't need to send
-                                # the full track history since it was already sent in initial_data
-                                # Just mark this pilot as having data and continue to next pilot
-                                manager.add_pilot_with_sent_data(
-                                    race_id, flight_id_str, latest_time)
-                                continue
-
                             # For subsequent updates, get points since last update
+                            # If no last_sent_time, use a small lookback period
                             earliest_time = last_sent_time if last_sent_time else (
                                 latest_time - timedelta(seconds=30))
 
