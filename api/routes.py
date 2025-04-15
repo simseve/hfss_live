@@ -10,7 +10,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from uuid import uuid4
 from sqlalchemy.dialects.postgresql import insert
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, time
 import jwt
 from config import settings
 from math import radians, sin, cos, sqrt, atan2
@@ -30,7 +30,7 @@ from exponent_server_sdk import (
     PushMessage,
     PushServerError,
 )
-
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
@@ -1497,49 +1497,91 @@ async def websocket_tracking_endpoint(
         # Connect this client to the race
         await manager.connect(websocket, race_id, client_id)
 
-        # Send initial data - get active flights for this race
+        # Current server time in UTC
         current_time = datetime.now(timezone.utc)
-        opentime = current_time - timedelta(hours=24)  # Look back 24 hours
 
-        # Query flights using existing get_live_users logic
+        # Get race information including timezone
+        race = db.query(Race).filter(Race.race_id == race_id).first()
+        if not race or not race.timezone:
+            race_timezone = timezone.utc  # Default to UTC if race timezone not found
+        else:
+            # Get the timezone object from the race
+            race_timezone = ZoneInfo(race.timezone)  # Requires Python 3.9+ with zoneinfo
+
+        # Convert current time to race's local timezone
+        race_local_time = current_time.astimezone(race_timezone)
+
+        # Calculate the start and end of the current day in race's timezone
+        race_day_start = datetime.combine(race_local_time.date(), time.min, tzinfo=race_timezone)
+        race_day_end = datetime.combine(race_local_time.date(), time.max, tzinfo=race_timezone)
+
+        # Convert back to UTC for database query
+        utc_day_start = race_day_start.astimezone(timezone.utc)
+        utc_day_end = race_day_end.astimezone(timezone.utc)
+
+        # Get flights active today (with a small buffer before race day)
+        lookback_buffer = timedelta(hours=4)  # Allow pilots who started slightly before race day
         flights = (
             db.query(Flight)
             .filter(
                 Flight.race_id == race_id,
-                Flight.created_at >= opentime,
+                Flight.created_at >= utc_day_start - lookback_buffer,
+                Flight.created_at <= utc_day_end,
                 Flight.source == 'live'
             )
+            .order_by(Flight.created_at.desc())
             .all()
         )
 
-        # Convert to the expected format
-        flight_data = []
-        for flight in flights:
-            flight_info = {
-                "uuid": str(flight.id),
-                "pilot_id": flight.pilot_id,
-                "pilot_name": flight.pilot_name,
-                "firstFix": {
-                    "lat": flight.first_fix['lat'],
-                    "lon": flight.first_fix['lon'],
-                    "elevation": flight.first_fix.get('elevation', 0),
-                    "datetime": flight.first_fix['datetime']
-                },
-                "lastFix": {
-                    "lat": flight.last_fix['lat'],
-                    "lon": flight.last_fix['lon'],
-                    "elevation": flight.last_fix.get('elevation', 0),
-                    "datetime": flight.last_fix['datetime']
-                },
-                "source": flight.source,
-            }
-            flight_data.append(flight_info)
+        # # Further filter to only pilots who have been active in the last hour
+        # active_threshold = current_time - timedelta(minutes=60)
+        # active_flights = []
 
-        # Send initial data to the client
+        # for flight in flights:
+        #     last_fix_time = datetime.fromisoformat(
+        #         flight.last_fix['datetime'].replace('Z', '+00:00')
+        #     ).astimezone(timezone.utc)
+            
+        #     if last_fix_time >= active_threshold:
+        #         active_flights.append(flight)
+
+        # Process flights as before, but only using active_flights
+        pilot_latest_flights = {}
+
+        for flight in flights:
+            pilot_id = str(flight.pilot_id)
+            
+            # If we haven't seen this pilot yet, this is their most recent flight
+            if pilot_id not in pilot_latest_flights:
+                pilot_latest_flights[pilot_id] = {
+                    "uuid": str(flight.id),
+                    "pilot_id": flight.pilot_id,
+                    "pilot_name": flight.pilot_name,
+                    "firstFix": {
+                        "lat": flight.first_fix['lat'],
+                        "lon": flight.first_fix['lon'],
+                        "elevation": flight.first_fix.get('elevation', 0),
+                        "datetime": flight.first_fix['datetime']
+                    },
+                    "lastFix": {
+                        "lat": flight.last_fix['lat'],
+                        "lon": flight.last_fix['lon'],
+                        "elevation": flight.last_fix.get('elevation', 0),
+                        "datetime": flight.last_fix['datetime']
+                    },
+                    "source": flight.source,
+                    "lastFixTime": flight.last_fix['datetime'],
+                    "isActive": True  # Mark as currently active
+                }
+
+        # Now convert the dictionary values to a list for the response
+        consolidated_flight_data = list(pilot_latest_flights.values())
+
+        # Send just the most recent flight per pilot
         await websocket.send_json({
             "type": "initial_data",
             "race_id": race_id,
-            "flights": flight_data,
+            "flights": consolidated_flight_data,
             "active_viewers": manager.get_active_viewers(race_id)
         })
 
