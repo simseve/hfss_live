@@ -1,0 +1,46 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches:
+      - main  # Trigger the workflow on push to the main branch
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Generate version
+      id: version
+      run: |
+        TZ=Europe/Berlin date +'%Y.%m.%d.%H%M'
+        echo "BUILD_VERSION=$(TZ=Europe/Berlin date +'%Y.%m.%d.%H%M')-${GITHUB_SHA::7}" >> $GITHUB_ENV
+
+    - name: Set up SSH
+      uses: webfactory/ssh-agent@v0.5.4
+      with:
+        ssh-private-key: ${{ secrets.TIME4VPS }}
+
+    - name: Deploy to VPS
+      run: |
+        ssh -o StrictHostKeyChecking=no ubuntu@89.47.162.7 << EOF
+          export HOSTNAME=\$(hostname)
+          
+          cd ~/apps/hfss_live
+          git pull origin main
+          
+          docker-compose down
+          docker-compose up -d --build
+          
+          echo "Deployed successfully on host \$HOSTNAME"
+        EOF
+      env:
+        SSH_PRIVATE_KEY: ${{ secrets.TIME4VPS }}

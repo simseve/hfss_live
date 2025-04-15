@@ -47,6 +47,7 @@ class LiveTrackingRequest(BaseModel):
         json_schema_extra = {
             "example": {
                 "flight_id": "flight_123",
+                "device_id": "device_456",
                 "track_points": [
                     {
                         "lat": 45.5231,
@@ -117,6 +118,7 @@ class TrackUploadRequest(BaseModel):
                 "pilot_id": "pilot123",
                 "race_id": "race456",
                 "flight_id": "flight_123",
+                "device_id": "device_456",
                 "track_points": [
                     {
                         "datetime": "2024-03-20T14:23:45.123Z",

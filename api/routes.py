@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Security, WebSocket, WebSocketDisconnect, Body
 from sqlalchemy.orm import Session
-from database.schemas import LiveTrackingRequest, LiveTrackPointCreate, FlightResponse, TrackUploadRequest, NotificationCommand, NotificationToken, SubscriptionRequest, UnsubscriptionRequest, NotificationRequest
+from database.schemas import LiveTrackingRequest, LiveTrackPointCreate, FlightResponse, TrackUploadRequest, NotificationCommand, SubscriptionRequest, UnsubscriptionRequest, NotificationRequest
 from database.models import UploadedTrackPoint, Flight, LiveTrackPoint, Race, NotificationTokenDB
 from typing import Dict, Optional
 from database.db_conf import get_db
