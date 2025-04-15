@@ -96,43 +96,42 @@ async def periodic_tracking_update(interval_seconds: int = 30):
                             race_pilots_sent = manager.get_pilots_with_sent_data(
                                 race_id)
 
-                            # Check if first request for this pilot
-                            is_first_update = flight_id_str not in race_pilots_sent
+                            # Check if we've seen this pilot before
+                            first_update = flight_id_str not in race_pilots_sent
 
-                            if is_first_update:
-                                # For first update, get all available points
-                                latest_points = (
-                                    db.query(LiveTrackPoint)
-                                    .filter(LiveTrackPoint.flight_uuid == flight.id)
-                                    .order_by(LiveTrackPoint.datetime.asc())
-                                    .all()
-                                )
-                                # Mark this pilot as having received their initial data
+                            # Get just new points since last update
+                            last_sent_time = manager.get_last_update_time(
+                                race_id, flight_id_str)
+
+                            if first_update:
+                                # If this is the first update since connection, we don't need to send
+                                # the full track history since it was already sent in initial_data
+                                # Just mark this pilot as having data and continue to next pilot
                                 manager.add_pilot_with_sent_data(
                                     race_id, flight_id_str, latest_time)
-                                logger.info(
-                                    f"Sending initial track data for flight {flight_id_str}")
-                            else:
-                                # Get just new points since last update
-                                last_sent_time = manager.get_last_update_time(
-                                    race_id, flight_id_str)
-                                earliest_time = last_sent_time if last_sent_time else (
-                                    latest_time - timedelta(seconds=30))
+                                continue
 
-                                latest_points = (
-                                    db.query(LiveTrackPoint)
-                                    .filter(
-                                        LiveTrackPoint.flight_uuid == flight.id,
-                                        LiveTrackPoint.datetime > earliest_time
-                                    )
-                                    .order_by(LiveTrackPoint.datetime.asc())
-                                    .all()
+                            # For subsequent updates, get points since last update
+                            earliest_time = last_sent_time if last_sent_time else (
+                                latest_time - timedelta(seconds=30))
+
+                            latest_points = (
+                                db.query(LiveTrackPoint)
+                                .filter(
+                                    LiveTrackPoint.flight_uuid == flight.id,
+                                    LiveTrackPoint.datetime > earliest_time
                                 )
+                                .order_by(LiveTrackPoint.datetime.asc())
+                                .all()
+                            )
 
-                                # Update the last sent time
-                                if latest_points:
-                                    manager.add_pilot_with_sent_data(
-                                        race_id, flight_id_str, latest_time)
+                            # Update the last sent time
+                            if latest_points:
+                                manager.add_pilot_with_sent_data(
+                                    race_id, flight_id_str, latest_time)
+                            else:
+                                # No new points to send
+                                continue
 
                             # Format points for transfer (similar to your GeoJSON endpoint)
                             coordinates = []
@@ -165,14 +164,15 @@ async def periodic_tracking_update(interval_seconds: int = 30):
                             # Add points to flight info
                             flight_info["track_update"] = {
                                 "type": "LineString",
-                                "coordinates": coordinates,
-                                "is_initial": is_first_update  # Flag to tell client if this is initial data
+                                "coordinates": coordinates
                             }
 
                         flight_updates.append(flight_info)
 
-                    # Broadcast update to all clients for this race
-                    await manager.send_update(race_id, flight_updates)
+                    # Only send update if there are valid flights with updates
+                    if flight_updates:
+                        # Broadcast update to all clients for this race
+                        await manager.send_update(race_id, flight_updates)
 
         except Exception as e:
             logger.error(f"Error in periodic tracking update: {str(e)}")
