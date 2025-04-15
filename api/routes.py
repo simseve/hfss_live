@@ -75,10 +75,9 @@ async def live_tracking(
         flight = db.query(Flight).filter(
             Flight.flight_id == data.flight_id).first()
 
+        device_id = data.device_id if hasattr(
+            data, 'device_id') else 'anonymous'
 
-        device_id = data.device_id if hasattr(data, 'device_id') else 'anonymous'
-
-        
         latest_point = data.track_points[-1]
         latest_datetime = datetime.fromisoformat(
             latest_point['datetime'].replace('Z', '+00:00')).astimezone(timezone.utc)
@@ -262,7 +261,8 @@ async def upload_track(
                     detail="Flight ID with source upload already exists. Each flight must have a unique ID."
                 )
 
-            device_id = upload_data.device_id if hasattr(upload_data, 'device_id') else 'anonymous'
+            device_id = upload_data.device_id if hasattr(
+                upload_data, 'device_id') else 'anonymous'
 
             # Process first and last points
             first_point = upload_data.track_points[0]
@@ -1506,21 +1506,25 @@ async def websocket_tracking_endpoint(
             race_timezone = timezone.utc  # Default to UTC if race timezone not found
         else:
             # Get the timezone object from the race
-            race_timezone = ZoneInfo(race.timezone)  # Requires Python 3.9+ with zoneinfo
+            # Requires Python 3.9+ with zoneinfo
+            race_timezone = ZoneInfo(race.timezone)
 
         # Convert current time to race's local timezone
         race_local_time = current_time.astimezone(race_timezone)
 
         # Calculate the start and end of the current day in race's timezone
-        race_day_start = datetime.combine(race_local_time.date(), time.min, tzinfo=race_timezone)
-        race_day_end = datetime.combine(race_local_time.date(), time.max, tzinfo=race_timezone)
+        race_day_start = datetime.combine(
+            race_local_time.date(), time.min, tzinfo=race_timezone)
+        race_day_end = datetime.combine(
+            race_local_time.date(), time.max, tzinfo=race_timezone)
 
         # Convert back to UTC for database query
         utc_day_start = race_day_start.astimezone(timezone.utc)
         utc_day_end = race_day_end.astimezone(timezone.utc)
 
         # Get flights active today (with a small buffer before race day)
-        lookback_buffer = timedelta(hours=4)  # Allow pilots who started slightly before race day
+        # Allow pilots who started slightly before race day
+        lookback_buffer = timedelta(hours=4)
         flights = (
             db.query(Flight)
             .filter(
@@ -1533,26 +1537,35 @@ async def websocket_tracking_endpoint(
             .all()
         )
 
-        # # Further filter to only pilots who have been active in the last hour
-        # active_threshold = current_time - timedelta(minutes=60)
-        # active_flights = []
-
-        # for flight in flights:
-        #     last_fix_time = datetime.fromisoformat(
-        #         flight.last_fix['datetime'].replace('Z', '+00:00')
-        #     ).astimezone(timezone.utc)
-            
-        #     if last_fix_time >= active_threshold:
-        #         active_flights.append(flight)
-
         # Process flights as before, but only using active_flights
         pilot_latest_flights = {}
 
         for flight in flights:
             pilot_id = str(flight.pilot_id)
-            
+
             # If we haven't seen this pilot yet, this is their most recent flight
             if pilot_id not in pilot_latest_flights:
+                # Get track points for this flight
+                track_points = db.query(LiveTrackPoint).filter(
+                    LiveTrackPoint.flight_uuid == flight.id
+                ).order_by(LiveTrackPoint.datetime).all()
+
+                # Downsample track points if there are too many
+                # Keep at most 1 point per 5 seconds to reduce data volume
+                downsampled_points = []
+                last_added_time = None
+
+                for point in track_points:
+                    current_time = point.datetime
+                    if last_added_time is None or (current_time - last_added_time).total_seconds() >= 5:
+                        downsampled_points.append({
+                            "lat": float(point.lat),
+                            "lon": float(point.lon),
+                            "elevation": float(point.elevation) if point.elevation is not None else 0,
+                            "datetime": point.datetime.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                        })
+                        last_added_time = current_time
+
                 pilot_latest_flights[pilot_id] = {
                     "uuid": str(flight.id),
                     "pilot_id": flight.pilot_id,
@@ -1569,6 +1582,9 @@ async def websocket_tracking_endpoint(
                         "elevation": flight.last_fix.get('elevation', 0),
                         "datetime": flight.last_fix['datetime']
                     },
+                    "trackHistory": downsampled_points,
+                    "totalPoints": len(track_points),
+                    "downsampledPoints": len(downsampled_points),
                     "source": flight.source,
                     "lastFixTime": flight.last_fix['datetime'],
                     "isActive": True  # Mark as currently active
