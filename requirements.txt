@@ -24,3 +24,4 @@ python-socketio
 websockets
 redis[hiredis]
 exponent-server-sdk
+apscheduler

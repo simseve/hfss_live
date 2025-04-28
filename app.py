@@ -15,25 +15,33 @@ from fastapi import FastAPI
 from fastapi.security import HTTPBasic
 import api.routes as routes
 from background_tracking import periodic_tracking_update
+from db_cleanup import setup_scheduler
 from contextlib import asynccontextmanager
+
 
 @asynccontextmanager
 async def lifespan(app):
-    # Start the background task when the application starts
-    task = asyncio.create_task(periodic_tracking_update(30))  # Update every 30 seconds
-    
+    # Start the background tracking task when the application starts
+    track_task = asyncio.create_task(
+        periodic_tracking_update(30))  # Update every 30 seconds
+
+    # Set up and start the cleanup scheduler
+    scheduler = setup_scheduler()
+    scheduler.start()
+
     # Yield control back to FastAPI
     yield
-    
+
     # Cleanup when the application shuts down
-    task.cancel()
+    track_task.cancel()
     try:
-        await task
+        await track_task
     except asyncio.CancelledError:
         # Task was successfully cancelled
         pass
 
-
+    # Shut down the scheduler
+    scheduler.shutdown()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -82,8 +90,6 @@ async def log_request(request: Request, call_next):
     return response
 
 
-
-
 app.include_router(routes.router, tags=['Tracking'], prefix='/tracking')
 
 
@@ -91,9 +97,6 @@ app.include_router(routes.router, tags=['Tracking'], prefix='/tracking')
 app.state.limiter = rate_limiter
 app.add_middleware(SlowAPIMiddleware)
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-
-
-
 
 
 @app.get('/health')
@@ -105,6 +108,7 @@ def root():
         'system_startup_time': system_startup_time,
         'current_time': now,
         'uptime': str(uptime),
+        'scheduled_tasks': ['live_tracking_update', 'old_flights_cleanup']
     }
     logger.info(f"Healthcheck requested on {now}")
     return response
