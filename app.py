@@ -23,7 +23,7 @@ from contextlib import asynccontextmanager
 async def lifespan(app):
     # Start the background tracking task when the application starts
     track_task = asyncio.create_task(
-        periodic_tracking_update(30))  # Update every 30 seconds
+        periodic_tracking_update(10))  # Update every 30 seconds
 
     # Set up and start the cleanup scheduler
     scheduler = setup_scheduler()

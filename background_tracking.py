@@ -9,9 +9,7 @@ from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
-# Add this function to periodically send tracking updates
-
-
+# Background task to send periodic tracking updates to connected clients
 async def periodic_tracking_update(interval_seconds: int = 30):
     """Background task to send periodic tracking updates to connected clients"""
     while True:
