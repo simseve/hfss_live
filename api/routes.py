@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, Security, WebSocket, WebSocketDisconnect, Body
+from fastapi import APIRouter, Depends, HTTPException, Query, Security, WebSocket, WebSocketDisconnect, Response
 from sqlalchemy.orm import Session
 from database.schemas import LiveTrackingRequest, LiveTrackPointCreate, FlightResponse, TrackUploadRequest, NotificationCommand, SubscriptionRequest, UnsubscriptionRequest, NotificationRequest
 from database.models import UploadedTrackPoint, Flight, LiveTrackPoint, Race, NotificationTokenDB
@@ -1908,3 +1908,99 @@ async def send_push_message(token: str, title: str, message: str, extra_data: di
         raise ValueError(f"Push server error: {e}")
     except Exception as e:
         raise ValueError(f"Error sending push notification: {e}")
+
+
+@router.get("/mvt/{z}/{x}/{y}")
+async def get_track_tile(
+    z: int, 
+    x: int, 
+    y: int,
+    flight_uuid: UUID,
+    source: str = Query(..., regex="^(live|upload)$"),
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    db: Session = Depends(get_db)
+):
+    """
+    Serve vector tiles for track points in Mapbox Vector Tile (MVT) format.
+    Used by MapLibre GL to render flight tracks with improved performance.
+    """
+    try:
+        # Verify token
+        token = credentials.credentials
+        try:
+            token_data = jwt.decode(
+                token,
+                settings.SECRET_KEY,
+                algorithms=["HS256"],
+                audience="api.hikeandfly.app",
+                issuer="hikeandfly.app",
+                verify=True
+            )
+            
+            if not token_data.get("sub", "").startswith("contest:"):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Invalid token subject - must be contest-specific"
+                )
+        except jwt.ExpiredSignatureError:
+            raise HTTPException(status_code=401, detail="Token has expired")
+        except PyJWTError as e:
+            raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
+
+        # Choose appropriate model based on source parameter
+        PointModel = LiveTrackPoint if source == 'live' else UploadedTrackPoint
+        
+        # Calculate tile bounds (you'll need to implement this or use mercantile)
+        import mercantile
+        tile_bounds = mercantile.bounds(x, y, z)
+        
+        # Query points that fall within this tile's bounds
+        query = db.query(PointModel).filter(
+            PointModel.flight_uuid == flight_uuid,
+            PointModel.lon >= tile_bounds.west,
+            PointModel.lon <= tile_bounds.east,
+            PointModel.lat >= tile_bounds.south,
+            PointModel.lat <= tile_bounds.north
+        ).order_by(PointModel.datetime)
+        
+        # Apply different sampling based on zoom level
+        if z < 10:
+            # Low zoom: Sample more aggressively (e.g., every 30 seconds)
+            points = []
+            last_ts = None
+            for point in query.all():
+                if last_ts is None or (point.datetime - last_ts).total_seconds() >= 30:
+                    points.append(point)
+                    last_ts = point.datetime
+        else:
+            # High zoom: Use more points
+            points = query.all()
+        
+        # Generate MVT tile data
+        import mapbox_vector_tile
+        
+        features = []
+        for point in points:
+            features.append({
+                "geometry": {
+                    "type": "Point",
+                    "coordinates": [float(point.lon), float(point.lat)]
+                },
+                "properties": {
+                    "elevation": float(point.elevation) if point.elevation else 0,
+                    "datetime": point.datetime.isoformat() 
+                }
+            })
+            
+        # Generate MVT
+        tile = mapbox_vector_tile.encode({
+            "track_points": {
+                "features": features
+            }
+        })
+        
+        return Response(content=tile, media_type="application/x-protobuf")
+        
+    except Exception as e:
+        logger.error(f"Error generating vector tile: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate tile: {str(e)}")
