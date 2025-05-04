@@ -1917,7 +1917,7 @@ async def get_track_tile(
     y: int,
     flight_uuid: UUID,
     source: str = Query(..., regex="^(live|upload)$"),
-    credentials: HTTPAuthorizationCredentials = Security(security),
+    token_data: Dict = Depends(verify_tracking_token),
     db: Session = Depends(get_db)
 ):
     """
@@ -1926,27 +1926,7 @@ async def get_track_tile(
     """
     try:
         # Verify token
-        token = credentials.credentials
-        try:
-            token_data = jwt.decode(
-                token,
-                settings.SECRET_KEY,
-                algorithms=["HS256"],
-                audience="api.hikeandfly.app",
-                issuer="hikeandfly.app",
-                verify=True
-            )
-            
-            if not token_data.get("sub", "").startswith("contest:"):
-                raise HTTPException(
-                    status_code=403,
-                    detail="Invalid token subject - must be contest-specific"
-                )
-        except jwt.ExpiredSignatureError:
-            raise HTTPException(status_code=401, detail="Token has expired")
-        except PyJWTError as e:
-            raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
-
+        
         # Choose appropriate model based on source parameter
         PointModel = LiveTrackPoint if source == 'live' else UploadedTrackPoint
         
