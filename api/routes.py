@@ -1926,11 +1926,11 @@ async def get_track_tile(
     """
     try:
         # Verify token
-        
+
         # Choose appropriate model based on source parameter
         PointModel = LiveTrackPoint if source == 'live' else UploadedTrackPoint
         
-        # Calculate tile bounds (you'll need to implement this or use mercantile)
+        # Calculate tile bounds
         import mercantile
         tile_bounds = mercantile.bounds(x, y, z)
         
@@ -1972,14 +1972,16 @@ async def get_track_tile(
                 }
             })
             
-        # Generate MVT
-        tile = mapbox_vector_tile.encode({
-            "track_points": {
-                "features": features
+        # Generate MVT with the correct structure
+        tile = mapbox_vector_tile.encode([
+            {
+                "name": "track_points",  # Layer name
+                "features": features     # Features list
             }
-        })
+        ])
         
         return Response(content=tile, media_type="application/x-protobuf")
+        
         
     except Exception as e:
         logger.error(f"Error generating vector tile: {str(e)}")
