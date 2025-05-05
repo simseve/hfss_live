@@ -1909,7 +1909,6 @@ async def send_push_message(token: str, title: str, message: str, extra_data: di
     except Exception as e:
         raise ValueError(f"Error sending push notification: {e}")
 
-
 @router.get("/mvt/{z}/{x}/{y}")
 async def get_track_tile(
     z: int, 
@@ -1917,16 +1916,21 @@ async def get_track_tile(
     y: int,
     flight_uuid: UUID,
     source: str = Query(..., regex="^(live|upload)$"),
+    gzip: bool = Query(False, description="Apply gzip compression to the tile data"),
     token_data: Dict = Depends(verify_tracking_token),
     db: Session = Depends(get_db)
 ):
     """
     Serve vector tiles for track points in Mapbox Vector Tile (MVT) format.
     Used by MapLibre GL to render flight tracks with improved performance.
+    
+    Parameters:
+    - z/x/y: Tile coordinates
+    - flight_uuid: UUID of the flight to render
+    - source: Either 'live' or 'upload' to specify data source
+    - gzip: Set to true to compress the tile with gzip (default: false)
     """
     try:
-        # Verify token
-
         # Choose appropriate model based on source parameter
         PointModel = LiveTrackPoint if source == 'live' else UploadedTrackPoint
         
@@ -1958,17 +1962,31 @@ async def get_track_tile(
         
         # Generate MVT tile data
         import mapbox_vector_tile
+        from mercantile import xy_bounds
         
+        # Get the tile bounds in Web Mercator coordinates
+        xy_bounds = mercantile.xy_bounds(x, y, z)
+        tile_width = xy_bounds.right - xy_bounds.left
+        tile_height = xy_bounds.top - xy_bounds.bottom
+        
+
         features = []
         for point in points:
+            # Convert WGS84 coordinates to Web Mercator coordinates
+            mx, my = mercantile.xy(float(point.lon), float(point.lat))
+            
+            # Scale to tile coordinates (0-4096 range)
+            px = 4096 * (mx - xy_bounds.left) / tile_width
+            py = 4096 * (1 - (my - xy_bounds.bottom) / tile_height)  # Y is flipped in MVT
+            
             features.append({
                 "geometry": {
                     "type": "Point",
-                    "coordinates": [float(point.lon), float(point.lat)]
+                    "coordinates": [px, py]  # Use projected coordinates
                 },
                 "properties": {
                     "elevation": float(point.elevation) if point.elevation else 0,
-                    "datetime": point.datetime.isoformat() 
+                    "datetime": point.datetime.isoformat()
                 }
             })
             
@@ -1980,9 +1998,20 @@ async def get_track_tile(
             }
         ])
         
-        return Response(content=tile, media_type="application/x-protobuf")
-        
+        # Apply gzip compression if requested
+        if gzip:
+            import gzip as gz
+            compressed_tile = gz.compress(tile)
+            return Response(
+                content=compressed_tile, 
+                media_type="application/x-protobuf",
+                headers={"Content-Encoding": "gzip"}
+            )
+        else:
+            # Return uncompressed tile
+            return Response(content=tile, media_type="application/x-protobuf")
         
     except Exception as e:
         logger.error(f"Error generating vector tile: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to generate tile: {str(e)}")
+    
