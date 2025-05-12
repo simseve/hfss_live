@@ -11,6 +11,8 @@ from uuid import uuid4
 from sqlalchemy.dialects.postgresql import insert
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy import text
+from geoalchemy2.shape import to_shape
+from shapely.geometry import mapping
 from datetime import datetime, timezone, timedelta, time
 import jwt
 from config import settings
@@ -2099,3 +2101,131 @@ async def get_postgis_track_tile(
         logger.error(f"Error generating PostGIS vector tile: {str(e)}")
         raise HTTPException(
             status_code=500, detail=f"Failed to generate tile: {str(e)}")
+
+
+@router.get("/track-line/{flight_uuid}")
+async def get_track_linestring(
+    flight_uuid: UUID,
+    source: str = Query(..., regex="^(live|upload)$",
+                        description="Either 'live' or 'upload'"),
+    simplify: Optional[float] = Query(
+        None, description="Tolerance for simplifying the line geometry (in degrees). Higher values mean more simplification."),
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    db: Session = Depends(get_db)
+):
+    """
+    Return the complete flight track as a GeoJSON LineString.
+    Uses the PostGIS functions to generate the geometry.
+
+    Parameters:
+    - flight_uuid: UUID of the flight
+    - source: Either 'live' or 'upload' to specify which track to retrieve
+    - simplify: Optional parameter to simplify the line geometry (useful for large tracks)
+    """
+    try:
+        # Verificare il token
+        token = credentials.credentials
+        try:
+            token_data = jwt.decode(
+                token,
+                settings.SECRET_KEY,
+                algorithms=["HS256"],
+                audience="api.hikeandfly.app",
+                issuer="hikeandfly.app",
+                verify=True
+            )
+
+            if not token_data.get("sub", "").startswith("contest:"):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Invalid token subject - must be contest-specific"
+                )
+
+        except jwt.ExpiredSignatureError:
+            raise HTTPException(status_code=401, detail="Token expired")
+        except PyJWTError as e:
+            raise HTTPException(
+                status_code=401, detail=f"Invalid token: {str(e)}")
+
+        # Verificare se il volo esiste
+        flight = db.query(Flight).filter(
+            Flight.id == flight_uuid,
+            Flight.source == source
+        ).first()
+
+        if not flight:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Flight not found with UUID {flight_uuid} and source {source}"
+            )
+
+        # Costruire la query per ottenere la LineString
+        if source == 'live':
+            func_name = 'generate_live_track_linestring'
+        else:  # source == 'upload'
+            func_name = 'generate_uploaded_track_linestring'
+
+        # Creare la query con la possibilità di semplificare la geometria
+        if simplify is not None and simplify > 0:
+            query = f"""
+            SELECT ST_AsGeoJSON(
+                ST_Simplify(
+                    {func_name}('{flight_uuid}'::uuid),
+                    {simplify}
+                )
+            ) as geojson;
+            """
+        else:
+            query = f"""
+            SELECT ST_AsGeoJSON({func_name}('{flight_uuid}'::uuid)) as geojson;
+            """
+
+        # Eseguire la query
+        result = db.execute(text(query)).fetchone()
+
+        if not result or not result[0]:
+            # Se non ci sono punti tracking, restituire una LineString vuota
+            return {
+                "type": "Feature",
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": []
+                },
+                "properties": {
+                    "flight_id": flight.flight_id,
+                    "flight_uuid": str(flight.id),
+                    "pilot_name": flight.pilot_name,
+                    "source": source,
+                    "total_points": flight.total_points,
+                    "empty": True
+                }
+            }
+
+        # Costruire la risposta GeoJSON
+        linestring_geojson = result[0]
+
+        # Ottenere anche i punti iniziale e finale per avere informazioni aggiuntive
+        return {
+            "type": "Feature",
+            "geometry": json.loads(linestring_geojson),
+            "properties": {
+                "flight_id": flight.flight_id,
+                "flight_uuid": str(flight.id),
+                "pilot_name": flight.pilot_name,
+                "pilot_id": flight.pilot_id,
+                "source": source,
+                "total_points": flight.total_points,
+                "first_fix": flight.first_fix,
+                "last_fix": flight.last_fix,
+                "simplified": simplify is not None
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating track linestring: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate track linestring: {str(e)}"
+        )
