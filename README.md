@@ -116,6 +116,14 @@ CREATE EXTENSION IF NOT EXISTS pg_cron;
 SELECT cron.schedule('0 0 * * *', 'SELECT cleanup_live_flights()');
 ```
 
+For postgis
+``` -- Connect to your TimescaleDB database first
+CREATE EXTENSION IF NOT EXISTS postgis;
+
+-- Verify installation
+SELECT PostGIS_version();
+```
+
 ### Working with Alembic
 
 Database migrations are handled with Alembic:

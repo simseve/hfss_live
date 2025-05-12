@@ -10,6 +10,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from uuid import uuid4
 from sqlalchemy.dialects.postgresql import insert
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from sqlalchemy import text
 from datetime import datetime, timezone, timedelta, time
 import jwt
 from config import settings
@@ -1530,12 +1531,12 @@ async def websocket_tracking_endpoint(
             .filter(
                 Flight.race_id == race_id,
                 # Either the flight was created today
-                ((Flight.created_at >= utc_day_start - lookback_buffer) & 
-                (Flight.created_at <= utc_day_end)) |
+                ((Flight.created_at >= utc_day_start - lookback_buffer) &
+                 (Flight.created_at <= utc_day_end)) |
                 # OR the flight has a last_fix during today (for flights spanning overnight)
-                (func.cast(func.jsonb_extract_path_text(Flight.last_fix, 'datetime'), db.DateTime) >= 
+                (func.cast(func.jsonb_extract_path_text(Flight.last_fix, 'datetime'), db.DateTime) >=
                     func.cast(utc_day_start.strftime('%Y-%m-%dT%H:%M:%SZ'), db.DateTime)) &
-                (func.cast(func.jsonb_extract_path_text(Flight.last_fix, 'datetime'), db.DateTime) <= 
+                (func.cast(func.jsonb_extract_path_text(Flight.last_fix, 'datetime'), db.DateTime) <=
                     func.cast(utc_day_end.strftime('%Y-%m-%dT%H:%M:%SZ'), db.DateTime)),
                 Flight.source == 'live'
             )
@@ -1915,21 +1916,23 @@ async def send_push_message(token: str, title: str, message: str, extra_data: di
     except Exception as e:
         raise ValueError(f"Error sending push notification: {e}")
 
+
 @router.get("/mvt/{z}/{x}/{y}")
 async def get_track_tile(
-    z: int, 
-    x: int, 
+    z: int,
+    x: int,
     y: int,
     flight_uuid: UUID,
     source: str = Query(..., regex="^(live|upload)$"),
-    gzip: bool = Query(False, description="Apply gzip compression to the tile data"),
+    gzip: bool = Query(
+        False, description="Apply gzip compression to the tile data"),
     token_data: Dict = Depends(verify_tracking_token),
     db: Session = Depends(get_db)
 ):
     """
     Serve vector tiles for track points in Mapbox Vector Tile (MVT) format.
     Used by MapLibre GL to render flight tracks with improved performance.
-    
+
     Parameters:
     - z/x/y: Tile coordinates
     - flight_uuid: UUID of the flight to render
@@ -1939,11 +1942,11 @@ async def get_track_tile(
     try:
         # Choose appropriate model based on source parameter
         PointModel = LiveTrackPoint if source == 'live' else UploadedTrackPoint
-        
+
         # Calculate tile bounds
         import mercantile
         tile_bounds = mercantile.bounds(x, y, z)
-        
+
         # Query points that fall within this tile's bounds
         query = db.query(PointModel).filter(
             PointModel.flight_uuid == flight_uuid,
@@ -1952,7 +1955,7 @@ async def get_track_tile(
             PointModel.lat >= tile_bounds.south,
             PointModel.lat <= tile_bounds.north
         ).order_by(PointModel.datetime)
-        
+
         # Apply different sampling based on zoom level
         if z < 10:
             # Low zoom: Sample more aggressively (e.g., every 30 seconds)
@@ -1965,26 +1968,26 @@ async def get_track_tile(
         else:
             # High zoom: Use more points
             points = query.all()
-        
+
         # Generate MVT tile data
         import mapbox_vector_tile
         from mercantile import xy_bounds
-        
+
         # Get the tile bounds in Web Mercator coordinates
         xy_bounds = mercantile.xy_bounds(x, y, z)
         tile_width = xy_bounds.right - xy_bounds.left
         tile_height = xy_bounds.top - xy_bounds.bottom
-        
 
         features = []
         for point in points:
             # Convert WGS84 coordinates to Web Mercator coordinates
             mx, my = mercantile.xy(float(point.lon), float(point.lat))
-            
+
             # Scale to tile coordinates (0-4096 range)
             px = 4096 * (mx - xy_bounds.left) / tile_width
-            py = 4096 * (1 - (my - xy_bounds.bottom) / tile_height)  # Y is flipped in MVT
-            
+            py = 4096 * (1 - (my - xy_bounds.bottom) /
+                         tile_height)  # Y is flipped in MVT
+
             features.append({
                 "geometry": {
                     "type": "Point",
@@ -1995,7 +1998,7 @@ async def get_track_tile(
                     "datetime": point.datetime.isoformat()
                 }
             })
-            
+
         # Generate MVT with the correct structure
         tile = mapbox_vector_tile.encode([
             {
@@ -2003,21 +2006,96 @@ async def get_track_tile(
                 "features": features     # Features list
             }
         ])
-        
+
         # Apply gzip compression if requested
         if gzip:
             import gzip as gz
             compressed_tile = gz.compress(tile)
             return Response(
-                content=compressed_tile, 
+                content=compressed_tile,
                 media_type="application/x-protobuf",
                 headers={"Content-Encoding": "gzip"}
             )
         else:
             # Return uncompressed tile
             return Response(content=tile, media_type="application/x-protobuf")
-        
+
     except Exception as e:
         logger.error(f"Error generating vector tile: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to generate tile: {str(e)}")
-    
+        raise HTTPException(
+            status_code=500, detail=f"Failed to generate tile: {str(e)}")
+
+
+@router.get("/postgis-mvt/{z}/{x}/{y}")
+async def get_postgis_track_tile(
+    z: int,
+    x: int,
+    y: int,
+    flight_uuid: UUID = Query(..., description="UUID of the flight to render"),
+    source: str = Query(..., regex="^(live|upload)$",
+                        description="Either 'live' or 'upload'"),
+    token_data: Dict = Depends(verify_tracking_token),
+    db: Session = Depends(get_db)
+):
+    """
+    Serve vector tiles for track points using PostGIS ST_AsMVT function.
+    This provides better performance as tile generation happens in the database.
+
+    Parameters:
+    - z/x/y: Tile coordinates
+    - flight_uuid: UUID of the flight to render
+    - source: Either 'live' or 'upload' to specify data source
+    """
+    try:
+        # Determine table name based on source
+        table_name = "live_track_points" if source == "live" else "uploaded_track_points"
+
+        # Calculate the bounds of the requested tile
+        # We'll use the ST_TileEnvelope function from PostGIS
+        # Format: ST_TileEnvelope(z, x, y, [margin])
+
+        # SQL query using ST_AsMVT
+        # This generates the MVT tile directly in the database
+        query = f"""
+        WITH 
+        bounds AS (
+            SELECT ST_TileEnvelope({z}, {x}, {y}) AS geom
+        ),
+        mvt_data AS (
+            SELECT 
+                ST_AsMVTGeom(
+                    t.geom, 
+                    bounds.geom,
+                    4096,    -- Resolution: standard is 4096 for MVT
+                    256,     -- Buffer: to avoid clipping at tile edges
+                    true     -- Clip geometries
+                ) AS geom,
+                t.elevation::float as elevation,
+                t.datetime::text as datetime,
+                t.lat::float as lat,
+                t.lon::float as lon
+            FROM {table_name} t, bounds
+            WHERE t.flight_uuid = '{flight_uuid}'
+              AND ST_Intersects(t.geom, bounds.geom)
+              -- Add time-based sampling for lower zoom levels
+              {" AND extract(second from t.datetime)::integer % 30 = 0 " if z < 10 else ""}
+            ORDER BY t.datetime
+        )
+        SELECT ST_AsMVT(mvt_data.*, 'track_points') AS mvt
+        FROM mvt_data
+        """
+
+        # Execute the query and get the tile
+        result = db.execute(text(query)).fetchone()
+
+        if result and result[0]:
+            # Return the MVT tile as binary data
+            return Response(content=result[0], media_type="application/x-protobuf")
+        else:
+            # Return an empty tile
+            return Response(content=b"", media_type="application/x-protobuf")
+
+    except Exception as e:
+        logger.error(f"Error generating PostGIS vector tile: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to generate tile: {str(e)}")

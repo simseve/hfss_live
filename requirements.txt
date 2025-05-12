@@ -27,3 +27,4 @@ exponent-server-sdk
 apscheduler
 mercantile
 mapbox-vector-tile
+GeoAlchemy2

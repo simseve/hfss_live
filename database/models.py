@@ -2,6 +2,7 @@ from sqlalchemy import Column, String, Float, DateTime, MetaData, CHAR, BigInteg
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import UUID
+from geoalchemy2 import Geometry
 import uuid
 from datetime import datetime, timezone
 metadata = MetaData()
@@ -87,13 +88,16 @@ class LiveTrackPoint(Base):
     lat = Column(Float(precision=53), nullable=False)
     lon = Column(Float(precision=53), nullable=False)
     elevation = Column(Float(precision=53))
+    # Add a geometry column for the point location (SRID 4326 = WGS84)
+    geom = Column(Geometry('POINT', srid=4326))
 
     __table_args__ = (
         Index('idx_live_track_points_datetime_flight',
               'datetime', 'flight_uuid'),
         UniqueConstraint('flight_id', 'lat', 'lon', 'datetime',
                          name='live_track_points_unique_parent'),
-
+        # Add a spatial index
+        Index('idx_live_track_points_geom', 'geom', postgresql_using='gist'),
     )
 
     def __repr__(self):
@@ -114,11 +118,18 @@ class UploadedTrackPoint(Base):
     lat = Column(Float(precision=53), nullable=False)
     lon = Column(Float(precision=53), nullable=False)
     elevation = Column(Float(precision=53))
+    # Add a geometry column for the point location (SRID 4326 = WGS84)
+    geom = Column(Geometry('POINT', srid=4326))
 
     __table_args__ = (
         Index('idx_uploaded_track_points_datetime_flight',
               'datetime', 'flight_uuid'),
-        UniqueConstraint('flight_id', 'lat', 'lon', 'datetime', name='uploaded_track_points_unique_parent'),)
+        UniqueConstraint('flight_id', 'lat', 'lon', 'datetime',
+                         name='uploaded_track_points_unique_parent'),
+        # Add a spatial index
+        Index('idx_uploaded_track_points_geom',
+              'geom', postgresql_using='gist'),
+    )
 
     def __repr__(self):
         return f"<UploadedTrackPoint(id={self.id}, datetime={self.datetime}, flight_uuid={self.flight_uuid})>"
