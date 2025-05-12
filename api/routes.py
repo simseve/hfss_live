@@ -1529,8 +1529,14 @@ async def websocket_tracking_endpoint(
             db.query(Flight)
             .filter(
                 Flight.race_id == race_id,
-                Flight.created_at >= utc_day_start - lookback_buffer,
-                Flight.created_at <= utc_day_end,
+                # Either the flight was created today
+                ((Flight.created_at >= utc_day_start - lookback_buffer) & 
+                (Flight.created_at <= utc_day_end)) |
+                # OR the flight has a last_fix during today (for flights spanning overnight)
+                (func.cast(func.jsonb_extract_path_text(Flight.last_fix, 'datetime'), db.DateTime) >= 
+                    func.cast(utc_day_start.strftime('%Y-%m-%dT%H:%M:%SZ'), db.DateTime)) &
+                (func.cast(func.jsonb_extract_path_text(Flight.last_fix, 'datetime'), db.DateTime) <= 
+                    func.cast(utc_day_end.strftime('%Y-%m-%dT%H:%M:%SZ'), db.DateTime)),
                 Flight.source == 'live'
             )
             .order_by(Flight.created_at.desc())
