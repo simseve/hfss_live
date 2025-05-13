@@ -5,11 +5,13 @@ import math
 
 # Define the flight states
 FlightState = Literal['flying', 'walking',
-                      'stationary', 'launch', 'landing', 'unknown']
+                      'stationary', 'launch', 'landing', 'unknown',
+                      'uploaded', 'inactive']
 
 # Constants for flight state detection
 
-FLYING_MIN_SPEED = 2.7 # m/s (~10 km/h) - typical minimum paraglider flying speed
+# m/s (~10 km/h) - typical minimum paraglider flying speed
+FLYING_MIN_SPEED = 2.7
 WALKING_MAX_SPEED = 2.0  # m/s (~7.2 km/h) - upper limit for walking
 # m/s (~1.8 km/h) - upper limit for being stationary
 STATIONARY_MAX_SPEED = 0.5
@@ -19,6 +21,8 @@ MIN_POINTS_FOR_STATE = 5  # minimum points needed for reliable state detection
 FLYING_BUFFER_TIME = timedelta(seconds=60)
 # time window to check for significant altitude changes
 ALTITUDE_CHANGE_WINDOW = timedelta(seconds=30)
+# inactivity threshold for live flights
+INACTIVITY_THRESHOLD = timedelta(minutes=5)
 
 logger = logging.getLogger(__name__)
 
@@ -212,6 +216,41 @@ def update_flight_state_in_db(flight_uuid, db, force_update=False, source=None):
         except (ValueError, AttributeError, KeyError):
             # If any error occurs, continue with update
             pass
+
+    # Handle uploaded flights specially - they always have the 'uploaded' state
+    if source == 'upload' or (flight and flight.source == 'upload'):
+        state_info = {
+            'state': 'uploaded',
+            'confidence': 'high',
+            'reason': 'track_uploaded',
+            'last_updated': datetime.now(timezone.utc).isoformat()
+        }
+        flight.flight_state = state_info
+        db.commit()
+        return 'uploaded', state_info
+
+    # For live flights, check for inactivity
+    if source == 'live' or (flight and flight.source == 'live'):
+        # Check if the last fix is older than the inactivity threshold
+        if flight.last_fix and 'datetime' in flight.last_fix:
+            try:
+                last_fix_time = datetime.fromisoformat(
+                    flight.last_fix['datetime'].replace('Z', '+00:00'))
+
+                if (datetime.now(timezone.utc) - last_fix_time) > INACTIVITY_THRESHOLD:
+                    state_info = {
+                        'state': 'inactive',
+                        'confidence': 'high',
+                        'reason': 'connection_lost',
+                        'last_updated': datetime.now(timezone.utc).isoformat(),
+                        'last_active': flight.last_fix['datetime']
+                    }
+                    flight.flight_state = state_info
+                    db.commit()
+                    return 'inactive', state_info
+            except (ValueError, KeyError):
+                # If there's an error parsing the datetime, continue with normal detection
+                pass
 
     # Get the flight state
     state, state_info = detect_flight_state_from_db(flight_uuid, db)
