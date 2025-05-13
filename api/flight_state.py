@@ -187,9 +187,8 @@ def update_flight_state_in_db(flight_uuid, db, force_update=False, source=None):
     Returns:
         Tuple of (state, state_info)
     """
-    from database.models import Flight, LiveTrackPoint, UploadedTrackPoint
-    from datetime import datetime, timezone, timedelta
-    import json
+    from database.models import Flight
+    from datetime import datetime, timezone
 
     # Get the flight from database
     flight_query = db.query(Flight).filter(Flight.id == flight_uuid)
@@ -227,6 +226,29 @@ def update_flight_state_in_db(flight_uuid, db, force_update=False, source=None):
         }
         flight.flight_state = state_info
         db.commit()
+
+        flight_identifier = flight.flight_id
+
+        # Also update the corresponding live flight if exists (with the same UUID)
+        if source != 'live':  # Only when we're not already updating a live flight
+            live_flight = db.query(Flight).filter(
+                Flight.flight_id == flight_identifier,
+                Flight.source == 'live'
+            ).first()
+
+            if live_flight:
+                # Mark the live flight as inactive since it's now uploaded
+                live_state_info = {
+                    'state': 'uploaded',
+                    'confidence': 'high',
+                    'reason': 'track_uploaded',
+                    'last_updated': datetime.now(timezone.utc).isoformat()
+                }
+                live_flight.flight_state = live_state_info
+                db.commit()
+                logger.debug(
+                    f"Updated corresponding live flight {flight_uuid} to inactive state")
+
         return 'uploaded', state_info
 
     # For live flights, check for inactivity
