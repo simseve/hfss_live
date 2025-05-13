@@ -56,6 +56,10 @@ class Flight(Base):
     last_fix = Column(JSON, nullable=True)   # {lat, lon, elevation, datetime}
     total_points = Column(Integer, default=0)
 
+    # Flight state
+    # {state, confidence, avg_speed, max_speed, altitude_change, last_updated}
+    flight_state = Column(JSON, nullable=True)
+
     # Relationships
     race = relationship("Race", back_populates="flights")
     live_track_points = relationship(

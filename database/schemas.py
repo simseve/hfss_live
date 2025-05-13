@@ -1,8 +1,10 @@
+import json
 from datetime import datetime, timezone
 from typing import Optional, Literal, Dict, Any, List
 from uuid import UUID
 from pydantic import BaseModel, Field
 from enum import Enum
+
 
 class RaceBase(BaseModel):
     race_id: str
@@ -12,8 +14,11 @@ class RaceBase(BaseModel):
     timezone: str
     location: str
 
+
 class RaceCreate(RaceBase):
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc))
+
 
 class RaceResponse(RaceBase):
     id: UUID
@@ -21,8 +26,8 @@ class RaceResponse(RaceBase):
 
     class Config:
         from_attributes = True
-        
-        
+
+
 # Base schemas with common fields
 class TrackPointBase(BaseModel):
     flight_id: str  # Changed from flight_id
@@ -35,8 +40,10 @@ class TrackPointBase(BaseModel):
 class LiveTrackPointCreate(TrackPointBase):
     datetime: datetime
 
+
 class UploadedTrackPointCreate(TrackPointBase):
     datetime: datetime
+
 
 class LiveTrackingRequest(BaseModel):
     track_points: List[Dict[str, Any]]  # Raw track points data
@@ -65,8 +72,10 @@ class LiveTrackingRequest(BaseModel):
             }
         }
         from_attributes = True
-        
+
 # Output schemas (for returning data)
+
+
 class LiveTrackPointResponse(TrackPointBase):
     id: int
     datetime: datetime
@@ -74,13 +83,15 @@ class LiveTrackPointResponse(TrackPointBase):
     class Config:
         from_attributes = True
 
+
 class UploadedTrackPointResponse(TrackPointBase):
     id: int
     datetime: datetime
 
     class Config:
         from_attributes = True
-        
+
+
 class FlightBase(BaseModel):
     flight_id: str = Field(..., max_length=100)
     race_id: str
@@ -88,8 +99,10 @@ class FlightBase(BaseModel):
     pilot_name: str
     source: Literal['live', 'upload']
 
+
 class FlightCreate(FlightBase):
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(
+    default_factory=lambda: datetime.now(timezone.utc))
     first_fix: Optional[Dict[str, Any]] = None
     last_fix: Optional[Dict[str, Any]] = None
     total_points: Optional[int] = None
@@ -97,13 +110,16 @@ class FlightCreate(FlightBase):
     end_time: Optional[datetime] = None
     flight_metadata: Optional[Dict[str, Any]] = None
 
+
 class TrackMetadata(BaseModel):
-    duration: str  # Changed from Optional[float] to str to accept "00:00:04.521" format
+    # Changed from Optional[float] to str to accept "00:00:04.521" format
+    duration: str
     distance: Optional[float] = None
     avg_speed: Optional[float] = None
     max_speed: Optional[float] = None
     max_altitude: Optional[float] = None
     total_points: Optional[int] = None
+
 
 class TrackUploadRequest(BaseModel):
     pilot_id: Optional[str] = None
@@ -137,7 +153,22 @@ class TrackUploadRequest(BaseModel):
                 }
             }
         }
-        
+
+
+class FlightState(BaseModel):
+    state: str = Field(..., description="Current flight state (flying, walking, stationary, launch, landing, unknown)")
+    confidence: str = Field(
+        ..., description="Confidence level of the state detection (high, medium, low)")
+    avg_speed: Optional[float] = Field(
+        None, description="Average speed in m/s")
+    max_speed: Optional[float] = Field(
+        None, description="Maximum speed in m/s")
+    altitude_change: Optional[float] = Field(
+        None, description="Recent altitude change in meters")
+    last_updated: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc))
+
+
 class FlightResponse(FlightBase):
     id: UUID
     race_uuid: UUID
@@ -148,31 +179,32 @@ class FlightResponse(FlightBase):
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
     flight_metadata: Optional[Dict[str, Any]] = None
+    flight_state: Optional[FlightState] = None
     race: RaceResponse
 
-
-    class Config:
-        from_attributes = True
-        json_encoders = {
+    model_config = {
+        "from_attributes": True,
+        "json_encoders": {
             datetime: lambda dt: dt.isoformat(),
             UUID: str
         }
+    }
 
     @classmethod
-    def from_orm(cls, obj):
+    def model_validate_from_orm(cls, obj):
         # Ensure the metadata is a dict if it exists
         if hasattr(obj, 'flight_metadata') and obj.flight_metadata is not None:
             if isinstance(obj.flight_metadata, str):
                 obj.flight_metadata = json.loads(obj.flight_metadata)
+        return cls.model_validate(obj)
         return super().from_orm(obj)
-        
+
+
 class UpdatedLiveTrackingRequest(BaseModel):
     pilot_id: Optional[str] = None
     race_id: Optional[str] = None
     flight_id: str
     track_points: List[Dict[str, Any]]
-
-
 
 
 class NotificationPriority(str, Enum):
@@ -181,11 +213,15 @@ class NotificationPriority(str, Enum):
     ALERT = "alert"
     EMERGENCY = "emergency"
 
+
 class NotificationCommand(BaseModel):
-    type: str = Field("notification", description="Type of command, defaults to 'notification'")
-    priority: NotificationPriority = Field(default=NotificationPriority.INFO, description="Priority level of the notification")
-    message: str = Field(..., description="Content of the notification message")
-    
+    type: str = Field(
+        "notification", description="Type of command, defaults to 'notification'")
+    priority: NotificationPriority = Field(
+        default=NotificationPriority.INFO, description="Priority level of the notification")
+    message: str = Field(...,
+                         description="Content of the notification message")
+
     class Config:
         json_schema_extra = {
             "example": {
@@ -205,15 +241,19 @@ class NotificationToken(BaseModel):
     created_at: Optional[str] = None
 
 # Request models
+
+
 class SubscriptionRequest(BaseModel):
     token: str
     raceId: str
     deviceId: Optional[str] = None
     platform: Optional[str] = "android"  # Default to iOS
 
+
 class UnsubscriptionRequest(BaseModel):
     token: str
     raceId: str
+
 
 class NotificationRequest(BaseModel):
     raceId: str

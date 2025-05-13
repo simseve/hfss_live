@@ -1,3 +1,4 @@
+from api.flight_state import determine_if_landed, detect_flight_state
 from fastapi import APIRouter, Depends, HTTPException, Query, Security, WebSocket, WebSocketDisconnect, Response
 from sqlalchemy.orm import Session
 from database.schemas import LiveTrackingRequest, LiveTrackPointCreate, FlightResponse, TrackUploadRequest, NotificationCommand, SubscriptionRequest, UnsubscriptionRequest, NotificationRequest
@@ -133,6 +134,9 @@ async def live_tracking(
 
         try:
             db.commit()
+            # Asynchronously update the flight state with 'live' source (don't wait for it to complete)
+            asyncio.create_task(update_flight_state(
+                flight.id, db, source='live'))
             logger.info(
                 f"Successfully updated flight record: {data.flight_id}")
         except SQLAlchemyError as e:
@@ -172,6 +176,7 @@ async def live_tracking(
             )
             db.execute(stmt, [vars(point) for point in track_points])
             db.commit()
+            asyncio.create_task(update_flight_state(flight.id, db))
             logger.info(
                 f"Successfully saved track points for flight {data.flight_id}")
 
@@ -329,6 +334,10 @@ async def upload_track(
                 )
                 db.execute(stmt, [vars(point) for point in track_points_db])
                 db.commit()
+
+                # Asynchronously update the flight state with 'upload' source (don't wait for it to complete)
+                asyncio.create_task(update_flight_state(
+                    flight.id, db, source='upload'))
                 logger.info(
                     f"Successfully processed upload for flight {upload_data.flight_id}")
                 return flight
@@ -1207,10 +1216,31 @@ async def get_uploaded_points_raw(
         )
 
 
-def determine_if_landed(point) -> bool:
-    """Determine if a pilot has landed based on track point data"""
-    # Implement your landing detection logic here
-    return False
+def get_flight_state(flight_uuid, db, recent_points_limit=20):
+    """Get the current flight state for a specific flight"""
+    # Get the most recent track points for this flight
+    recent_points = db.query(LiveTrackPoint).filter(
+        LiveTrackPoint.flight_uuid == flight_uuid
+    ).order_by(LiveTrackPoint.datetime.desc()).limit(recent_points_limit).all()
+
+    if not recent_points:
+        return 'unknown', {'confidence': 'low', 'reason': 'no_track_points'}
+
+    # Format points for the detection function
+    formatted_points = [{
+        'lat': float(point.lat),
+        'lon': float(point.lon),
+        'elevation': float(point.elevation) if point.elevation is not None else None,
+        'datetime': point.datetime
+    } for point in recent_points]
+
+    # Sort points by datetime (oldest first)
+    formatted_points.sort(key=lambda p: p['datetime'])
+
+    # Detect the flight state
+    state, state_info = detect_flight_state(formatted_points)
+
+    return state, state_info
 
 
 def get_first_fix(db: Session, flight_id: str) -> list:
@@ -1336,6 +1366,9 @@ async def get_live_users(
             pilot_id = str(flight.pilot_id)
 
             # Create flight_info dictionary
+            # Get flight state
+            state, state_info = get_flight_state(flight.id, db)
+
             flight_info = {
                 "uuid": str(flight.id),
                 "firstFix": [
@@ -1354,7 +1387,14 @@ async def get_live_users(
                 ],
                 "firstFixTime": flight.first_fix['datetime'],
                 "source": flight.source,
-                "landed": determine_if_landed(flight.last_fix),
+                "landed": state in ['landing', 'stationary', 'walking'],
+                "flightState": {
+                    "state": state,
+                    "confidence": state_info.get('confidence', 'low'),
+                    "avgSpeed": state_info.get('avg_speed', 0),
+                    "maxSpeed": state_info.get('max_speed', 0),
+                    "altitudeChange": state_info.get('altitude_change', 0)
+                },
                 "clientId": "mobile",
                 "glider": "unknown"
             }
@@ -1608,7 +1648,10 @@ async def websocket_tracking_endpoint(
                     "downsampledPoints": len(downsampled_points),
                     "source": flight.source,
                     "lastFixTime": flight.last_fix['datetime'],
-                    "isActive": True  # Mark as currently active
+                    "isActive": True,  # Mark as currently active
+                    # Include flight state information
+                    "flight_state": flight.flight_state.get('state', 'unknown') if flight.flight_state else 'unknown',
+                    "flight_state_info": flight.flight_state if flight.flight_state else {}
                 }
 
         # Now convert the dictionary values to a list for the response
@@ -2229,3 +2272,156 @@ async def get_track_linestring(
             status_code=500,
             detail=f"Failed to generate track linestring: {str(e)}"
         )
+
+
+@router.get("/flight-state/{flight_uuid}", response_model=Dict)
+async def get_flight_state_endpoint(
+    flight_uuid: str,
+    history: bool = Query(
+        False, description="Include state history in response"),
+    history_points: int = Query(
+        10, description="Number of history points to include if history=True"),
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    source: str = Query(..., regex="^(live|upload)$"),
+    db: Session = Depends(get_db)
+):
+    """
+    Get the current state of a flight (flying, walking, stationary, etc.)
+    Requires JWT token in Authorization header (Bearer token).
+    """
+    try:
+        # Get token from Authorization header and verify it
+        token = credentials.credentials
+        try:
+            token_data = jwt.decode(
+                token,
+                settings.SECRET_KEY,
+                algorithms=["HS256"],
+                audience="api.hikeandfly.app",
+                issuer="hikeandfly.app",
+                verify=True
+            )
+
+            if not token_data.get("sub", "").startswith("contest:"):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Invalid token subject - must be contest-specific"
+                )
+
+        except jwt.ExpiredSignatureError:
+            raise HTTPException(
+                status_code=401,
+                detail="Token has expired"
+            )
+        except PyJWTError as e:
+            raise HTTPException(
+                status_code=401,
+                detail=f"Invalid token: {str(e)}"
+            )
+
+        # Get flight from database
+        flight = db.query(Flight).filter(Flight.flight_id == flight_uuid and Flight.source == source).first()
+
+        if not flight:
+            raise HTTPException(
+                status_code=404,
+                detail="Flight not found"
+            )
+
+
+        # Format the response
+        response = {
+            "flight_uuid": str(flight_uuid),
+            "pilot_id": flight.pilot_id,
+            "pilot_name": flight.pilot_name,
+            "state": flight.flight_state.get('state', 'unknown') if flight.flight_state else 'unknown',
+            "state_info": flight.flight_state,
+            "last_updated": flight.flight_state.get('last_updated', None),
+            "source": flight.source
+        }
+
+        # If history is requested, include state changes over time
+        if history:
+            # Get more track points to analyze state changes
+            track_points = db.query(LiveTrackPoint).filter(
+                LiveTrackPoint.flight_uuid == flight_uuid
+            ).order_by(LiveTrackPoint.datetime.desc()).limit(history_points * 5).all()
+
+            if track_points:
+                # Format points for processing
+                formatted_points = [{
+                    'lat': float(point.lat),
+                    'lon': float(point.lon),
+                    'elevation': float(point.elevation) if point.elevation is not None else None,
+                    'datetime': point.datetime
+                } for point in track_points]
+
+                # Calculate state history
+                history_data = []
+                window_size = min(5, len(formatted_points))
+
+                for i in range(0, len(formatted_points), window_size):
+                    window = formatted_points[i:i + window_size]
+                    if window:
+                        window_state, window_info = detect_flight_state(window)
+                        history_data.append({
+                            "datetime": window[-1]['datetime'].isoformat(),
+                            "state": window_state,
+                            "avg_speed": window_info.get('avg_speed'),
+                            "altitude_change": window_info.get('altitude_change')
+                        })
+
+                response["state_history"] = history_data
+
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting flight state: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get flight state: {str(e)}"
+        )
+
+
+
+
+async def update_flight_state(flight_uuid, db, source=None):
+    """
+    Update the flight state for a specific flight and broadcast it to WebSocket clients
+    This is designed to be called as an async background task
+
+    Args:
+        flight_uuid: UUID of the flight
+        db: Database session
+        source: Source of the flight data ('live' or 'upload') - if None, will be determined from the flight record
+    """
+    try:
+        # Import here to avoid circular imports
+        from api.flight_state import update_flight_state_in_db
+
+        # Create a new session to avoid conflicts
+        from database.db_conf import Session
+        db_session = Session()
+
+        try:
+            # If source wasn't provided, determine it from the flight record
+            if source is None:
+                flight_info = db_session.query(Flight).filter(
+                    Flight.id == flight_uuid).first()
+                if flight_info:
+                    source = flight_info.source
+
+            # Update the flight state with the appropriate source
+            state, state_info = update_flight_state_in_db(
+                flight_uuid, db_session, source=source)
+
+            # No need to broadcast separately as flight state will be included in regular track updates
+
+        finally:
+            # Always close the session
+            db_session.close()
+    except Exception as e:
+        # Log but don't raise - this is a background task
+        logger.error(f"Error updating flight state: {str(e)}")

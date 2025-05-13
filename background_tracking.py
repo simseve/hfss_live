@@ -10,6 +10,8 @@ from zoneinfo import ZoneInfo
 logger = logging.getLogger(__name__)
 
 # Background task to send periodic tracking updates to connected clients
+
+
 async def periodic_tracking_update(interval_seconds: int = 30):
     """Background task to send periodic tracking updates to connected clients"""
     while True:
@@ -109,7 +111,10 @@ async def periodic_tracking_update(interval_seconds: int = 30):
                                 "datetime": flight.last_fix['datetime']
                             },
                             "source": flight.source,
-                            "total_points": flight.total_points
+                            "total_points": flight.total_points,
+                            # Add flight state information if available
+                            "flight_state": flight.flight_state.get('state', 'unknown') if flight.flight_state else 'unknown',
+                            "flight_state_info": flight.flight_state if flight.flight_state else {}
                         }
 
                         # Only for live tracks, include most recent points
