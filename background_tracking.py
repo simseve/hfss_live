@@ -117,6 +117,9 @@ async def periodic_tracking_update(interval_seconds: int = 30):
                             "flight_state_info": flight.flight_state if flight.flight_state else {}
                         }
 
+                        # Track whether we need to add this flight to updates at the end
+                        should_add_to_updates = False
+
                         # Only for live tracks, include most recent points
                         if flight.source == 'live':
                             # Get latest points
@@ -149,7 +152,42 @@ async def periodic_tracking_update(interval_seconds: int = 30):
                                 manager.add_pilot_with_sent_data(
                                     race_id, flight_id_str, latest_time)
                             else:
-                                # No new points to send
+                                # No new points to send, but check for inactivity
+                                # Skip if already marked as inactive or uploaded
+                                current_state = flight.flight_state.get(
+                                    'state', 'unknown') if flight.flight_state else 'unknown'
+                                if current_state in ['inactive', 'uploaded']:
+                                    continue
+
+                                # Import needed for INACTIVITY_THRESHOLD
+                                from api.flight_state import INACTIVITY_THRESHOLD
+
+                                # Check if the last fix is older than the inactivity threshold
+                                try:
+                                    last_fix_time = datetime.fromisoformat(
+                                        flight.last_fix['datetime'].replace('Z', '+00:00'))
+
+                                    if (datetime.now(timezone.utc) - last_fix_time) > INACTIVITY_THRESHOLD:
+                                        # Update flight state to 'inactive'
+                                        state_info = {
+                                            'state': 'inactive',
+                                            'confidence': 'high',
+                                            'reason': 'connection_lost',
+                                            'last_updated': datetime.now(timezone.utc).isoformat(),
+                                            'last_active': flight.last_fix['datetime']
+                                        }
+                                        flight.flight_state = state_info
+                                        db.commit()
+
+                                        # Include the flight state info but no points
+                                        flight_info["flight_state"] = "inactive"
+                                        flight_info["flight_state_info"] = state_info
+                                        should_add_to_updates = True
+                                except (ValueError, KeyError):
+                                    # If there's an error parsing the datetime, skip this flight
+                                    pass
+
+                                # Skip to the next iteration since there are no track points to process
                                 continue
 
                             # Format points for transfer (similar to your GeoJSON endpoint)
@@ -185,8 +223,11 @@ async def periodic_tracking_update(interval_seconds: int = 30):
                                 "type": "LineString",
                                 "coordinates": coordinates
                             }
+                            should_add_to_updates = True
 
-                        flight_updates.append(flight_info)
+                        # Only add to flight_updates if it has track points or was marked as inactive
+                        if should_add_to_updates or flight_info["flight_state"] == "inactive":
+                            flight_updates.append(flight_info)
 
                     # Only send update if there are valid flights with updates
                     if flight_updates:
