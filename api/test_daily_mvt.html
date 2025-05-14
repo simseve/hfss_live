@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>HFSS Daily Tracks MVT Test</title>
+    <!-- Use multiple CDN sources for reliability -->
+    <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@2.4.0/dist/maplibre-gl.js"></script>
+    <link
+      href="https://cdn.jsdelivr.net/npm/maplibre-gl@2.4.0/dist/maplibre-gl.css"
+      rel="stylesheet"
+    />
+    <!-- Fallback option -->
+    <script>
+      if (typeof maplibregl === 'undefined') {
+        document.write(
+          '<script src="https://unpkg.com/maplibre-gl@3.0.0/dist/maplibre-gl.js"><\/script>'
+        );
+        document.write(
+          '<link href="https://unpkg.com/maplibre-gl@3.0.0/dist/maplibre-gl.css" rel="stylesheet" />'
+        );
+      }
+    </script>
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+      }
+      #map {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        width: 100%;
+      }
+      .control-panel {
+        position: absolute;
+        top: 10px;
+        right: 10px;
+        background: white;
+        padding: 10px;
+        border-radius: 5px;
+        box-shadow: 0 0 10px rgba(0, 0, 0, 0.2);
+        z-index: 1;
+        max-width: 300px;
+      }
+      .map-overlay {
+        position: absolute;
+        bottom: 0;
+        right: 0;
+        background: rgba(255, 255, 255, 0.8);
+        margin-right: 20px;
+        margin-bottom: 20px;
+        font-family: Arial, sans-serif;
+        overflow: auto;
+        border-radius: 3px;
+        padding: 10px;
+        box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+        max-width: 300px;
+      }
+      #legend {
+        padding: 10px;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+      }
+      .legend-key {
+        display: inline-block;
+        border-radius: 20%;
+        width: 10px;
+        height: 10px;
+        margin-right: 5px;
+      }
+      .legend-item {
+        margin-bottom: 5px;
+      }
+      label {
+        display: block;
+        margin: 5px 0;
+      }
+      input,
+      select {
+        width: 100%;
+        margin-bottom: 10px;
+        padding: 5px;
+      }
+      button {
+        background: #4caf50;
+        color: white;
+        border: none;
+        padding: 8px 12px;
+        border-radius: 4px;
+        cursor: pointer;
+        width: 100%;
+      }
+      .status {
+        margin-top: 10px;
+        padding: 8px;
+        border-radius: 4px;
+        display: none;
+      }
+      .status.success {
+        background: #dff0d8;
+        color: #3c763d;
+        display: block;
+      }
+      .status.error {
+        background: #f2dede;
+        color: #a94442;
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="map"></div>
+
+    <div class="control-panel">
+      <h3>HFSS Daily Tracks Tester</h3>
+
+      <label for="race-id">Race ID:</label>
+      <input type="text" id="race-id" placeholder="e.g. race-123" />
+
+      <label for="source">Data Source:</label>
+      <select id="source">
+        <option value="live" selected>live</option>
+        <option value="upload">upload</option>
+      </select>
+
+      <label for="date">Date (Optional):</label>
+      <input type="date" id="date" />
+
+      <label for="token">JWT Token:</label>
+      <input type="text" id="token" placeholder="Bearer token" />
+
+      <label for="api-url">API URL:</label>
+      <input
+        type="text"
+        id="api-url"
+        value="https://api.hikeandfly.app/tracking"
+      />
+
+      <button id="load-track">Load Tracks</button>
+
+      <div id="status-message" class="status"></div>
+    </div>
+
+    <div class="map-overlay">
+      <div id="legend"></div>
+    </div>
+
+    <script>
+      // Fill date field with today's date in YYYY-MM-DD format
+      document.getElementById('date').valueAsDate = new Date();
+
+      // Get the maplibre object, which might be exposed as maplibre or maplibregl
+      const maplibreLib = window.maplibre || window.maplibregl;
+
+      if (!maplibreLib) {
+        document.getElementById('status-message').textContent =
+          'Could not load MapLibre GL JS library. Please check your internet connection and try again.';
+        document.getElementById('status-message').className = 'status error';
+        throw new Error('MapLibre GL JS library not loaded');
+      }
+
+      // Initialize the map
+      const map = new maplibreLib.Map({
+        container: 'map',
+        style: 'https://demotiles.maplibre.org/style.json',
+        center: [11.259, 43.773], // Florence, Italy as default center
+        zoom: 10,
+      });
+
+      // Add navigation controls
+      map.addControl(new maplibreLib.NavigationControl());
+
+      // Create an array of colors for different tracks
+      const colors = [
+        '#E41A1C', // Red
+        '#377EB8', // Blue
+        '#4DAF4A', // Green
+        '#984EA3', // Purple
+        '#FF7F00', // Orange
+        '#FFFF33', // Yellow
+        '#A65628', // Brown
+        '#F781BF', // Pink
+        '#999999', // Grey
+        '#66C2A5', // Teal
+      ];
+
+      let legend = document.getElementById('legend');
+      let trackLayers = [];
+      let pilots = {}; // To store pilot information for the legend
+
+      document
+        .getElementById('load-track')
+        .addEventListener('click', function () {
+          const raceId = document.getElementById('race-id').value;
+          const source = document.getElementById('source').value;
+          const dateInput = document.getElementById('date').value; // YYYY-MM-DD
+          const token = document.getElementById('token').value;
+          const apiUrl = document.getElementById('api-url').value;
+
+          if (!raceId || !token) {
+            showStatus('Please provide both race ID and token', 'error');
+            return;
+          }
+
+          // Clear existing layers and legend
+          clearExistingLayers();
+          legend.innerHTML = '<h4>Pilots</h4>';
+          pilots = {};
+
+          // Define the vector tile source URL
+          let mvtUrl = `${apiUrl}/postgis-mvt/daily/{z}/{x}/{y}?race_id=${encodeURIComponent(
+            raceId
+          )}&source=${source}&token=${token}`;
+
+          // Add date parameter if specified
+          if (dateInput) {
+            mvtUrl += `&date=${dateInput}`;
+          }
+
+          // Add the vector tile source
+          map.addSource('daily-tracks', {
+            type: 'vector',
+            tiles: [mvtUrl],
+            minzoom: 0,
+            maxzoom: 22,
+          });
+
+          // Add a layer for track points
+          map.addLayer({
+            id: 'track-points',
+            type: 'circle',
+            source: 'daily-tracks',
+            'source-layer': 'track_points',
+            paint: {
+              'circle-radius': [
+                'interpolate',
+                ['linear'],
+                ['zoom'],
+                9,
+                1.5,
+                13,
+                3,
+                16,
+                5,
+              ],
+              'circle-color': [
+                'match',
+                ['get', 'color_index'],
+                0,
+                colors[0],
+                1,
+                colors[1],
+                2,
+                colors[2],
+                3,
+                colors[3],
+                4,
+                colors[4],
+                5,
+                colors[5],
+                6,
+                colors[6],
+                7,
+                colors[7],
+                8,
+                colors[8],
+                9,
+                colors[9],
+                /* fallback */ '#000000',
+              ],
+              'circle-opacity': 0.8,
+              'circle-stroke-width': 1,
+              'circle-stroke-color': '#fff',
+            },
+          });
+          trackLayers.push('track-points');
+
+          // Add a layer for track lines
+          map.addLayer({
+            id: 'track-lines',
+            type: 'line',
+            source: 'daily-tracks',
+            'source-layer': 'track_lines',
+            paint: {
+              'line-color': [
+                'match',
+                ['get', 'color_index'],
+                0,
+                colors[0],
+                1,
+                colors[1],
+                2,
+                colors[2],
+                3,
+                colors[3],
+                4,
+                colors[4],
+                5,
+                colors[5],
+                6,
+                colors[6],
+                7,
+                colors[7],
+                8,
+                colors[8],
+                9,
+                colors[9],
+                /* fallback */ '#000000',
+              ],
+              'line-width': [
+                'interpolate',
+                ['linear'],
+                ['zoom'],
+                8,
+                3,
+                12,
+                4,
+                16,
+                6,
+              ],
+              'line-opacity': 0.8,
+            },
+          });
+          trackLayers.push('track-lines');
+
+          // Set up a click handler for the track lines to show information
+          map.on('click', 'track-lines', function (e) {
+            if (e.features.length > 0) {
+              const feature = e.features[0];
+              const props = feature.properties;
+
+              new maplibreLib.Popup()
+                .setLngLat(e.lngLat)
+                .setHTML(
+                  `
+                  <h4>${props.pilot_name}</h4>
+                  <p>Flight: ${props.flight_uuid}</p>
+                  <p>Points: ${props.point_count}</p>
+                  <p>Start: ${formatDateTime(props.start_time)}</p>
+                  <p>End: ${formatDateTime(props.end_time)}</p>
+                `
+                )
+                .addTo(map);
+            }
+          });
+
+          // Change the cursor to a pointer when hovering over tracks
+          map.on('mouseenter', 'track-lines', function () {
+            map.getCanvas().style.cursor = 'pointer';
+          });
+
+          map.on('mouseleave', 'track-lines', function () {
+            map.getCanvas().style.cursor = '';
+          });
+
+          // Set up event to populate the legend as data loads
+          map.on('sourcedata', function (e) {
+            if (
+              e.sourceId === 'daily-tracks' &&
+              map.isSourceLoaded('daily-tracks')
+            ) {
+              updateLegend();
+            }
+          });
+
+          // Check if any data loaded
+          fetchTile(raceId, source, token, apiUrl, dateInput, 0, 0, 0).then(
+            (tileInfo) => {
+              if (tileInfo.hasFeatures) {
+                // Check which layers were found
+                let statusMsg = 'Tracks loaded successfully! ';
+                if (tileInfo.hasPoints && tileInfo.hasLines) {
+                  statusMsg += 'Both points and lines visible.';
+                } else if (tileInfo.hasPoints) {
+                  statusMsg +=
+                    'Only points visible. Line layer may be missing.';
+                } else if (tileInfo.hasLines) {
+                  statusMsg +=
+                    'Only lines visible. Point layer may be missing.';
+                }
+
+                showStatus(statusMsg, 'success');
+
+                // Try to fit the map to the available tracks
+                fetchBounds(raceId, source, token, apiUrl, dateInput).then(
+                  (bounds) => {
+                    if (bounds) {
+                      map.fitBounds(bounds, { padding: 50 });
+                    }
+                  }
+                );
+              } else {
+                showStatus(
+                  'No track data found for this race and date. Please verify parameters.',
+                  'error'
+                );
+              }
+            }
+          );
+        });
+
+      // Helper function to format date/time
+      function formatDateTime(isoString) {
+        if (!isoString) return 'N/A';
+        const date = new Date(isoString);
+        return date.toLocaleTimeString();
+      }
+
+      // Function to update the legend with track colors and pilot names
+      function updateLegend() {
+        // Get all features from the line layer to build the legend
+        const features = map.querySourceFeatures('daily-tracks', {
+          sourceLayer: 'track_lines',
+        });
+
+        // Add unique pilots to the legend
+        features.forEach((feature) => {
+          const props = feature.properties;
+          const pilotId = props.pilot_id;
+          const colorIndex = props.color_index;
+
+          if (!pilots[pilotId]) {
+            pilots[pilotId] = {
+              name: props.pilot_name,
+              color: colors[colorIndex] || '#000000',
+            };
+
+            // Add to the legend
+            const item = document.createElement('div');
+            item.className = 'legend-item';
+
+            const key = document.createElement('span');
+            key.className = 'legend-key';
+            key.style.backgroundColor = pilots[pilotId].color;
+
+            item.appendChild(key);
+            item.appendChild(document.createTextNode(` ${props.pilot_name}`));
+            legend.appendChild(item);
+          }
+        });
+
+        // If no pilots found, show a message
+        if (Object.keys(pilots).length === 0) {
+          legend.innerHTML += '<p>No active pilots found</p>';
+        }
+      }
+
+      // Function to clear existing layers
+      function clearExistingLayers() {
+        // Remove existing layers and source
+        trackLayers.forEach((layerId) => {
+          if (map.getLayer(layerId)) {
+            map.removeLayer(layerId);
+          }
+        });
+
+        if (map.getSource('daily-tracks')) {
+          map.removeSource('daily-tracks');
+        }
+
+        trackLayers = [];
+      }
+
+      // Function to fetch tile and check if it has features
+      async function fetchTile(raceId, source, token, apiUrl, date, z, x, y) {
+        try {
+          let url = `${apiUrl}/postgis-mvt/daily/${z}/${x}/${y}?race_id=${encodeURIComponent(
+            raceId
+          )}&source=${source}&token=${token}`;
+          if (date) {
+            url += `&date=${date}`;
+          }
+
+          const response = await fetch(url);
+
+          if (!response.ok) {
+            throw new Error(`HTTP error! Status: ${response.status}`);
+          }
+
+          const buffer = await response.arrayBuffer();
+
+          return {
+            hasFeatures: buffer.byteLength > 0,
+            hasPoints: buffer.byteLength > 0,
+            hasLines: buffer.byteLength > 0,
+            byteLength: buffer.byteLength,
+          };
+        } catch (error) {
+          console.error('Error fetching tile:', error);
+          showStatus(`Error: ${error.message}`, 'error');
+          return {
+            hasFeatures: false,
+            hasPoints: false,
+            hasLines: false,
+            error: error.message,
+          };
+        }
+      }
+
+      // Function to fetch bounds for all tracks
+      async function fetchBounds(raceId, source, token, apiUrl, date) {
+        // This is a simplified approach - in a real app, you might want to fetch
+        // actual bounds from the server
+        try {
+          // For now we'll use a 0/0/0 tile to see if any data is available
+          const tileInfo = await fetchTile(
+            raceId,
+            source,
+            token,
+            apiUrl,
+            date,
+            0,
+            0,
+            0
+          );
+          if (tileInfo.hasFeatures) {
+            // If we have features, we'll hardcode a starting viewport
+            // In a real app, you'd fetch the actual bounds from the server
+            return new maplibreLib.LngLatBounds(
+              [11.0, 43.5], // SW corner
+              [12.0, 44.5] // NE corner
+            );
+          }
+          return null;
+        } catch (error) {
+          console.error('Error fetching bounds:', error);
+          return null;
+        }
+      }
+
+      function showStatus(message, type) {
+        const statusEl = document.getElementById('status-message');
+        statusEl.textContent = message;
+        statusEl.className = 'status ' + type;
+      }
+    </script>
+  </body>
+</html>

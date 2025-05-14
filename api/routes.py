@@ -2085,6 +2085,7 @@ async def get_postgis_track_tile(
     """
     Serve vector tiles for track points using PostGIS ST_AsMVT function.
     This provides better performance as tile generation happens in the database.
+    Returns both point features and a linestring connecting them.
 
     Parameters:
     - z/x/y: Tile coordinates
@@ -2096,34 +2097,84 @@ async def get_postgis_track_tile(
         table_name = "live_track_points" if source == "live" else "uploaded_track_points"
 
         # SQL query using ST_AsMVT
-        # This generates the MVT tile directly in the database
+        # This generates MVT tiles with both points and lines
         query = f"""
         WITH 
         bounds AS (
             SELECT ST_TileEnvelope({z}, {x}, {y}) AS geom
         ),
-        mvt_data AS (
+        -- Select and filter points within this tile
+        filtered_points AS (
+            SELECT 
+                t.id,
+                t.geom,
+                t.elevation,
+                t.datetime,
+                t.lat,
+                t.lon
+            FROM {table_name} t
+            WHERE t.flight_uuid = '{flight_uuid}'
+              AND ST_Intersects(ST_Transform(t.geom, 3857), (SELECT geom FROM bounds))
+              -- Add time-based sampling for lower zoom levels
+              {" AND extract(second from t.datetime)::integer % 30 = 0 " if z < 10 else ""}
+            ORDER BY t.datetime
+        ),
+        -- Create the points layer
+        point_mvt AS (
             SELECT 
                 ST_AsMVTGeom(
-                    ST_Transform(t.geom, 3857), 
-                    bounds.geom,
+                    ST_Transform(fp.geom, 3857), 
+                    (SELECT geom FROM bounds),
                     4096,    -- Resolution: standard is 4096 for MVT
                     256,     -- Buffer: to avoid clipping at tile edges
                     true     -- Clip geometries
                 ) AS geom,
-                t.elevation::float as elevation,
-                t.datetime::text as datetime,
-                t.lat::float as lat,
-                t.lon::float as lon
-            FROM {table_name} t, bounds
-            WHERE t.flight_uuid = '{flight_uuid}'
-              AND ST_Intersects(ST_Transform(t.geom, 3857), bounds.geom)
-              -- Add time-based sampling for lower zoom levels
-              {" AND extract(second from t.datetime)::integer % 30 = 0 " if z < 10 else ""}
-            ORDER BY t.datetime
+                fp.elevation::float as elevation,
+                fp.datetime::text as datetime,
+                fp.lat::float as lat,
+                fp.lon::float as lon,
+                fp.id::text as point_id
+            FROM filtered_points fp
+        ),
+        -- Create the line layer from the same points
+        line_data AS (
+            SELECT ST_AsMVTGeom(
+                ST_Transform(
+                    ST_MakeLine(fp.geom ORDER BY fp.datetime),
+                    3857
+                ),
+                (SELECT geom FROM bounds),
+                4096,
+                256,
+                true
+            ) AS geom,
+            '{flight_uuid}' as flight_uuid,
+            count(fp.id) as point_count
+            FROM filtered_points fp
+            GROUP BY flight_uuid
+        ),
+        -- Generate the MVT for points
+        points_mvt AS (
+            SELECT ST_AsMVT(point_mvt.*, 'track_points') AS mvt
+            FROM point_mvt
+        ),
+        -- Generate the MVT for lines
+        lines_mvt AS (
+            SELECT ST_AsMVT(line_data.*, 'track_lines') AS mvt
+            FROM line_data
         )
-        SELECT ST_AsMVT(mvt_data.*, 'track_points') AS mvt
-        FROM mvt_data
+        -- Combine both MVTs into one response
+        SELECT 
+            CASE 
+                WHEN EXISTS (SELECT 1 FROM line_data) AND EXISTS (SELECT 1 FROM point_mvt)
+                THEN ST_AsMVT(line_data.*, 'track_lines') || ST_AsMVT(point_mvt.*, 'track_points')
+                WHEN EXISTS (SELECT 1 FROM line_data) 
+                THEN ST_AsMVT(line_data.*, 'track_lines') 
+                WHEN EXISTS (SELECT 1 FROM point_mvt)
+                THEN ST_AsMVT(point_mvt.*, 'track_points')
+                ELSE NULL
+            END AS mvt
+        FROM line_data, point_mvt
         """
 
         # Execute the query and get the tile
@@ -2140,6 +2191,208 @@ async def get_postgis_track_tile(
         logger.error(f"Error generating PostGIS vector tile: {str(e)}")
         raise HTTPException(
             status_code=500, detail=f"Failed to generate tile: {str(e)}")
+
+
+@router.get("/postgis-mvt/daily/{z}/{x}/{y}")
+async def get_daily_tracks_tile(
+    z: int,
+    x: int,
+    y: int,
+    race_id: str = Query(..., description="Race ID to filter tracks"),
+    source: str = Query("live", regex="^(live|upload)$",
+                        description="Either 'live' or 'upload'"),
+    date: Optional[str] = Query(
+        None, description="Date in YYYY-MM-DD format. If not provided, uses today"),
+    token_data: Dict = Depends(verify_tracking_token),
+    db: Session = Depends(get_db)
+):
+    """
+    Serve vector tiles for all tracks from today for a specific race.
+    Returns track points and lines with different colors per pilot.
+
+    Parameters:
+    - z/x/y: Tile coordinates
+    - race_id: Race ID to filter tracks
+    - source: Either 'live' or 'upload' to specify data source
+    - date: Optional date parameter (YYYY-MM-DD). If not provided, uses today
+    """
+    try:
+        # Determine table name based on source
+        table_name = "live_track_points" if source == "live" else "uploaded_track_points"
+
+        # Get current date in the server's timezone or use provided date
+        if date:
+            # Parse provided date
+            try:
+                target_date = datetime.strptime(date, '%Y-%m-%d').date()
+            except ValueError:
+                raise HTTPException(
+                    status_code=400, detail=f"Invalid date format. Use YYYY-MM-DD"
+                )
+        else:
+            # Use today's date
+            target_date = datetime.now(timezone.utc).date()
+
+        # Calculate start and end of the specified date in UTC
+        start_of_day = datetime.combine(
+            target_date, time.min, tzinfo=timezone.utc)
+        end_of_day = datetime.combine(
+            target_date, time.max, tzinfo=timezone.utc)
+
+        # First, find all flights from today for this race
+        all_flights_today = db.query(Flight).filter(
+            Flight.race_id == race_id,
+            Flight.source == source,
+            # Either the flight was created today
+            ((Flight.created_at >= start_of_day) &
+             (Flight.created_at <= end_of_day)) |
+            # OR the flight has a last_fix during today
+            (func.json_extract_path_text(Flight.last_fix, 'datetime') >=
+                start_of_day.strftime('%Y-%m-%dT%H:%M:%SZ')) &
+            (func.json_extract_path_text(Flight.last_fix, 'datetime') <=
+                end_of_day.strftime('%Y-%m-%dT%H:%M:%SZ'))
+        ).all()
+
+        # Group flights by pilot_id and select only the newest one for each pilot
+        pilot_newest_flights = {}
+        for flight in all_flights_today:
+            pilot_id = flight.pilot_id
+            last_fix_time = datetime.fromisoformat(
+                flight.last_fix['datetime'].replace('Z', '+00:00')
+            ).astimezone(timezone.utc)
+
+            if pilot_id not in pilot_newest_flights or last_fix_time > pilot_newest_flights[pilot_id]['last_fix_time']:
+                pilot_newest_flights[pilot_id] = {
+                    'flight': flight,
+                    'last_fix_time': last_fix_time
+                }
+
+        # Extract the flight UUIDs from the selected flights
+        flight_uuids = [str(flight_data['flight'].id)
+                        for flight_data in pilot_newest_flights.values()]
+
+        if not flight_uuids:
+            # No flights found, return empty tile
+            return Response(content=b"", media_type="application/x-protobuf")
+
+        # Format UUIDs as a string list for the SQL query
+        flight_uuids_str = "', '".join(flight_uuids)
+        if flight_uuids_str:
+            flight_uuids_str = f"('{flight_uuids_str}')"
+        else:
+            # Use NULL to ensure valid SQL when list is empty
+            flight_uuids_str = "(NULL)"
+
+        # SQL query using ST_AsMVT
+        # This generates MVT tiles with both points and lines for all flights
+        query = f"""
+        WITH 
+        bounds AS (
+            SELECT ST_TileEnvelope({z}, {x}, {y}) AS geom
+        ),
+        -- Get flight metadata to assign colors
+        flights AS (
+            SELECT 
+                id, 
+                flight_id,
+                pilot_name,
+                pilot_id,
+                row_number() OVER (ORDER BY created_at) AS color_index
+            FROM flights 
+            WHERE id::text IN {flight_uuids_str}
+        ),
+        -- Select and filter points within this tile
+        filtered_points AS (
+            SELECT 
+                t.id,
+                t.geom,
+                t.elevation,
+                t.datetime,
+                t.lat,
+                t.lon,
+                t.flight_uuid,
+                f.pilot_name,
+                f.pilot_id,
+                f.color_index
+            FROM {table_name} t
+            JOIN flights f ON t.flight_uuid = f.id
+            WHERE t.flight_uuid::text IN {flight_uuids_str}
+              AND ST_Intersects(ST_Transform(t.geom, 3857), (SELECT geom FROM bounds))
+              -- Add time-based sampling for lower zoom levels
+              {" AND extract(second from t.datetime)::integer % 30 = 0 " if z < 10 else ""}
+            ORDER BY t.flight_uuid, t.datetime
+        ),
+        -- Create the points layer
+        point_mvt AS (
+            SELECT 
+                ST_AsMVTGeom(
+                    ST_Transform(fp.geom, 3857), 
+                    (SELECT geom FROM bounds),
+                    4096,    -- Resolution: standard is 4096 for MVT
+                    256,     -- Buffer: to avoid clipping at tile edges
+                    true     -- Clip geometries
+                ) AS geom,
+                fp.elevation::float as elevation,
+                fp.datetime::text as datetime,
+                fp.lat::float as lat,
+                fp.lon::float as lon,
+                fp.flight_uuid::text as flight_uuid,
+                fp.pilot_name,
+                fp.pilot_id,
+                fp.color_index % 10 as color_index  -- Modulo 10 to cycle through colors
+            FROM filtered_points fp
+        ),
+        -- Create the line layer from the same points, grouped by flight
+        line_data AS (
+            SELECT 
+                ST_AsMVTGeom(
+                    ST_Transform(
+                        ST_MakeLine(fp.geom ORDER BY fp.datetime),
+                        3857
+                    ),
+                    (SELECT geom FROM bounds),
+                    4096,
+                    256,
+                    true
+                ) AS geom,
+                fp.flight_uuid::text as flight_uuid,
+                fp.pilot_name,
+                fp.pilot_id,
+                fp.color_index % 10 as color_index,  -- Modulo 10 to cycle through colors
+                count(fp.id) as point_count,
+                min(fp.datetime) as start_time,
+                max(fp.datetime) as end_time
+            FROM filtered_points fp
+            GROUP BY fp.flight_uuid, fp.pilot_name, fp.pilot_id, fp.color_index
+        )
+        -- Generate and combine both MVTs
+        SELECT 
+            CASE 
+                WHEN EXISTS (SELECT 1 FROM line_data) AND EXISTS (SELECT 1 FROM point_mvt)
+                THEN ST_AsMVT(line_data.*, 'track_lines') || ST_AsMVT(point_mvt.*, 'track_points')
+                WHEN EXISTS (SELECT 1 FROM line_data) 
+                THEN ST_AsMVT(line_data.*, 'track_lines') 
+                WHEN EXISTS (SELECT 1 FROM point_mvt)
+                THEN ST_AsMVT(point_mvt.*, 'track_points')
+                ELSE NULL
+            END AS mvt
+        FROM line_data, point_mvt
+        """
+
+        # Execute the query and get the tile
+        result = db.execute(text(query)).fetchone()
+
+        if result and result[0]:
+            # Return the MVT tile as binary data
+            return Response(content=result[0], media_type="application/x-protobuf")
+        else:
+            # Return an empty tile
+            return Response(content=b"", media_type="application/x-protobuf")
+
+    except Exception as e:
+        logger.error(f"Error generating daily tracks vector tile: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to generate daily tracks tile: {str(e)}")
 
 
 @router.get("/track-line/{flight_uuid}")
