@@ -2095,10 +2095,6 @@ async def get_postgis_track_tile(
         # Determine table name based on source
         table_name = "live_track_points" if source == "live" else "uploaded_track_points"
 
-        # Calculate the bounds of the requested tile
-        # We'll use the ST_TileEnvelope function from PostGIS
-        # Format: ST_TileEnvelope(z, x, y, [margin])
-
         # SQL query using ST_AsMVT
         # This generates the MVT tile directly in the database
         query = f"""
@@ -2109,7 +2105,7 @@ async def get_postgis_track_tile(
         mvt_data AS (
             SELECT 
                 ST_AsMVTGeom(
-                    t.geom, 
+                    ST_Transform(t.geom, 3857), 
                     bounds.geom,
                     4096,    -- Resolution: standard is 4096 for MVT
                     256,     -- Buffer: to avoid clipping at tile edges

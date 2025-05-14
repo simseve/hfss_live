@@ -9,10 +9,10 @@ import time
 def test_mvt_endpoint():
     # Replace these values with your actual test data
     z, x, y = 0, 0, 0  # Example tile coordinates
-    flight_uuid = "bc52c874-b845-4057-a67f-270c9807ca0d"  # Example UUID
+    flight_uuid = "e3077e36-bc4c-4373-bada-72b8cb183a5e"  # Example UUID
     source = "live"  # Either "live" or "upload"
     gzip_param = False
-    token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJwaWxvdF9pZCI6IjY3OTgwNWQ2MTJlNjI5YTg4MzhhNzA2YiIsInJhY2VfaWQiOiI2Nzk4MDU1ODEyZTYyOWE4ODM4YTcwNTkiLCJwaWxvdF9uYW1lIjoiU2ltb25lIFNldmVyaW5pIiwiZXhwIjoxNzcxNTQ1NTk5LCJyYWNlIjp7Im5hbWUiOiJIRlNTIFRyYWNrZXIgTGl2ZSIsImRhdGUiOiIyMDI1LTAyLTE5IiwidGltZXpvbmUiOiJFdXJvcGUvUm9tZSIsImxvY2F0aW9uIjoiVGVzdCIsImVuZF9kYXRlIjoiMjAyNi0wMi0xOSJ9LCJlbmRwb2ludHMiOnsibGl2ZSI6Ii9saXZlIiwidXBsb2FkIjoiL3VwbG9hZCJ9fQ.9jLAcQ-ejTHXZMxCueJNGuBh87oCgPJltT0fPvJuQQE"
+    token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJwaWxvdF9pZCI6IjY4MGY4NTRmMmI4NTk5ZDZhMzM2ZDUxZiIsInJhY2VfaWQiOiI2Nzk4MDU1ODEyZTYyOWE4ODM4YTcwNTkiLCJwaWxvdF9uYW1lIjoiVml0IFJlbmEiLCJleHAiOjE3NzE1NDU1OTksInJhY2UiOnsibmFtZSI6IkhGU1MgVHJhY2tlciBMaXZlIiwiZGF0ZSI6IjIwMjUtMDItMTkiLCJ0aW1lem9uZSI6IkV1cm9wZS9Sb21lIiwibG9jYXRpb24iOiJUZXN0IiwiZW5kX2RhdGUiOiIyMDI2LTAyLTE5In0sImVuZHBvaW50cyI6eyJsaXZlIjoiL2xpdmUiLCJ1cGxvYWQiOiIvdXBsb2FkIn19.Se_km_mMkESwo6rUjU8GPW4zr6Gr0GvvbGv07ReOhTA"
 
     # URL to your endpoint with all parameters in query string
     url = f"http://127.0.0.1:8000/tracking/mvt/{z}/{x}/{y}?flight_uuid={flight_uuid}&source={source}&gzip={str(gzip_param).lower()}&token={token}"
@@ -75,9 +75,9 @@ def test_mvt_endpoint():
 def test_postgis_mvt_endpoint():
     # Replace these values with your actual test data
     z, x, y = 0, 0, 0  # Example tile coordinates
-    flight_uuid = "bc52c874-b845-4057-a67f-270c9807ca0d"  # Example UUID
+    flight_uuid = "e3077e36-bc4c-4373-bada-72b8cb183a5e"  # Example UUID
     source = "live"  # Either "live" or "upload"
-    token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJwaWxvdF9pZCI6IjY3OTgwNWQ2MTJlNjI5YTg4MzhhNzA2YiIsInJhY2VfaWQiOiI2Nzk4MDU1ODEyZTYyOWE4ODM4YTcwNTkiLCJwaWxvdF9uYW1lIjoiU2ltb25lIFNldmVyaW5pIiwiZXhwIjoxNzcxNTQ1NTk5LCJyYWNlIjp7Im5hbWUiOiJIRlNTIFRyYWNrZXIgTGl2ZSIsImRhdGUiOiIyMDI1LTAyLTE5IiwidGltZXpvbmUiOiJFdXJvcGUvUm9tZSIsImxvY2F0aW9uIjoiVGVzdCIsImVuZF9kYXRlIjoiMjAyNi0wMi0xOSJ9LCJlbmRwb2ludHMiOnsibGl2ZSI6Ii9saXZlIiwidXBsb2FkIjoiL3VwbG9hZCJ9fQ.9jLAcQ-ejTHXZMxCueJNGuBh87oCgPJltT0fPvJuQQE"
+    token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJwaWxvdF9pZCI6IjY4MGY4NTRmMmI4NTk5ZDZhMzM2ZDUxZiIsInJhY2VfaWQiOiI2Nzk4MDU1ODEyZTYyOWE4ODM4YTcwNTkiLCJwaWxvdF9uYW1lIjoiVml0IFJlbmEiLCJleHAiOjE3NzE1NDU1OTksInJhY2UiOnsibmFtZSI6IkhGU1MgVHJhY2tlciBMaXZlIiwiZGF0ZSI6IjIwMjUtMDItMTkiLCJ0aW1lem9uZSI6IkV1cm9wZS9Sb21lIiwibG9jYXRpb24iOiJUZXN0IiwiZW5kX2RhdGUiOiIyMDI2LTAyLTE5In0sImVuZHBvaW50cyI6eyJsaXZlIjoiL2xpdmUiLCJ1cGxvYWQiOiIvdXBsb2FkIn19.Se_km_mMkESwo6rUjU8GPW4zr6Gr0GvvbGv07ReOhTA"
 
     # URL to your new PostGIS MVT endpoint
     url = f"http://127.0.0.1:8000/tracking/postgis-mvt/{z}/{x}/{y}?flight_uuid={flight_uuid}&source={source}&token={token}"
