@@ -2395,13 +2395,13 @@ async def get_daily_tracks_tile(
             status_code=500, detail=f"Failed to generate daily tracks tile: {str(e)}")
 
 
-@router.get("/track-line/{flight_uuid}")
+@router.get("/track-line/{flight_id}")
 async def get_track_linestring(
     flight_uuid: UUID,
     source: str = Query(..., regex="^(live|upload)$",
                         description="Either 'live' or 'upload'"),
-    simplify: Optional[float] = Query(
-        None, description="Tolerance for simplifying the line geometry (in degrees). Higher values mean more simplification."),
+    simplify: bool = Query(
+        False, description="Whether to simplify the track geometry. If true, provides sampled coordinates for better performance."),
     credentials: HTTPAuthorizationCredentials = Security(security),
     db: Session = Depends(get_db)
 ):
@@ -2457,17 +2457,28 @@ async def get_track_linestring(
         else:  # source == 'upload'
             func_name = 'generate_uploaded_track_linestring'
 
-        # Creare la query con la possibilità di semplificare la geometria
-        if simplify is not None and simplify > 0:
+        # Handle simplification - treat simplify as a boolean flag
+        if simplify:
+            # Use a default moderate value for simplification
+            simplify_value = 0.0001
+
+            # Use a simpler, more reliable approach with ST_SimplifyPreserveTopology
             query = f"""
-            SELECT ST_AsGeoJSON(
-                ST_Simplify(
-                    {func_name}('{flight_uuid}'::uuid),
-                    {simplify}
-                )
-            ) as geojson;
+            WITH original AS (
+                SELECT {func_name}('{flight_uuid}'::uuid) AS geom
+            )
+            SELECT 
+                CASE 
+                    -- Check if the simplified geometry has enough points to be useful
+                    WHEN ST_NPoints(ST_SimplifyPreserveTopology(geom, {simplify_value})) >= 10 
+                        THEN ST_AsGeoJSON(ST_SimplifyPreserveTopology(geom, {simplify_value}))
+                    -- Otherwise return the original geometry
+                    ELSE ST_AsGeoJSON(geom) 
+                END as geojson
+            FROM original;
             """
         else:
+            # No simplification, return all points
             query = f"""
             SELECT ST_AsGeoJSON({func_name}('{flight_uuid}'::uuid)) as geojson;
             """
@@ -2496,10 +2507,61 @@ async def get_track_linestring(
         # Costruire la risposta GeoJSON
         linestring_geojson = result[0]
 
+        # Parse the GeoJSON to create a Google Static Maps path
+        geometry = json.loads(linestring_geojson)
+
+        # Handle sampling of coordinates for both Map URL and response when simplify=true
+        sampled_coords = []
+
+        # Generate a Google Static Maps preview URL if coordinates exist
+        google_maps_preview_url = None
+        if geometry and geometry.get('coordinates') and len(geometry['coordinates']) > 0:
+            coords = geometry['coordinates']
+
+            # Sample coordinates to keep URL length manageable (max 2000 chars)
+            # Take first, last, and sample points in between if there are many
+            if len(coords) > 50:  # If more than 50 points, sample them
+                # Always include first and last points
+                first_point = coords[0]
+                last_point = coords[-1]
+
+                # Sample middle points - take about 48 points evenly distributed
+                sample_step = len(coords) // 48
+                sampled_coords = [coords[i]
+                                  for i in range(0, len(coords), sample_step)]
+
+                # Ensure we include the last point if it wasn't included in sampling
+                if sampled_coords[-1] != last_point:
+                    sampled_coords.append(last_point)
+            else:
+                sampled_coords = coords
+
+            # Format as lat,lng for Google Static Maps API
+            path_points = "|".join(
+                [f"{coord[1]},{coord[0]}" for coord in sampled_coords])
+
+            # Create Google Static Maps URL with path - include API key from settings
+            google_maps_preview_url = (
+                f"https://maps.googleapis.com/maps/api/staticmap?"
+                f"size=600x400&path=color:0x0000ff|weight:5|{path_points}"
+                f"&sensor=false"
+                f"&key={settings.GOOGLE_MAPS_API_KEY}"
+            )
+
+        # Use sampled coordinates for the response geometry if simplify=true
+        response_geometry = None
+        if simplify and len(sampled_coords) > 0:
+            response_geometry = {
+                "type": "LineString",
+                "coordinates": sampled_coords
+            }
+        else:
+            response_geometry = json.loads(linestring_geojson)
+
         # Ottenere anche i punti iniziale e finale per avere informazioni aggiuntive
         return {
             "type": "Feature",
-            "geometry": json.loads(linestring_geojson),
+            "geometry": response_geometry,
             "properties": {
                 "flight_id": flight.flight_id,
                 "flight_uuid": str(flight.id),
@@ -2509,7 +2571,9 @@ async def get_track_linestring(
                 "total_points": flight.total_points,
                 "first_fix": flight.first_fix,
                 "last_fix": flight.last_fix,
-                "simplified": simplify is not None
+                "simplified": simplify,
+                "preview_url": google_maps_preview_url,
+                "sampled": simplify and len(sampled_coords) > 0
             }
         }
 
