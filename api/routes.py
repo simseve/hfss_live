@@ -2121,7 +2121,7 @@ async def get_postgis_track_tile(
                 t.lon::float as lon
             FROM {table_name} t, bounds
             WHERE t.flight_uuid = '{flight_uuid}'
-              AND ST_Intersects(t.geom, bounds.geom)
+              AND ST_Intersects(ST_Transform(t.geom, 3857), bounds.geom)
               -- Add time-based sampling for lower zoom levels
               {" AND extract(second from t.datetime)::integer % 30 = 0 " if z < 10 else ""}
             ORDER BY t.datetime
@@ -2320,14 +2320,14 @@ async def get_flight_state_endpoint(
             )
 
         # Get flight from database
-        flight = db.query(Flight).filter(Flight.flight_id == flight_uuid and Flight.source == source).first()
+        flight = db.query(Flight).filter(Flight.flight_id ==
+                                         flight_uuid and Flight.source == source).first()
 
         if not flight:
             raise HTTPException(
                 status_code=404,
                 detail="Flight not found"
             )
-
 
         # Format the response
         response = {
@@ -2383,8 +2383,6 @@ async def get_flight_state_endpoint(
             status_code=500,
             detail=f"Failed to get flight state: {str(e)}"
         )
-
-
 
 
 async def update_flight_state(flight_uuid, db, source=None):
