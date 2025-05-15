@@ -2399,6 +2399,7 @@ async def get_daily_tracks_tile(
             status_code=500, detail=f"Failed to generate daily tracks tile: {str(e)}")
 
 
+
 @router.get("/track-preview/{flight_uuid}")
 async def get_track_preview(
     flight_uuid: UUID,
@@ -2412,6 +2413,7 @@ async def get_track_preview(
 ):
     """
     Generate a Google Static Maps preview URL for a flight track using the encoded polyline.
+    Also returns track statistics including distance, duration, speeds, and elevation data.
 
     Parameters:
     - flight_uuid: UUID of the flight
@@ -2460,9 +2462,75 @@ async def get_track_preview(
         # Get the encoded polyline for the flight with simplification
         if flight.source == 'live':
             func_name = 'generate_live_track_linestring'
+            table_name = 'live_track_points'
         else:  # source == 'upload'
             func_name = 'generate_uploaded_track_linestring'
+            table_name = 'uploaded_track_points'
 
+        # First get track statistics using PostGIS - fixed query to handle elevation gain/loss
+        stats_query = f"""
+        WITH track AS (
+            SELECT 
+                tp.datetime,
+                tp.elevation,
+                tp.geom
+            FROM {table_name} tp
+            WHERE tp.flight_uuid = '{flight_uuid}'
+            ORDER BY tp.datetime
+        ),
+        track_stats AS (
+            SELECT
+                -- Distance in meters
+                ST_Length(ST_MakeLine(geom)::geography) as distance,
+                -- Time values
+                MIN(datetime) as start_time,
+                MAX(datetime) as end_time,
+                -- Elevation values
+                MIN(elevation) as min_elevation,
+                MAX(elevation) as max_elevation,
+                MAX(elevation) - MIN(elevation) as elevation_range
+            FROM track
+        ),
+        -- Handle elevation gain/loss without using window functions inside aggregates
+        track_with_prev AS (
+            SELECT
+                datetime,
+                elevation,
+                LAG(elevation) OVER (ORDER BY datetime) as prev_elevation
+            FROM track
+        ),
+        elevation_changes AS (
+            SELECT
+                SUM(CASE WHEN (elevation - prev_elevation) > 1 THEN (elevation - prev_elevation) ELSE 0 END) as elevation_gain,
+                SUM(CASE WHEN (elevation - prev_elevation) < -1 THEN ABS(elevation - prev_elevation) ELSE 0 END) as elevation_loss
+            FROM track_with_prev
+            WHERE prev_elevation IS NOT NULL
+        )
+        SELECT
+            ts.distance,
+            ts.start_time,
+            ts.end_time,
+            EXTRACT(EPOCH FROM (ts.end_time - ts.start_time)) as duration_seconds,
+            ts.min_elevation,
+            ts.max_elevation,
+            ts.elevation_range,
+            ec.elevation_gain,
+            ec.elevation_loss,
+            -- Speed calculations
+            CASE
+                WHEN EXTRACT(EPOCH FROM (ts.end_time - ts.start_time)) > 0
+                THEN ts.distance / EXTRACT(EPOCH FROM (ts.end_time - ts.start_time))
+                ELSE 0
+            END as avg_speed_m_s,
+            COUNT(*) as total_points
+        FROM track_stats ts, elevation_changes ec, track
+        GROUP BY 
+            ts.distance, ts.start_time, ts.end_time, ts.min_elevation, 
+            ts.max_elevation, ts.elevation_range, ec.elevation_gain, ec.elevation_loss;
+        """
+        
+        stats_result = db.execute(text(stats_query)).fetchone()
+        
         # Use ST_SimplifyPreserveTopology to reduce the number of points
         # This keeps the general shape but reduces the point count
         query = f"""
@@ -2572,6 +2640,47 @@ async def get_track_preview(
             f"&key={settings.GOOGLE_MAPS_API_KEY}"
         )
 
+        # Format flight statistics
+        stats = {}
+        if stats_result:
+            hours, remainder = divmod(int(stats_result.duration_seconds), 3600)
+            minutes, seconds = divmod(remainder, 60)
+            
+            # Convert meters to kilometers
+            distance_km = float(stats_result.distance) / 1000 if stats_result.distance else 0
+            
+            # Convert m/s to km/h
+            avg_speed_kmh = float(stats_result.avg_speed_m_s) * 3.6 if stats_result.avg_speed_m_s else 0
+            
+            stats = {
+                "distance": {
+                    "meters": round(float(stats_result.distance), 2) if stats_result.distance else 0,
+                    "kilometers": round(distance_km, 2)
+                },
+                "duration": {
+                    "seconds": int(stats_result.duration_seconds) if stats_result.duration_seconds else 0,
+                    "formatted": f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                },
+                "speed": {
+                    "avg_m_s": round(float(stats_result.avg_speed_m_s), 2) if stats_result.avg_speed_m_s else 0,
+                    "avg_km_h": round(avg_speed_kmh, 2)
+                },
+                "elevation": {
+                    "min": round(float(stats_result.min_elevation), 1) if stats_result.min_elevation is not None else None,
+                    "max": round(float(stats_result.max_elevation), 1) if stats_result.max_elevation is not None else None,
+                    "range": round(float(stats_result.elevation_range), 1) if stats_result.elevation_range is not None else None,
+                    "gain": round(float(stats_result.elevation_gain), 1) if stats_result.elevation_gain is not None else None,
+                    "loss": round(float(stats_result.elevation_loss), 1) if stats_result.elevation_loss is not None else None
+                },
+                "points": {
+                    "total": stats_result.total_points if hasattr(stats_result, 'total_points') else 0
+                },
+                "timestamps": {
+                    "start": stats_result.start_time.isoformat() if stats_result.start_time else None,
+                    "end": stats_result.end_time.isoformat() if stats_result.end_time else None
+                }
+            }
+
         return {
             "flight_id": flight.flight_id,
             "flight_uuid": str(flight.id),
@@ -2579,7 +2688,8 @@ async def get_track_preview(
             "source": flight.source,
             "original_points": original_points,
             "simplified_points": simplified_points,
-            "url_length": len(google_maps_preview_url)
+            "url_length": len(google_maps_preview_url),
+            "stats": stats
         }
 
     except HTTPException:
@@ -2590,7 +2700,7 @@ async def get_track_preview(
             status_code=500,
             detail=f"Failed to generate track preview: {str(e)}"
         )
-
+    
 
 @router.get("/track-preview/{flight_id}")
 async def get_track_preview_id(

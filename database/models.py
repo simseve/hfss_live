@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Float, DateTime, MetaData, CHAR, BigInteger, Index, Integer, JSON, ForeignKey, UniqueConstraint
+from sqlalchemy import Column, String, Float, DateTime, MetaData, CHAR, BigInteger, Index, Integer, JSON, ForeignKey, UniqueConstraint, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import UUID
@@ -102,6 +102,9 @@ class LiveTrackPoint(Base):
                          name='live_track_points_unique_parent'),
         # Add a spatial index
         Index('idx_live_track_points_geom', 'geom', postgresql_using='gist'),
+        # Add functional index on transformed geometry for Web Mercator (EPSG:3857)
+        Index('idx_live_track_points_transformed_geom',
+              text('ST_Transform(geom, 3857)'), postgresql_using='gist'),
     )
 
     def __repr__(self):
@@ -133,6 +136,9 @@ class UploadedTrackPoint(Base):
         # Add a spatial index
         Index('idx_uploaded_track_points_geom',
               'geom', postgresql_using='gist'),
+        # Add functional index on transformed geometry for Web Mercator (EPSG:3857)
+        Index('idx_uploaded_track_points_transformed_geom',
+              text('ST_Transform(geom, 3857)'), postgresql_using='gist'),
     )
 
     def __repr__(self):
