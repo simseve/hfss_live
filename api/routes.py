@@ -1967,7 +1967,7 @@ async def get_track_tile(
     z: int,
     x: int,
     y: int,
-    flight_uuid: UUID,
+    flight_id: str,
     source: str = Query(..., regex="^(live|upload)$"),
     gzip: bool = Query(
         False, description="Apply gzip compression to the tile data"),
@@ -1994,7 +1994,7 @@ async def get_track_tile(
 
         # Query points that fall within this tile's bounds
         query = db.query(PointModel).filter(
-            PointModel.flight_uuid == flight_uuid,
+            PointModel.flight_id == flight_id,
             PointModel.lon >= tile_bounds.west,
             PointModel.lon <= tile_bounds.east,
             PointModel.lat >= tile_bounds.south,
@@ -2076,7 +2076,7 @@ async def get_postgis_track_tile(
     z: int,
     x: int,
     y: int,
-    flight_uuid: UUID = Query(..., description="UUID of the flight to render"),
+    flight_id: str = Query(..., description="UUID of the flight to render"),
     source: str = Query(..., regex="^(live|upload)$",
                         description="Either 'live' or 'upload'"),
     token_data: Dict = Depends(verify_tracking_token),
@@ -2113,7 +2113,7 @@ async def get_postgis_track_tile(
                 t.lat,
                 t.lon
             FROM {table_name} t
-            WHERE t.flight_uuid = '{flight_uuid}'
+            WHERE t.flight_id = '{flight_id}'
               AND ST_Intersects(ST_Transform(t.geom, 3857), (SELECT geom FROM bounds))
               -- Add time-based sampling for lower zoom levels
               {" AND extract(second from t.datetime)::integer % 30 = 0 " if z < 10 else ""}
@@ -2148,10 +2148,10 @@ async def get_postgis_track_tile(
                 256,
                 true
             ) AS geom,
-            '{flight_uuid}' as flight_uuid,
+            '{flight_id}' as flight_id,
             count(fp.id) as point_count
             FROM filtered_points fp
-            GROUP BY flight_uuid
+            GROUP BY flight_id
         ),
         -- Generate the MVT for points
         points_mvt AS (
