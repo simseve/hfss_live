@@ -2203,6 +2203,8 @@ async def get_daily_tracks_tile(
                         description="Either 'live' or 'upload'"),
     date: Optional[str] = Query(
         None, description="Date in YYYY-MM-DD format. If not provided, uses today"),
+    pilot_id: Optional[str] = Query(
+        None, description="Optional pilot ID to filter tracks"),
     token_data: Dict = Depends(verify_tracking_token),
     db: Session = Depends(get_db)
 ):
@@ -2243,9 +2245,11 @@ async def get_daily_tracks_tile(
         all_flights_today = db.query(Flight).filter(
             Flight.race_id == race_id,
             Flight.source == source,
+            # Filter by pilot_id if it's provided
+            *([] if pilot_id is None else [Flight.pilot_id == pilot_id]),
             # Either the flight was created today
             ((Flight.created_at >= start_of_day) &
-             (Flight.created_at <= end_of_day)) |
+            (Flight.created_at <= end_of_day)) |
             # OR the flight has a last_fix during today
             (func.json_extract_path_text(Flight.last_fix, 'datetime') >=
                 start_of_day.strftime('%Y-%m-%dT%H:%M:%SZ')) &
@@ -2587,6 +2591,185 @@ async def get_track_preview(
             detail=f"Failed to generate track preview: {str(e)}"
         )
 
+
+@router.get("/track-preview/{flight_id}")
+async def get_track_preview_id(
+    flight_id: str,
+    width: int = Query(600, description="Width of the preview image in pixels"),
+    height: int = Query(400, description="Height of the preview image in pixels"),
+    color: str = Query("0x0000ff", description="Color of the track path in hex format"),
+    weight: int = Query(5, description="Weight/thickness of the track path"),
+    max_points: int = Query(1000, description="Maximum number of points to use in the polyline"),
+    token_data: Dict = Depends(verify_tracking_token),
+    source: str = Query(..., regex="^(live|upload)$", description="Either 'live' or 'upload'"),
+    db: Session = Depends(get_db)
+):
+    """
+    Generate a Google Static Maps preview URL for a flight track using the encoded polyline.
+
+    Parameters:
+    - flight_uuid: UUID of the flight
+    - width: Width of the preview image (default: 600)
+    - height: Height of the preview image (default: 400)
+    - color: Color of the track path in hex format (default: 0x0000ff - blue)
+    - weight: Weight/thickness of the track path (default: 5)
+    - max_points: Maximum number of points to use (default: 1000, reduces URL length)
+    """
+    try:
+
+        # Get flight from database
+        flight = db.query(Flight).filter(
+            Flight.flight_id == flight_id,
+            Flight.source == source
+        ).first()
+
+        flight_uuid = str(flight.id) if flight else None
+        if not flight_uuid:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Flight not found with ID {flight_id}"
+            )
+
+        if not flight:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Flight not found with UUID {flight_uuid}"
+            )
+
+        # Get the encoded polyline for the flight with simplification
+        if flight.source == 'live':
+            func_name = 'generate_live_track_linestring'
+        else:  # source == 'upload'
+            func_name = 'generate_uploaded_track_linestring'
+
+        # Use ST_SimplifyPreserveTopology to reduce the number of points
+        # This keeps the general shape but reduces the point count
+        query = f"""
+        WITH original AS (
+            SELECT {func_name}('{flight_uuid}'::uuid) AS geom
+        )
+        SELECT 
+            ST_NPoints(geom) as original_points,
+            CASE 
+                -- If original has too many points, simplify to reduce size
+                WHEN ST_NPoints(geom) > {max_points}
+                THEN ST_AsEncodedPolyline(ST_SimplifyPreserveTopology(
+                    geom, 
+                    ST_Length(geom::geography) / (5000 * SQRT({max_points}))
+                ))
+                -- Otherwise use the original
+                ELSE ST_AsEncodedPolyline(geom) 
+            END as encoded_polyline,
+            CASE 
+                -- If original has too many points, get count after simplification
+                WHEN ST_NPoints(geom) > {max_points}
+                THEN ST_NPoints(ST_SimplifyPreserveTopology(
+                    geom, 
+                    ST_Length(geom::geography) / (5000 * SQRT({max_points}))
+                ))
+                -- Otherwise use original count
+                ELSE ST_NPoints(geom) 
+            END as simplified_points
+        FROM original;
+        """
+
+        result = db.execute(text(query)).fetchone()
+
+        if not result or not result[1]:
+            return {
+                "status": "error",
+                "detail": "No track data available for this flight"
+            }
+
+        encoded_polyline = result[1]
+        original_points = result[0]
+        simplified_points = result[2]
+        
+        # Check if the encoded polyline is still too large (> 6000 chars to be safe)
+        # If so, further simplify by sampling points
+        if len(encoded_polyline) > 6000:
+            # More aggressive simplification for very long tracks
+            simplify_factor = len(encoded_polyline) / 6000
+            query = f"""
+            WITH original AS (
+                SELECT {func_name}('{flight_uuid}'::uuid) AS geom
+            )
+            SELECT 
+                ST_AsEncodedPolyline(ST_SimplifyPreserveTopology(
+                    geom, 
+                    ST_Length(geom::geography) / (2000 * SQRT({max_points // 2}))
+                )) as encoded_polyline
+            FROM original;
+            """
+            result = db.execute(text(query)).fetchone()
+            if result and result[0]:
+                encoded_polyline = result[0]
+            
+            # If still too large, create a bounding box preview instead
+            if len(encoded_polyline) > 6000:
+                # Get bounding box and center point
+                bbox_query = f"""
+                SELECT 
+                    ST_XMin(ST_Envelope(geom)) as min_lon,
+                    ST_YMin(ST_Envelope(geom)) as min_lat,
+                    ST_XMax(ST_Envelope(geom)) as max_lon,
+                    ST_YMax(ST_Envelope(geom)) as max_lat,
+                    ST_X(ST_Centroid(geom)) as center_lon,
+                    ST_Y(ST_Centroid(geom)) as center_lat
+                FROM (SELECT {func_name}('{flight_uuid}'::uuid) AS geom) AS track;
+                """
+                bbox_result = db.execute(text(bbox_query)).fetchone()
+                
+                if bbox_result:
+                    # Create a static map with the center point and appropriate zoom
+                    center_lat = bbox_result[4]
+                    center_lon = bbox_result[5]
+                    
+                    # Create Google Static Maps URL with center point and appropriate zoom
+                    google_maps_preview_url = (
+                        f"https://maps.googleapis.com/maps/api/staticmap?"
+                        f"size={width}x{height}&center={center_lat},{center_lon}"
+                        f"&zoom=11"  # Default zoom level that shows reasonable area
+                        f"&markers=color:red|{center_lat},{center_lon}"
+                        f"&sensor=false"
+                        f"&key={settings.GOOGLE_MAPS_API_KEY}"
+                    )
+                    
+                    return {
+                        "flight_id": flight.flight_id,
+                        "flight_uuid": str(flight.id),
+                        "preview_url": google_maps_preview_url,
+                        "source": flight.source,
+                        "note": "Track was too complex for detailed preview, showing center point only"
+                    }
+
+        # Create Google Static Maps URL with the encoded polyline
+        google_maps_preview_url = (
+            f"https://maps.googleapis.com/maps/api/staticmap?"
+            f"size={width}x{height}&path=color:{color}|weight:{weight}|enc:{encoded_polyline}"
+            f"&sensor=false"
+            f"&key={settings.GOOGLE_MAPS_API_KEY}"
+        )
+
+        return {
+            "flight_id": flight.flight_id,
+            "flight_uuid": str(flight.id),
+            "preview_url": google_maps_preview_url,
+            "source": flight.source,
+            "original_points": original_points,
+            "simplified_points": simplified_points,
+            "url_length": len(google_maps_preview_url)
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating track preview: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate track preview: {str(e)}"
+        )
+    
 
 @router.get("/track-line/{flight_id}")
 async def get_track_linestring(
@@ -3104,3 +3287,223 @@ async def update_flight_state(flight_uuid, db, source=None):
     except Exception as e:
         # Log but don't raise - this is a background task
         logger.error(f"Error updating flight state: {str(e)}")
+
+
+@router.get("/flight/bounds/{flight_uuid}")
+async def get_flight_bounds(
+    flight_uuid: UUID,
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    db: Session = Depends(get_db)
+):
+    """
+    Calculate the bounding box for a flight track.
+    Returns the min/max coordinates that contain the entire flight path.
+    
+    Parameters:
+    - flight_uuid: UUID of the flight
+    """
+    try:
+        # Verify token
+        token = credentials.credentials
+        try:
+            token_data = jwt.decode(
+                token,
+                settings.SECRET_KEY,
+                algorithms=["HS256"],
+                audience="api.hikeandfly.app",
+                issuer="hikeandfly.app",
+                verify=True
+            )
+
+            if not token_data.get("sub", "").startswith("contest:"):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Invalid token subject - must be contest-specific"
+                )
+
+        except jwt.ExpiredSignatureError:
+            raise HTTPException(status_code=401, detail="Token expired")
+        except PyJWTError as e:
+            raise HTTPException(
+                status_code=401, detail=f"Invalid token: {str(e)}")
+
+        # Check if flight exists
+        flight = db.query(Flight).filter(
+            Flight.id == flight_uuid
+        ).first()
+
+        if not flight:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Flight not found with UUID {flight_uuid}"
+            )
+
+        # Determine which function to use based on flight source
+        if flight.source == 'live':
+            func_name = 'generate_live_track_linestring'
+        else:  # source == 'upload'
+            func_name = 'generate_uploaded_track_linestring'
+
+        # Query to get the bounding box
+        query = f"""
+        SELECT 
+            ST_XMin(ST_Envelope(geom)) as min_lon,
+            ST_YMin(ST_Envelope(geom)) as min_lat,
+            ST_XMax(ST_Envelope(geom)) as max_lon,
+            ST_YMax(ST_Envelope(geom)) as max_lat,
+            ST_X(ST_Centroid(geom)) as center_lon,
+            ST_Y(ST_Centroid(geom)) as center_lat
+        FROM (SELECT {func_name}('{flight_uuid}'::uuid) AS geom) AS track;
+        """
+
+        result = db.execute(text(query)).fetchone()
+
+        if not result:
+            return {
+                "flight_id": flight.flight_id,
+                "flight_uuid": str(flight.id),
+                "bounds": None,
+                "error": "No track data available"
+            }
+
+        # Extract results
+        min_lon, min_lat, max_lon, max_lat, center_lon, center_lat = result
+
+        # Calculate recommended padding (5% of dimensions)
+        lon_span = max_lon - min_lon
+        lat_span = max_lat - min_lat
+        
+        lon_padding = lon_span * 0.05
+        lat_padding = lat_span * 0.05
+
+        return {
+            "flight_id": flight.flight_id,
+            "flight_uuid": str(flight.id),
+            "pilot_name": flight.pilot_name,
+            "source": flight.source,
+            "bounds": {
+                "min_lon": float(min_lon),
+                "min_lat": float(min_lat),
+                "max_lon": float(max_lon),
+                "max_lat": float(max_lat)
+            },
+            "bounds_padded": {
+                "min_lon": float(min_lon - lon_padding),
+                "min_lat": float(min_lat - lat_padding),
+                "max_lon": float(max_lon + lon_padding),
+                "max_lat": float(max_lat + lat_padding)
+            },
+            "center": {
+                "lon": float(center_lon),
+                "lat": float(center_lat)
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error calculating flight bounds: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to calculate flight bounds: {str(e)}"
+        )
+    
+
+
+@router.get("/flight/bounds/flightid/{flight_id}")
+async def get_flight_bounds_by_id(
+    flight_id: str,
+    source: str = Query(..., regex="^(live|upload)$", description="Either 'live' or 'upload'"),
+    token_data: Dict = Depends(verify_tracking_token),
+    db: Session = Depends(get_db)
+):
+    """
+    Calculate the bounding box for a flight track using flight ID.
+    Returns the min/max coordinates that contain the entire flight path.
+    
+    Parameters:
+    - flight_id: ID of the flight
+    - source: Either 'live' or 'upload' to specify which track to retrieve
+    """
+    try:
+        # Check if flight exists
+        flight = db.query(Flight).filter(
+            Flight.flight_id == flight_id,
+            Flight.source == source
+        ).first()
+
+        if not flight:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Flight not found with ID {flight_id} and source {source}"
+            )
+
+        flight_uuid = str(flight.id)
+
+        # Determine which function to use based on flight source
+        if flight.source == 'live':
+            func_name = 'generate_live_track_linestring'
+        else:  # source == 'upload'
+            func_name = 'generate_uploaded_track_linestring'
+
+        # Query to get the bounding box
+        query = f"""
+        SELECT 
+            ST_XMin(ST_Envelope(geom)) as min_lon,
+            ST_YMin(ST_Envelope(geom)) as min_lat,
+            ST_XMax(ST_Envelope(geom)) as max_lon,
+            ST_YMax(ST_Envelope(geom)) as max_lat,
+            ST_X(ST_Centroid(geom)) as center_lon,
+            ST_Y(ST_Centroid(geom)) as center_lat
+        FROM (SELECT {func_name}('{flight_uuid}'::uuid) AS geom) AS track;
+        """
+
+        result = db.execute(text(query)).fetchone()
+
+        if not result:
+            return {
+                "flight_id": flight.flight_id,
+                "flight_uuid": str(flight.id),
+                "bounds": None,
+                "error": "No track data available"
+            }
+
+        # Extract results
+        min_lon, min_lat, max_lon, max_lat, center_lon, center_lat = result
+
+        # Calculate recommended padding (5% of dimensions)
+        lon_span = max_lon - min_lon
+        lat_span = max_lat - min_lat
+        
+        lon_padding = lon_span * 0.05
+        lat_padding = lat_span * 0.05
+
+        return {
+            "flight_id": flight.flight_id,
+            "flight_uuid": str(flight.id),
+            "pilot_name": flight.pilot_name,
+            "source": flight.source,
+            "bounds": {
+                "min_lon": float(min_lon),
+                "min_lat": float(min_lat),
+                "max_lon": float(max_lon),
+                "max_lat": float(max_lat)
+            },
+            "bounds_padded": {
+                "min_lon": float(min_lon - lon_padding),
+                "min_lat": float(min_lat - lat_padding),
+                "max_lon": float(max_lon + lon_padding),
+                "max_lat": float(max_lat + lat_padding)
+            },
+            "center": {
+                "lon": float(center_lon),
+                "lat": float(center_lat)
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"Error calculating flight bounds: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to calculate flight bounds: {str(e)}"
+        )
