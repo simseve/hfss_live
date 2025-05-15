@@ -2395,6 +2395,110 @@ async def get_daily_tracks_tile(
             status_code=500, detail=f"Failed to generate daily tracks tile: {str(e)}")
 
 
+@router.get("/track-preview/{flight_uuid}")
+async def get_track_preview(
+    flight_uuid: UUID,
+    width: int = Query(
+        600, description="Width of the preview image in pixels"),
+    height: int = Query(
+        400, description="Height of the preview image in pixels"),
+    color: str = Query(
+        "0x0000ff", description="Color of the track path in hex format"),
+    weight: int = Query(5, description="Weight/thickness of the track path"),
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    db: Session = Depends(get_db)
+):
+    """
+    Generate a Google Static Maps preview URL for a flight track using the encoded polyline.
+
+    Parameters:
+    - flight_uuid: UUID of the flight
+    - width: Width of the preview image (default: 600)
+    - height: Height of the preview image (default: 400)
+    - color: Color of the track path in hex format (default: 0x0000ff - blue)
+    - weight: Weight/thickness of the track path (default: 5)
+    """
+    try:
+        # Verify token
+        token = credentials.credentials
+        try:
+            token_data = jwt.decode(
+                token,
+                settings.SECRET_KEY,
+                algorithms=["HS256"],
+                audience="api.hikeandfly.app",
+                issuer="hikeandfly.app",
+                verify=True
+            )
+
+            if not token_data.get("sub", "").startswith("contest:"):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Invalid token subject - must be contest-specific"
+                )
+
+        except jwt.ExpiredSignatureError:
+            raise HTTPException(status_code=401, detail="Token expired")
+        except PyJWTError as e:
+            raise HTTPException(
+                status_code=401, detail=f"Invalid token: {str(e)}")
+
+        # Get flight from database
+        flight = db.query(Flight).filter(
+            Flight.id == flight_uuid
+        ).first()
+
+        if not flight:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Flight not found with UUID {flight_uuid}"
+            )
+
+        # Get the encoded polyline for the flight
+        if flight.source == 'live':
+            func_name = 'generate_live_track_linestring'
+        else:  # source == 'upload'
+            func_name = 'generate_uploaded_track_linestring'
+
+        # Get the encoded polyline directly
+        query = f"""
+        SELECT ST_AsEncodedPolyline({func_name}('{flight_uuid}'::uuid)) as encoded_polyline;
+        """
+
+        result = db.execute(text(query)).fetchone()
+
+        if not result or not result[0]:
+            return {
+                "status": "error",
+                "detail": "No track data available for this flight"
+            }
+
+        encoded_polyline = result[0]
+
+        # Create Google Static Maps URL with the encoded polyline
+        google_maps_preview_url = (
+            f"https://maps.googleapis.com/maps/api/staticmap?"
+            f"size={width}x{height}&path=color:{color}|weight:{weight}|enc:{encoded_polyline}"
+            f"&sensor=false"
+            f"&key={settings.GOOGLE_MAPS_API_KEY}"
+        )
+
+        return {
+            "flight_id": flight.flight_id,
+            "flight_uuid": str(flight.id),
+            "preview_url": google_maps_preview_url,
+            "source": flight.source,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating track preview: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate track preview: {str(e)}"
+        )
+
 
 @router.get("/track-line/{flight_id}")
 async def get_track_linestring(
@@ -2416,7 +2520,7 @@ async def get_track_linestring(
     - simplify: Optional parameter to simplify the line geometry (useful for large tracks)
     """
     try:
-        # Verificare il token
+        # Verify token
         token = credentials.credentials
         try:
             token_data = jwt.decode(
@@ -2440,12 +2544,11 @@ async def get_track_linestring(
             raise HTTPException(
                 status_code=401, detail=f"Invalid token: {str(e)}")
 
-        # Verificare se il volo esiste
+        # Check if flight exists
         flight = db.query(Flight).filter(
             Flight.flight_id == flight_id,
             Flight.source == source
         ).first()
-
 
         if not flight:
             raise HTTPException(
@@ -2454,8 +2557,8 @@ async def get_track_linestring(
             )
 
         flight_uuid = str(flight.id)
-        
-        # Costruire la query per ottenere la LineString
+
+        # Build query to get LineString
         if flight.source == 'live':
             func_name = 'generate_live_track_linestring'
         else:  # source == 'upload'
@@ -2494,11 +2597,11 @@ async def get_track_linestring(
                 ST_AsEncodedPolyline({func_name}('{flight_uuid}'::uuid)) as encoded_polyline;
             """
 
-        # Eseguire la query
+        # Execute query
         result = db.execute(text(query)).fetchone()
 
         if not result or not result[0]:
-            # Se non ci sono punti tracking, restituire una LineString vuota
+            # If no tracking points, return empty LineString
             return {
                 "type": "Feature",
                 "geometry": {
@@ -2516,24 +2619,20 @@ async def get_track_linestring(
                 }
             }
 
-        # Costruire la risposta GeoJSON
+        # Build GeoJSON response
         linestring_geojson = result[0]
         encoded_polyline = result[1] if result[1] else ""
 
-        # Parse the GeoJSON to create a Google Static Maps path
+        # Parse the GeoJSON
         geometry = json.loads(linestring_geojson)
 
-        # Handle sampling of coordinates for both Map URL and response when simplify=true
+        # Handle sampling of coordinates for response when simplify=true
         sampled_coords = []
-
-        # Generate a Google Static Maps preview URL if coordinates exist
-        google_maps_preview_url = None
         if geometry and geometry.get('coordinates') and len(geometry['coordinates']) > 0:
             coords = geometry['coordinates']
 
-            # Sample coordinates to keep URL length manageable (max 2000 chars)
-            # Take first, last, and sample points in between if there are many
-            if len(coords) > 50:  # If more than 50 points, sample them
+            # Sample coordinates if needed for response
+            if len(coords) > 50 and simplify:
                 # Always include first and last points
                 first_point = coords[0]
                 last_point = coords[-1]
@@ -2549,18 +2648,6 @@ async def get_track_linestring(
             else:
                 sampled_coords = coords
 
-            # Format as lat,lng for Google Static Maps API
-            path_points = "|".join(
-                [f"{coord[1]},{coord[0]}" for coord in sampled_coords])
-
-            # Create Google Static Maps URL with path - include API key from settings
-            google_maps_preview_url = (
-                f"https://maps.googleapis.com/maps/api/staticmap?"
-                f"size=600x400&path=color:0x0000ff|weight:5|{path_points}"
-                f"&sensor=false"
-                f"&key={settings.GOOGLE_MAPS_API_KEY}"
-            )
-
         # Use sampled coordinates for the response geometry if simplify=true
         response_geometry = None
         if simplify and len(sampled_coords) > 0:
@@ -2571,7 +2658,7 @@ async def get_track_linestring(
         else:
             response_geometry = json.loads(linestring_geojson)
 
-        # Ottenere anche i punti iniziale e finale per avere informazioni aggiuntive
+        # Return formatted response
         return {
             "type": "Feature",
             "geometry": response_geometry,
@@ -2585,7 +2672,6 @@ async def get_track_linestring(
                 "first_fix": flight.first_fix,
                 "last_fix": flight.last_fix,
                 "simplified": simplify,
-                "preview_url": google_maps_preview_url,
                 "sampled": simplify and len(sampled_coords) > 0,
                 "encoded_polyline": encoded_polyline
             }
@@ -2599,8 +2685,6 @@ async def get_track_linestring(
             status_code=500,
             detail=f"Failed to generate track linestring: {str(e)}"
         )
-
-
 
 
 @router.get("/track-line-uuid/{flight_uuid}")
@@ -2617,11 +2701,10 @@ async def get_track_linestring_uuid(
 
     Parameters:
     - flight_uuid: UUID of the flight
-    - source: Either 'live' or 'upload' to specify which track to retrieve
     - simplify: Optional parameter to simplify the line geometry (useful for large tracks)
     """
     try:
-        # Verificare il token
+        # Verify token
         token = credentials.credentials
         try:
             token_data = jwt.decode(
@@ -2645,7 +2728,7 @@ async def get_track_linestring_uuid(
             raise HTTPException(
                 status_code=401, detail=f"Invalid token: {str(e)}")
 
-        # Verificare se il volo esiste
+        # Check if flight exists
         flight = db.query(Flight).filter(
             Flight.id == flight_uuid
         ).first()
@@ -2656,18 +2739,17 @@ async def get_track_linestring_uuid(
                 detail=f"Flight not found with UUID {flight_uuid}"
             )
 
-        # Costruire la query per ottenere la LineString
+        # Build query to get LineString
         if flight.source == 'live':
             func_name = 'generate_live_track_linestring'
         else:  # source == 'upload'
             func_name = 'generate_uploaded_track_linestring'
 
-        # Handle simplification - treat simplify as a boolean flag
+        # Handle simplification
         if simplify:
             # Use a default moderate value for simplification
             simplify_value = 0.0001
 
-            # Use a simpler, more reliable approach with ST_SimplifyPreserveTopology
             query = f"""
             WITH original AS (
                 SELECT {func_name}('{flight_uuid}'::uuid) AS geom
@@ -2695,11 +2777,11 @@ async def get_track_linestring_uuid(
                 ST_AsEncodedPolyline({func_name}('{flight_uuid}'::uuid)) as encoded_polyline;
             """
 
-        # Eseguire la query
+        # Execute query
         result = db.execute(text(query)).fetchone()
 
         if not result or not result[0]:
-            # Se non ci sono punti tracking, restituire una LineString vuota
+            # If no tracking points, return empty LineString
             return {
                 "type": "Feature",
                 "geometry": {
@@ -2717,24 +2799,20 @@ async def get_track_linestring_uuid(
                 }
             }
 
-        # Costruire la risposta GeoJSON
+        # Build GeoJSON response
         linestring_geojson = result[0]
         encoded_polyline = result[1] if result[1] else ""
 
-        # Parse the GeoJSON to create a Google Static Maps path
+        # Parse the GeoJSON
         geometry = json.loads(linestring_geojson)
 
-        # Handle sampling of coordinates for both Map URL and response when simplify=true
+        # Handle sampling of coordinates for response when simplify=true
         sampled_coords = []
-
-        # Generate a Google Static Maps preview URL if coordinates exist
-        google_maps_preview_url = None
         if geometry and geometry.get('coordinates') and len(geometry['coordinates']) > 0:
             coords = geometry['coordinates']
 
-            # Sample coordinates to keep URL length manageable (max 2000 chars)
-            # Take first, last, and sample points in between if there are many
-            if len(coords) > 50:  # If more than 50 points, sample them
+            # Sample coordinates if needed for response
+            if len(coords) > 50 and simplify:
                 # Always include first and last points
                 first_point = coords[0]
                 last_point = coords[-1]
@@ -2750,18 +2828,6 @@ async def get_track_linestring_uuid(
             else:
                 sampled_coords = coords
 
-            # Format as lat,lng for Google Static Maps API
-            path_points = "|".join(
-                [f"{coord[1]},{coord[0]}" for coord in sampled_coords])
-
-            # Create Google Static Maps URL with path - include API key from settings
-            google_maps_preview_url = (
-                f"https://maps.googleapis.com/maps/api/staticmap?"
-                f"size=600x400&path=color:0x0000ff|weight:5|{path_points}"
-                f"&sensor=false"
-                f"&key={settings.GOOGLE_MAPS_API_KEY}"
-            )
-
         # Use sampled coordinates for the response geometry if simplify=true
         response_geometry = None
         if simplify and len(sampled_coords) > 0:
@@ -2772,7 +2838,7 @@ async def get_track_linestring_uuid(
         else:
             response_geometry = json.loads(linestring_geojson)
 
-        # Ottenere anche i punti iniziale e finale per avere informazioni aggiuntive
+        # Return formatted response
         return {
             "type": "Feature",
             "geometry": response_geometry,
@@ -2786,7 +2852,6 @@ async def get_track_linestring_uuid(
                 "first_fix": flight.first_fix,
                 "last_fix": flight.last_fix,
                 "simplified": simplify,
-                "preview_url": google_maps_preview_url,
                 "sampled": simplify and len(sampled_coords) > 0,
                 "encoded_polyline": encoded_polyline
             }
