@@ -2399,7 +2399,6 @@ async def get_daily_tracks_tile(
             status_code=500, detail=f"Failed to generate daily tracks tile: {str(e)}")
 
 
-
 @router.get("/track-preview/{flight_uuid}")
 async def get_track_preview(
     flight_uuid: UUID,
@@ -2414,6 +2413,7 @@ async def get_track_preview(
     """
     Generate a Google Static Maps preview URL for a flight track using the encoded polyline.
     Also returns track statistics including distance, duration, speeds, and elevation data.
+    Includes location information for the start point of the flight.
 
     Parameters:
     - flight_uuid: UUID of the flight
@@ -2640,6 +2640,39 @@ async def get_track_preview(
             f"&key={settings.GOOGLE_MAPS_API_KEY}"
         )
 
+        # Get start location information using Google Geocoding API
+        start_location = {
+            "lat": float(flight.first_fix['lat']),
+            "lon": float(flight.first_fix['lon']),
+            "formatted_address": None,
+            "locality": None,
+            "administrative_area": None,
+            "country": None
+        }
+
+        try:
+            async with ClientSession() as session:
+                url = f"https://maps.googleapis.com/maps/api/geocode/json?latlng={start_location['lat']},{start_location['lon']}&key={settings.GOOGLE_MAPS_API_KEY}"
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        if data['results']:
+                            # Get the most relevant result (first one)
+                            result = data['results'][0]
+                            start_location["formatted_address"] = result['formatted_address']
+                            
+                            # Extract specific address components
+                            for component in result['address_components']:
+                                if 'locality' in component['types']:
+                                    start_location["locality"] = component['long_name']
+                                elif 'administrative_area_level_1' in component['types']:
+                                    start_location["administrative_area"] = component['long_name']
+                                elif 'country' in component['types']:
+                                    start_location["country"] = component['long_name']
+        except Exception as e:
+            logger.error(f"Error getting location data: {str(e)}")
+            # Continue even if geocoding fails
+
         # Format flight statistics
         stats = {}
         if stats_result:
@@ -2689,6 +2722,7 @@ async def get_track_preview(
             "original_points": original_points,
             "simplified_points": simplified_points,
             "url_length": len(google_maps_preview_url),
+            "start_location": start_location,  # Added start location information
             "stats": stats
         }
 
