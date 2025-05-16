@@ -12,18 +12,15 @@ from uuid import uuid4
 from sqlalchemy.dialects.postgresql import insert
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy import text
-from geoalchemy2.shape import to_shape
-from shapely.geometry import mapping
+
 from datetime import datetime, timezone, timedelta, time
 import jwt
 from config import settings
 from math import radians, sin, cos, sqrt, atan2
 from uuid import UUID
-from sqlalchemy import func  # Add this at the top with other imports
+from sqlalchemy import func  
 from aiohttp import ClientSession
 from jwt.exceptions import PyJWTError
-from fastapi.responses import HTMLResponse
-from starlette.websockets import WebSocketState
 import asyncio
 import json
 from ws_conn import manager

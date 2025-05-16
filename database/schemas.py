@@ -264,80 +264,93 @@ class NotificationRequest(BaseModel):
 
 # ScoringTracks schemas
 class ScoringTrackBase(BaseModel):
-    lat: float
-    lon: float
-    gps_alt: float
-    flight_uuid: UUID
+    date_time: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="Timestamp of the track point (UTC)"
+    )
+    lat: float = Field(..., description="Latitude coordinate")
+    lon: float = Field(..., description="Longitude coordinate")
+    gps_alt: float = Field(..., description="GPS altitude in meters")
+    flight_uuid: Optional[UUID] = Field(
+        None,
+        description="UUID of the flight associated with this track point"
+    )
 
     # Optional fields
-    time: Optional[str] = None
-    rounded_time: Optional[datetime] = None
-    validity: Optional[str] = None
-    pressure_alt: Optional[float] = None
-    LAD: Optional[int] = None
-    LOD: Optional[int] = None
-    speed: Optional[float] = None
-    elevation: Optional[float] = None
-    altitude_diff: Optional[float] = None
-    altitude_diff_smooth: Optional[float] = None
-    speed_smooth: Optional[float] = None
-    takeoff_condition: Optional[bool] = None
-    in_flight: Optional[bool] = None
+    time: Optional[str] = Field(None, description="Time string representation")
+    rounded_time: Optional[datetime] = Field(
+        None, description="Rounded time for analysis")
+    validity: Optional[str] = Field(
+        None, description="Validity status of the track point")
+    pressure_alt: Optional[float] = Field(
+        None, description="Pressure altitude in meters")
+    LAD: Optional[int] = Field(None, description="LAD value")
+    LOD: Optional[int] = Field(None, description="LOD value")
+    speed: Optional[float] = Field(None, description="Speed in m/s")
+    elevation: Optional[float] = Field(
+        None, description="Ground elevation in meters")
+    altitude_diff: Optional[float] = Field(
+        None, description="Difference between GPS altitude and ground elevation")
+    altitude_diff_smooth: Optional[float] = Field(
+        None, description="Smoothed altitude difference")
+    speed_smooth: Optional[float] = Field(
+        None, description="Smoothed speed value")
+    takeoff_condition: Optional[bool] = Field(
+        None, description="Flag indicating takeoff conditions")
+    in_flight: Optional[bool] = Field(
+        None, description="Flag indicating if point is in flight")
 
 
-class ScoringTrackCreate(ScoringTrackBase):
-    date_time: datetime = Field(
-        # Changed from datetime to date_time
-        default_factory=lambda: datetime.now(timezone.utc))
+class ScoringTrackBatchCreate(BaseModel):
+    """Schema for creating multiple scoring track points in a single request"""
+    tracks: List[ScoringTrackBase] = Field(
+        ...,
+        description="List of track points to insert",
+        min_items=1
+    )
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "tracks": [
+                    {
+                        "lat": 45.5231,
+                        "lon": -122.6765,
+                        "gps_alt": 1200.5,
+                        "time": "2024-05-16T14:23:45.123Z",
+                        "speed": 12.5
+                    },
+                    {
+                        "lat": 45.5233,
+                        "lon": -122.6768,
+                        "gps_alt": 1205.0,
+                        "time": "2024-05-16T14:23:46.123Z",
+                        "speed": 13.2
+                    }
+                ]
+            }
+        }
 
 
-class ScoringTrackUpdate(BaseModel):
-    lat: Optional[float] = None
-    lon: Optional[float] = None
-    gps_alt: Optional[float] = None
-    date_time: Optional[datetime] = None
-    time: Optional[str] = None
-    rounded_time: Optional[datetime] = None
-    validity: Optional[str] = None
-    pressure_alt: Optional[float] = None
-    LAD: Optional[int] = None
-    LOD: Optional[int] = None
-    speed: Optional[float] = None
-    elevation: Optional[float] = None
-    altitude_diff: Optional[float] = None
-    altitude_diff_smooth: Optional[float] = None
-    speed_smooth: Optional[float] = None
-    takeoff_condition: Optional[bool] = None
-    in_flight: Optional[bool] = None
-
-
-class ScoringTrackResponse(ScoringTrackBase):
-    id: UUID
-    date_time: datetime  # Changed from datetime to date_time to match the model
+class ScoringTrackBatchResponse(BaseModel):
+    """Schema for returning information about a batch insertion"""
+    flight_uuid: UUID = Field(...,
+                              description="UUID of the flight the points were added to")
+    points_added: int = Field(...,
+                              description="Number of track points successfully added")
 
     model_config = {
-        "from_attributes": True,
-        "json_encoders": {
-            datetime: lambda dt: dt.isoformat(),
-            UUID: str
-        }
+        "from_attributes": True
     }
 
 
-class FlightTrackResponse(BaseModel):
-    flight_uuid: UUID
-    flight_id: str
-    pilot_id: Optional[str] = None
-    pilot_name: Optional[str] = None
-    total_points: int
-    first_point_time: Optional[datetime] = None
-    last_point_time: Optional[datetime] = None
-    tracks: List[ScoringTrackResponse]
+class FlightDeleteResponse(BaseModel):
+    """Schema for returning information about deleted flight tracks"""
+    flight_uuid: str = Field(...,
+                             description="UUID of the flight whose tracks were deleted")
+    points_deleted: int = Field(...,
+                                description="Number of track points successfully deleted")
 
     model_config = {
-        "from_attributes": True,
-        "json_encoders": {
-            datetime: lambda dt: dt.isoformat(),
-            UUID: str
-        }
+        "from_attributes": True
     }

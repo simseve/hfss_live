@@ -66,8 +66,6 @@ class Flight(Base):
         "LiveTrackPoint", backref="flight", cascade="all, delete-orphan")
     uploaded_track_points = relationship(
         "UploadedTrackPoint", backref="flight", cascade="all, delete-orphan")
-    scoring_track_points = relationship(
-        "ScoringTracks", backref="flight", cascade="all, delete-orphan")
     # Optional device ID for the flight
     device_id = Column(String, nullable=True)
 
@@ -171,14 +169,12 @@ class NotificationTokenDB(Base):
 class ScoringTracks(Base):
     __tablename__ = 'scoring_tracks'
 
-    # Mandatory fields
-    id = Column(UUID(as_uuid=True), primary_key=True,
-                nullable=False, default=uuid.uuid4)
-    flight_uuid = Column(UUID(as_uuid=True))
+    # Remove the UUID id field entirely since we're using natural keys
+    flight_uuid = Column(UUID(as_uuid=True), nullable=False)
     date_time = Column(DateTime(timezone=True),
                        primary_key=True, nullable=False)
-    lat = Column(Float(precision=53), nullable=False)
-    lon = Column(Float(precision=53), nullable=False)
+    lat = Column(Float(precision=53), primary_key=True, nullable=False)
+    lon = Column(Float(precision=53), primary_key=True, nullable=False)
     gps_alt = Column(Float(precision=53), nullable=False)
 
     # Optional fields for flight metrics
@@ -203,13 +199,15 @@ class ScoringTracks(Base):
         # Time-based indices
         Index('idx_scoring_tracks_datetime', 'date_time'),
 
-
         # Composite index for time + flight
         Index('idx_scoring_tracks_datetime_flight', 'date_time', 'flight_uuid'),
 
+        # Add a unique constraint to prevent duplicate track points
+        UniqueConstraint('flight_uuid', 'date_time', 'lat', 'lon',
+                         name='scoring_tracks_unique_constraint'),
+
         # Spatial indices
         Index('idx_scoring_tracks_geom', 'geom', postgresql_using='gist'),
-
 
         # Functional index on transformed geometry for Web Mercator (EPSG:3857)
         Index('idx_scoring_tracks_transformed_geom',
@@ -220,4 +218,4 @@ class ScoringTracks(Base):
     )
 
     def __repr__(self):
-        return f"<ScoringTrack(id={self.id}, datetime={self.date_time})>"
+        return f"<ScoringTrack(datetime={self.date_time}, lat={self.lat}, lon={self.lon})>"
