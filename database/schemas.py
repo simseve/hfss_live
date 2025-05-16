@@ -344,6 +344,68 @@ class ScoringTrackBatchResponse(BaseModel):
     }
 
 
+class GeoJSONTrackPoint(BaseModel):
+    """Schema for a single track point with optional GeoJSON formatting"""
+    date_time: datetime = Field(...,
+                                description="Timestamp of the track point (UTC)")
+    lat: float = Field(..., description="Latitude coordinate")
+    lon: float = Field(..., description="Longitude coordinate")
+    gps_alt: float = Field(..., description="GPS altitude in meters")
+
+    # Optional fields
+    time: Optional[str] = Field(None, description="Time string representation")
+    speed: Optional[float] = Field(None, description="Speed in m/s")
+    elevation: Optional[float] = Field(
+        None, description="Ground elevation in meters")
+    altitude_diff: Optional[float] = Field(
+        None, description="Difference between GPS altitude and ground elevation")
+    pressure_alt: Optional[float] = Field(
+        None, description="Pressure altitude in meters")
+
+    # Additional optional fields
+    speed_smooth: Optional[float] = Field(
+        None, description="Smoothed speed value")
+    altitude_diff_smooth: Optional[float] = Field(
+        None, description="Smoothed altitude difference")
+    takeoff_condition: Optional[bool] = Field(
+        None, description="Flag indicating takeoff conditions")
+    in_flight: Optional[bool] = Field(
+        None, description="Flag indicating if point is in flight")
+
+    model_config = {
+        "from_attributes": True
+    }
+
+
+class FlightPointsResponse(BaseModel):
+    """Schema for returning all track points of a flight"""
+    flight_uuid: UUID = Field(..., description="UUID of the flight")
+    points_count: int = Field(...,
+                              description="Number of track points in the response")
+    track_points: List[GeoJSONTrackPoint] = Field(
+        ..., description="List of track points")
+
+    model_config = {
+        "from_attributes": True,
+        "json_encoders": {
+            datetime: lambda dt: dt.isoformat(),
+            UUID: str
+        }
+    }
+
+
+class GeoJSONFeatureCollection(BaseModel):
+    """Schema for returning track points as a GeoJSON FeatureCollection"""
+    type: str = Field(default="FeatureCollection", description="GeoJSON type")
+    features: List[Dict[str, Any]] = Field(..., description="GeoJSON features")
+    properties: Dict[str, Any] = Field(
+        default_factory=dict, description="Additional properties")
+
+    model_config = {
+        "from_attributes": True
+    }
+
+
 class FlightDeleteResponse(BaseModel):
     """Schema for returning information about deleted flight tracks"""
     flight_uuid: str = Field(...,

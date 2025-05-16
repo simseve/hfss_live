@@ -1,9 +1,13 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.orm import Session
 import uuid
 from database.models import ScoringTracks
 from database.db_conf import get_db
-from database.schemas import ScoringTrackBatchCreate, ScoringTrackBatchResponse, FlightDeleteResponse
+from database.schemas import (
+    ScoringTrackBatchCreate,
+    ScoringTrackBatchResponse,
+    FlightDeleteResponse,
+)
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.dialects.postgresql import insert
 import logging
@@ -12,6 +16,9 @@ from config import settings
 from uuid import UUID
 from sqlalchemy import text
 import json
+from typing import Optional
+
+from datetime import datetime, time, timezone
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -62,8 +69,6 @@ async def create_scoring_track_batch(
 
             # Commit once after all operations
             db.commit()
-
-            
 
             return ScoringTrackBatchResponse(
                 flight_uuid=flight_uuid,
@@ -179,6 +184,126 @@ async def delete_flight_tracks(
             detail="An unexpected error occurred while deleting flight tracks"
         )
 
+
+@router.put("/flight/{flight_uuid}", status_code=200, response_model=ScoringTrackBatchResponse)
+async def update_flight_tracks(
+    flight_uuid: uuid.UUID,
+    track_batch: ScoringTrackBatchCreate,
+    db: Session = Depends(get_db)
+):
+    """
+    Update all scoring tracks for a specific flight UUID.
+    First deletes all existing track points, then adds new ones while preserving the flight UUID.
+
+    Parameters:
+    - flight_uuid: UUID of the flight to update
+    - track_batch: New batch of track points to add
+    """
+    try:
+        # Log the update attempt
+        logger.info(
+            f"Attempting to update tracks for flight UUID: {flight_uuid}")
+
+        # Validate that we have track points to process
+        if not track_batch.tracks:
+            raise HTTPException(
+                status_code=400, detail="No track points provided for update"
+            )
+
+        # Begin transaction
+        try:
+            # Step 1: Check if flight exists
+            count = db.query(ScoringTracks).filter(
+                ScoringTracks.flight_uuid == flight_uuid
+            ).count()
+
+            # If no records were found, return a 404
+            if count == 0:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No tracks found for flight UUID: {flight_uuid}"
+                )
+
+            # Step 2: Delete all existing track points for this flight
+            result = db.query(ScoringTracks).filter(
+                ScoringTracks.flight_uuid == flight_uuid
+            ).delete(synchronize_session=False)
+
+            logger.info(
+                f"Deleted {result} existing track points for flight UUID: {flight_uuid}")
+
+            # Step 3: Insert new track points while preserving the flight UUID
+            track_objects = []
+            points_to_add = len(track_batch.tracks)
+
+            # Process all tracks in the batch
+            for track in track_batch.tracks:
+                # Set the flight_uuid to the existing UUID for all tracks
+                track.flight_uuid = flight_uuid
+
+                # Create track object as a dictionary for SQLAlchemy Core insert
+                track_data = track.model_dump(exclude={"geom"})
+                track_objects.append(track_data)
+
+            # Bulk insert all track objects if we have any
+            if track_objects:
+                # Use insert().on_conflict_do_nothing() for more efficient handling of duplicates
+                stmt = insert(ScoringTracks).on_conflict_do_nothing(
+                    index_elements=['flight_uuid', 'date_time', 'lat', 'lon']
+                )
+                db.execute(stmt, track_objects)
+
+            # Commit the transaction
+            db.commit()
+
+            # Log successful update
+            logger.info(
+                f"Successfully updated flight {flight_uuid}: deleted {result} old points, added {points_to_add} new points")
+
+            # Return success response
+            return ScoringTrackBatchResponse(
+                flight_uuid=flight_uuid,
+                points_added=points_to_add
+            )
+
+        except SQLAlchemyError as e:
+            # Rollback in case of error
+            db.rollback()
+            raise e
+
+    except SQLAlchemyError as e:
+        # Log the error with more details
+        logger.error(
+            f"Database error while updating flight tracks: {str(e)}")
+        # Return a more specific error message based on the exception type
+        if "duplicate key" in str(e).lower() or "unique constraint" in str(e).lower():
+            raise HTTPException(
+                status_code=409,
+                detail="Duplicate track points detected in the batch. Points with the same flight_uuid, datetime, latitude and longitude already exist."
+            )
+        elif "foreign key" in str(e).lower():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Foreign key constraint failed. Flight UUID {flight_uuid} may not exist"
+            )
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Database error while updating flight tracks: {str(e)}"
+            )
+
+    except HTTPException:
+        # Re-raise HTTP exceptions as they already have proper status codes and details
+        raise
+
+    except Exception as e:
+        # Handle any other exceptions
+        logger.error(
+            f"Unexpected error updating flight tracks: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="An unexpected error occurred while updating flight tracks"
+        )
 
 
 @router.get("/track-line/{flight_uuid}")
@@ -308,16 +433,18 @@ async def get_track_linestring_uuid(
         )
 
 
-
-
 @router.get("/track-preview/{flight_uuid}")
 async def get_track_preview(
     flight_uuid: UUID,
-    width: int = Query(600, description="Width of the preview image in pixels"),
-    height: int = Query(400, description="Height of the preview image in pixels"),
-    color: str = Query("0x0000ff", description="Color of the track path in hex format"),
+    width: int = Query(
+        600, description="Width of the preview image in pixels"),
+    height: int = Query(
+        400, description="Height of the preview image in pixels"),
+    color: str = Query(
+        "0x0000ff", description="Color of the track path in hex format"),
     weight: int = Query(5, description="Weight/thickness of the track path"),
-    max_points: int = Query(1000, description="Maximum number of points to use in the polyline"),
+    max_points: int = Query(
+        1000, description="Maximum number of points to use in the polyline"),
     db: Session = Depends(get_db)
 ):
     """
@@ -334,7 +461,7 @@ async def get_track_preview(
     - max_points: Maximum number of points to use (default: 1000, reduces URL length)
     """
     try:
-    
+
         func_name = 'generate_scoring_track_linestring'
         table_name = 'scoring_tracks'
 
@@ -399,9 +526,9 @@ async def get_track_preview(
             ts.distance, ts.start_time, ts.end_time, ts.min_elevation, 
             ts.max_elevation, ts.elevation_range, ec.elevation_gain, ec.elevation_loss;
         """
-        
+
         stats_result = db.execute(text(stats_query)).fetchone()
-        
+
         # Use ST_SimplifyPreserveTopology to reduce the number of points
         # This keeps the general shape but reduces the point count
         query = f"""
@@ -444,7 +571,7 @@ async def get_track_preview(
         encoded_polyline = result[1]
         original_points = result[0]
         simplified_points = result[2]
-        
+
         # Check if the encoded polyline is still too large (> 6000 chars to be safe)
         # If so, further simplify by sampling points
         if len(encoded_polyline) > 6000:
@@ -464,7 +591,7 @@ async def get_track_preview(
             result = db.execute(text(query)).fetchone()
             if result and result[0]:
                 encoded_polyline = result[0]
-            
+
             # If still too large, create a bounding box preview instead
             if len(encoded_polyline) > 6000:
                 # Get bounding box and center point
@@ -479,12 +606,12 @@ async def get_track_preview(
                 FROM (SELECT {func_name}('{flight_uuid}'::uuid) AS geom) AS track;
                 """
                 bbox_result = db.execute(text(bbox_query)).fetchone()
-                
+
                 if bbox_result:
                     # Create a static map with the center point and appropriate zoom
                     center_lat = bbox_result[4]
                     center_lon = bbox_result[5]
-                    
+
                     # Create Google Static Maps URL with center point and appropriate zoom
                     google_maps_preview_url = (
                         f"https://maps.googleapis.com/maps/api/staticmap?"
@@ -494,7 +621,7 @@ async def get_track_preview(
                         f"&sensor=false"
                         f"&key={settings.GOOGLE_MAPS_API_KEY}"
                     )
-                    
+
                     return {
                         "flight_uuid": str(flight_uuid),
                         "preview_url": google_maps_preview_url,
@@ -529,7 +656,7 @@ async def get_track_preview(
                             # Get the most relevant result (first one)
                             result = data['results'][0]
                             start_location["formatted_address"] = result['formatted_address']
-                            
+
                             # Extract specific address components
                             for component in result['address_components']:
                                 if 'locality' in component['types']:
@@ -547,13 +674,15 @@ async def get_track_preview(
         if stats_result:
             hours, remainder = divmod(int(stats_result.duration_seconds), 3600)
             minutes, seconds = divmod(remainder, 60)
-            
+
             # Convert meters to kilometers
-            distance_km = float(stats_result.distance) / 1000 if stats_result.distance else 0
-            
+            distance_km = float(stats_result.distance) / \
+                1000 if stats_result.distance else 0
+
             # Convert m/s to km/h
-            avg_speed_kmh = float(stats_result.avg_speed_m_s) * 3.6 if stats_result.avg_speed_m_s else 0
-            
+            avg_speed_kmh = float(stats_result.avg_speed_m_s) * \
+                3.6 if stats_result.avg_speed_m_s else 0
+
             stats = {
                 "distance": {
                     "meters": round(float(stats_result.distance), 2) if stats_result.distance else 0,
@@ -600,4 +729,144 @@ async def get_track_preview(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to generate track preview: {str(e)}"
+        )
+
+
+@router.get("/flight/{flight_uuid}/points", status_code=200)
+async def get_flight_points(
+    flight_uuid: UUID,
+    format: str = Query(
+        "default", description="Response format: 'default' or 'geojson'"),
+    db: Session = Depends(get_db)
+):
+    """
+    Retrieve all tracking points for a specific flight UUID.
+
+    Parameters:
+    - flight_uuid: UUID of the flight
+    - format: Response format (default or geojson)
+
+    Returns:
+    - All flight track points in either default or GeoJSON format
+    """
+    try:
+        # Log the request
+        logger.info(f"Fetching points for flight UUID: {flight_uuid}")
+
+        # Query to get all track points for the flight
+        track_points = db.query(ScoringTracks).filter(
+            ScoringTracks.flight_uuid == flight_uuid
+        ).order_by(ScoringTracks.date_time).all()
+
+        # If no points were found, return a 404
+        if len(track_points) == 0:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No track points found for flight UUID: {flight_uuid}"
+            )
+
+        points_count = len(track_points)
+        logger.info(
+            f"Found {points_count} track points for flight UUID: {flight_uuid}")
+
+        # Check if GeoJSON format is requested
+        if format.lower() == "geojson":
+            # Create GeoJSON FeatureCollection with individual point features
+            features = []
+
+            # Track metadata for properties
+            start_time = track_points[0].date_time if track_points else None
+            end_time = track_points[-1].date_time if track_points else None
+
+            for point in track_points:
+                # Use shorter 'dt' property for timestamp to optimize size
+                dt = point.date_time.isoformat() if point.date_time else None
+
+                # Create GeoJSON Feature for each point
+                feature = {
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "Point",
+                        "coordinates": [point.lon, point.lat, point.gps_alt]
+                    },
+                    "properties": {
+                        "dt": dt,  # Shorter key for date_time
+                        "speed": point.speed,
+                        "elevation": point.elevation,
+                        "altitude_diff": point.altitude_diff,
+                        "pressure_alt": point.pressure_alt,
+                        "speed_smooth": point.speed_smooth,
+                        "altitude_diff_smooth": point.altitude_diff_smooth,
+                        "takeoff_condition": point.takeoff_condition,
+                        "in_flight": point.in_flight
+                    }
+                }
+                features.append(feature)
+
+            # Create the GeoJSON response with all point features and metadata at the top level
+            geojson_response = {
+                "type": "FeatureCollection",
+                "features": features,
+                "properties": {
+                    "flight_uuid": str(flight_uuid),
+                    "points_count": points_count,
+                    "start_time": start_time.isoformat() if start_time else None,
+                    "end_time": end_time.isoformat() if end_time else None
+                }
+            }
+
+            return geojson_response
+        else:
+            # Return in default format
+            from database.schemas import FlightPointsResponse, GeoJSONTrackPoint
+
+            # Convert SQLAlchemy objects to Pydantic models
+            track_points_data = []
+            for point in track_points:
+                track_point = GeoJSONTrackPoint(
+                    date_time=point.date_time,
+                    lat=point.lat,
+                    lon=point.lon,
+                    gps_alt=point.gps_alt,
+                    time=point.time,
+                    speed=point.speed,
+                    elevation=point.elevation,
+                    altitude_diff=point.altitude_diff,
+                    pressure_alt=point.pressure_alt,
+                    speed_smooth=point.speed_smooth,
+                    altitude_diff_smooth=point.altitude_diff_smooth,
+                    takeoff_condition=point.takeoff_condition,
+                    in_flight=point.in_flight
+                )
+                track_points_data.append(track_point)
+
+            # Return the response with all points
+            return FlightPointsResponse(
+                flight_uuid=flight_uuid,
+                points_count=points_count,
+                track_points=track_points_data
+            )
+
+    except HTTPException:
+        # Re-raise HTTP exceptions as they already have proper status codes and details
+        raise
+
+    except SQLAlchemyError as e:
+        # Log the error
+        logger.error(f"Database error while fetching flight points: {str(e)}")
+
+        # Return appropriate error response
+        raise HTTPException(
+            status_code=500,
+            detail=f"Database error while fetching flight points: {str(e)}"
+        )
+
+    except Exception as e:
+        # Handle any other exceptions
+        logger.error(
+            f"Unexpected error fetching flight points: {str(e)}", exc_info=True)
+
+        raise HTTPException(
+            status_code=500,
+            detail="An unexpected error occurred while fetching flight points"
         )
