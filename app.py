@@ -14,6 +14,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from fastapi import FastAPI
 from fastapi.security import HTTPBasic
 import api.routes as routes
+import api.scoring as scoring
 from background_tracking import periodic_tracking_update
 from db_cleanup import setup_scheduler
 from contextlib import asynccontextmanager
@@ -91,6 +92,7 @@ async def log_request(request: Request, call_next):
 
 
 app.include_router(routes.router, tags=['Tracking'], prefix='/tracking')
+app.include_router(scoring.router, tags=['Scoring'], prefix='/scoring')
 
 
 # Attach the rate limiter as a middleware

@@ -102,7 +102,7 @@ class FlightBase(BaseModel):
 
 class FlightCreate(FlightBase):
     created_at: datetime = Field(
-    default_factory=lambda: datetime.now(timezone.utc))
+        default_factory=lambda: datetime.now(timezone.utc))
     first_fix: Optional[Dict[str, Any]] = None
     last_fix: Optional[Dict[str, Any]] = None
     total_points: Optional[int] = None
@@ -260,3 +260,64 @@ class NotificationRequest(BaseModel):
     title: str
     body: str
     data: Optional[dict] = None
+
+
+# ScoringTracks schemas
+class ScoringTrackBase(BaseModel):
+    lat: float
+    lon: float
+    gps_alt: float
+
+    # Optional fields
+    time: Optional[str] = None
+    rounded_time: Optional[datetime] = None
+    validity: Optional[str] = None
+    pressure_alt: Optional[float] = None
+    LAD: Optional[int] = None
+    LOD: Optional[int] = None
+    speed: Optional[float] = None
+    elevation: Optional[float] = None
+    altitude_diff: Optional[float] = None
+    altitude_diff_smooth: Optional[float] = None
+    speed_smooth: Optional[float] = None
+    takeoff_condition: Optional[bool] = None
+    in_flight: Optional[bool] = None
+
+
+class ScoringTrackCreate(ScoringTrackBase):
+    date_time: datetime = Field(
+        # Changed from datetime to date_time
+        default_factory=lambda: datetime.now(timezone.utc))
+
+
+class ScoringTrackUpdate(BaseModel):
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    gps_alt: Optional[float] = None
+    date_time: Optional[datetime] = None
+    time: Optional[str] = None
+    rounded_time: Optional[datetime] = None
+    validity: Optional[str] = None
+    pressure_alt: Optional[float] = None
+    LAD: Optional[int] = None
+    LOD: Optional[int] = None
+    speed: Optional[float] = None
+    elevation: Optional[float] = None
+    altitude_diff: Optional[float] = None
+    altitude_diff_smooth: Optional[float] = None
+    speed_smooth: Optional[float] = None
+    takeoff_condition: Optional[bool] = None
+    in_flight: Optional[bool] = None
+
+
+class ScoringTrackResponse(ScoringTrackBase):
+    id: UUID
+    date_time: datetime  # Changed from datetime to date_time to match the model
+
+    model_config = {
+        "from_attributes": True,
+        "json_encoders": {
+            datetime: lambda dt: dt.isoformat(),
+            UUID: str
+        }
+    }

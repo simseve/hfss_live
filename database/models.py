@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Float, DateTime, MetaData, CHAR, BigInteger, Index, Integer, JSON, ForeignKey, UniqueConstraint, text
+from sqlalchemy import Column, String, Float, DateTime, MetaData, CHAR, BigInteger, Index, Integer, JSON, ForeignKey, UniqueConstraint, text, Boolean
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import UUID
@@ -164,3 +164,58 @@ class NotificationTokenDB(Base):
 
     def __repr__(self):
         return f"<NotificationTokenDB(id={self.id}, token={self.token[:10]}..., race_id={self.race_id})>"
+
+
+class ScoringTracks(Base):
+    __tablename__ = 'scoring_tracks'
+
+    # Mandatory fields
+    id = Column(UUID(as_uuid=True), primary_key=True,
+                nullable=False, default=uuid.uuid4)
+    date_time = Column(DateTime(timezone=True),
+                      primary_key=True, nullable=False)
+    lat = Column(Float(precision=53), nullable=False)
+    lon = Column(Float(precision=53), nullable=False)
+    gps_alt = Column(Float(precision=53), nullable=False)
+
+    # Optional fields for flight metrics
+    time = Column(String, nullable=True)
+    rounded_time = Column(DateTime(timezone=True), nullable=True)
+    validity = Column(String, nullable=True)
+    pressure_alt = Column(Float(precision=53), nullable=True)
+    LAD = Column(Integer, nullable=True)
+    LOD = Column(Integer, nullable=True)
+    speed = Column(Float(precision=53), nullable=True)
+    elevation = Column(Float(precision=53), nullable=True)
+    altitude_diff = Column(Float(precision=53), nullable=True)
+    altitude_diff_smooth = Column(Float(precision=53), nullable=True)
+    speed_smooth = Column(Float(precision=53), nullable=True)
+    takeoff_condition = Column(Boolean, nullable=True)
+    in_flight = Column(Boolean, nullable=True)
+
+    # Spatial geometry column
+    geom = Column(Geometry('POINT', srid=4326))
+
+
+    __table_args__ = (
+        # Time-based indices
+        Index('idx_scoring_tracks_datetime', 'date_time'),
+
+
+        # Composite index for time + flight
+        Index('idx_scoring_tracks_datetime_flight', 'date_time', 'id'),
+
+        # Spatial indices
+        Index('idx_scoring_tracks_geom', 'geom', postgresql_using='gist'),
+
+
+        # Functional index on transformed geometry for Web Mercator (EPSG:3857)
+        Index('idx_scoring_tracks_transformed_geom',
+              text('ST_Transform(geom, 3857)'), postgresql_using='gist'),
+
+        # Table comment for TimescaleDB
+        {'comment': 'hypertable:timescaledb:date_time'}
+    )
+
+    def __repr__(self):
+        return f"<ScoringTrack(id={self.id}, datetime={self.date_time})>"
