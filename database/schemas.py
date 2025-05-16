@@ -267,6 +267,7 @@ class ScoringTrackBase(BaseModel):
     lat: float
     lon: float
     gps_alt: float
+    flight_uuid: UUID
 
     # Optional fields
     time: Optional[str] = None
@@ -313,6 +314,25 @@ class ScoringTrackUpdate(BaseModel):
 class ScoringTrackResponse(ScoringTrackBase):
     id: UUID
     date_time: datetime  # Changed from datetime to date_time to match the model
+
+    model_config = {
+        "from_attributes": True,
+        "json_encoders": {
+            datetime: lambda dt: dt.isoformat(),
+            UUID: str
+        }
+    }
+
+
+class FlightTrackResponse(BaseModel):
+    flight_uuid: UUID
+    flight_id: str
+    pilot_id: Optional[str] = None
+    pilot_name: Optional[str] = None
+    total_points: int
+    first_point_time: Optional[datetime] = None
+    last_point_time: Optional[datetime] = None
+    tracks: List[ScoringTrackResponse]
 
     model_config = {
         "from_attributes": True,

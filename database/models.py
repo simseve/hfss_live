@@ -66,6 +66,8 @@ class Flight(Base):
         "LiveTrackPoint", backref="flight", cascade="all, delete-orphan")
     uploaded_track_points = relationship(
         "UploadedTrackPoint", backref="flight", cascade="all, delete-orphan")
+    scoring_track_points = relationship(
+        "ScoringTracks", backref="flight", cascade="all, delete-orphan")
     # Optional device ID for the flight
     device_id = Column(String, nullable=True)
 
@@ -172,8 +174,9 @@ class ScoringTracks(Base):
     # Mandatory fields
     id = Column(UUID(as_uuid=True), primary_key=True,
                 nullable=False, default=uuid.uuid4)
+    flight_uuid = Column(UUID(as_uuid=True))
     date_time = Column(DateTime(timezone=True),
-                      primary_key=True, nullable=False)
+                       primary_key=True, nullable=False)
     lat = Column(Float(precision=53), nullable=False)
     lon = Column(Float(precision=53), nullable=False)
     gps_alt = Column(Float(precision=53), nullable=False)
@@ -196,14 +199,13 @@ class ScoringTracks(Base):
     # Spatial geometry column
     geom = Column(Geometry('POINT', srid=4326))
 
-
     __table_args__ = (
         # Time-based indices
         Index('idx_scoring_tracks_datetime', 'date_time'),
 
 
         # Composite index for time + flight
-        Index('idx_scoring_tracks_datetime_flight', 'date_time', 'id'),
+        Index('idx_scoring_tracks_datetime_flight', 'date_time', 'flight_uuid'),
 
         # Spatial indices
         Index('idx_scoring_tracks_geom', 'geom', postgresql_using='gist'),
