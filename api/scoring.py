@@ -1,6 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from sqlalchemy.sql import func
 import uuid
 from database.models import ScoringTracks
 from database.db_conf import get_db
