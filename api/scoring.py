@@ -311,338 +311,294 @@ async def get_track_linestring_uuid(
 
 
 
-# @router.get("/track-preview/{flight_uuid}")
-# async def get_track_preview(
-#     flight_uuid: UUID,
-#     width: int = Query(600, description="Width of the preview image in pixels"),
-#     height: int = Query(400, description="Height of the preview image in pixels"),
-#     color: str = Query("0x0000ff", description="Color of the track path in hex format"),
-#     weight: int = Query(5, description="Weight/thickness of the track path"),
-#     max_points: int = Query(1000, description="Maximum number of points to use in the polyline"),
-#     credentials: HTTPAuthorizationCredentials = Security(security),
-#     db: Session = Depends(get_db)
-# ):
-#     """
-#     Generate a Google Static Maps preview URL for a flight track using the encoded polyline.
-#     Also returns track statistics including distance, duration, speeds, and elevation data.
-#     Includes location information for the start point of the flight.
+@router.get("/track-preview/{flight_uuid}")
+async def get_track_preview(
+    flight_uuid: UUID,
+    width: int = Query(600, description="Width of the preview image in pixels"),
+    height: int = Query(400, description="Height of the preview image in pixels"),
+    color: str = Query("0x0000ff", description="Color of the track path in hex format"),
+    weight: int = Query(5, description="Weight/thickness of the track path"),
+    max_points: int = Query(1000, description="Maximum number of points to use in the polyline"),
+    db: Session = Depends(get_db)
+):
+    """
+    Generate a Google Static Maps preview URL for a flight track using the encoded polyline.
+    Also returns track statistics including distance, duration, speeds, and elevation data.
+    Includes location information for the start point of the flight.
 
-#     Parameters:
-#     - flight_uuid: UUID of the flight
-#     - width: Width of the preview image (default: 600)
-#     - height: Height of the preview image (default: 400)
-#     - color: Color of the track path in hex format (default: 0x0000ff - blue)
-#     - weight: Weight/thickness of the track path (default: 5)
-#     - max_points: Maximum number of points to use (default: 1000, reduces URL length)
-#     """
-#     try:
-#         # Verify token
-#         token = credentials.credentials
-#         try:
-#             token_data = jwt.decode(
-#                 token,
-#                 settings.SECRET_KEY,
-#                 algorithms=["HS256"],
-#                 audience="api.hikeandfly.app",
-#                 issuer="hikeandfly.app",
-#                 verify=True
-#             )
+    Parameters:
+    - flight_uuid: UUID of the flight
+    - width: Width of the preview image (default: 600)
+    - height: Height of the preview image (default: 400)
+    - color: Color of the track path in hex format (default: 0x0000ff - blue)
+    - weight: Weight/thickness of the track path (default: 5)
+    - max_points: Maximum number of points to use (default: 1000, reduces URL length)
+    """
+    try:
+    
+        func_name = 'generate_scoring_track_linestring'
+        table_name = 'scoring_tracks'
 
-#             if not token_data.get("sub", "").startswith("contest:"):
-#                 raise HTTPException(
-#                     status_code=403,
-#                     detail="Invalid token subject - must be contest-specific"
-#                 )
-
-#         except jwt.ExpiredSignatureError:
-#             raise HTTPException(status_code=401, detail="Token expired")
-#         except PyJWTError as e:
-#             raise HTTPException(
-#                 status_code=401, detail=f"Invalid token: {str(e)}")
-
-#         # Get flight from database
-#         flight = db.query(Flight).filter(
-#             Flight.id == flight_uuid
-#         ).first()
-
-#         if not flight:
-#             raise HTTPException(
-#                 status_code=404,
-#                 detail=f"Flight not found with UUID {flight_uuid}"
-#             )
-
-#         # Get the encoded polyline for the flight with simplification
-#         if flight.source == 'live':
-#             func_name = 'generate_live_track_linestring'
-#             table_name = 'live_track_points'
-#         else:  # source == 'upload'
-#             func_name = 'generate_uploaded_track_linestring'
-#             table_name = 'uploaded_track_points'
-
-#         # First get track statistics using PostGIS - fixed query to handle elevation gain/loss
-#         stats_query = f"""
-#         WITH track AS (
-#             SELECT 
-#                 tp.datetime,
-#                 tp.elevation,
-#                 tp.geom
-#             FROM {table_name} tp
-#             WHERE tp.flight_uuid = '{flight_uuid}'
-#             ORDER BY tp.datetime
-#         ),
-#         track_stats AS (
-#             SELECT
-#                 -- Distance in meters
-#                 ST_Length(ST_MakeLine(geom)::geography) as distance,
-#                 -- Time values
-#                 MIN(datetime) as start_time,
-#                 MAX(datetime) as end_time,
-#                 -- Elevation values
-#                 MIN(elevation) as min_elevation,
-#                 MAX(elevation) as max_elevation,
-#                 MAX(elevation) - MIN(elevation) as elevation_range
-#             FROM track
-#         ),
-#         -- Handle elevation gain/loss without using window functions inside aggregates
-#         track_with_prev AS (
-#             SELECT
-#                 datetime,
-#                 elevation,
-#                 LAG(elevation) OVER (ORDER BY datetime) as prev_elevation
-#             FROM track
-#         ),
-#         elevation_changes AS (
-#             SELECT
-#                 SUM(CASE WHEN (elevation - prev_elevation) > 1 THEN (elevation - prev_elevation) ELSE 0 END) as elevation_gain,
-#                 SUM(CASE WHEN (elevation - prev_elevation) < -1 THEN ABS(elevation - prev_elevation) ELSE 0 END) as elevation_loss
-#             FROM track_with_prev
-#             WHERE prev_elevation IS NOT NULL
-#         )
-#         SELECT
-#             ts.distance,
-#             ts.start_time,
-#             ts.end_time,
-#             EXTRACT(EPOCH FROM (ts.end_time - ts.start_time)) as duration_seconds,
-#             ts.min_elevation,
-#             ts.max_elevation,
-#             ts.elevation_range,
-#             ec.elevation_gain,
-#             ec.elevation_loss,
-#             -- Speed calculations
-#             CASE
-#                 WHEN EXTRACT(EPOCH FROM (ts.end_time - ts.start_time)) > 0
-#                 THEN ts.distance / EXTRACT(EPOCH FROM (ts.end_time - ts.start_time))
-#                 ELSE 0
-#             END as avg_speed_m_s,
-#             COUNT(*) as total_points
-#         FROM track_stats ts, elevation_changes ec, track
-#         GROUP BY 
-#             ts.distance, ts.start_time, ts.end_time, ts.min_elevation, 
-#             ts.max_elevation, ts.elevation_range, ec.elevation_gain, ec.elevation_loss;
-#         """
+        # First get track statistics using PostGIS - fixed query to handle elevation gain/loss
+        stats_query = f"""
+        WITH track AS (
+            SELECT 
+                tp.date_time,
+                tp.elevation,
+                tp.geom
+            FROM {table_name} tp
+            WHERE tp.flight_uuid = '{flight_uuid}'
+            ORDER BY tp.date_time
+        ),
+        track_stats AS (
+            SELECT
+                -- Distance in meters
+                ST_Length(ST_MakeLine(geom)::geography) as distance,
+                -- Time values
+                MIN(date_time) as start_time,
+                MAX(date_time) as end_time,
+                -- Elevation values
+                MIN(elevation) as min_elevation,
+                MAX(elevation) as max_elevation,
+                MAX(elevation) - MIN(elevation) as elevation_range
+            FROM track
+        ),
+        -- Handle elevation gain/loss without using window functions inside aggregates
+        track_with_prev AS (
+            SELECT
+                date_time,
+                elevation,
+                LAG(elevation) OVER (ORDER BY date_time) as prev_elevation
+            FROM track
+        ),
+        elevation_changes AS (
+            SELECT
+                SUM(CASE WHEN (elevation - prev_elevation) > 1 THEN (elevation - prev_elevation) ELSE 0 END) as elevation_gain,
+                SUM(CASE WHEN (elevation - prev_elevation) < -1 THEN ABS(elevation - prev_elevation) ELSE 0 END) as elevation_loss
+            FROM track_with_prev
+            WHERE prev_elevation IS NOT NULL
+        )
+        SELECT
+            ts.distance,
+            ts.start_time,
+            ts.end_time,
+            EXTRACT(EPOCH FROM (ts.end_time - ts.start_time)) as duration_seconds,
+            ts.min_elevation,
+            ts.max_elevation,
+            ts.elevation_range,
+            ec.elevation_gain,
+            ec.elevation_loss,
+            -- Speed calculations
+            CASE
+                WHEN EXTRACT(EPOCH FROM (ts.end_time - ts.start_time)) > 0
+                THEN ts.distance / EXTRACT(EPOCH FROM (ts.end_time - ts.start_time))
+                ELSE 0
+            END as avg_speed_m_s,
+            COUNT(*) as total_points
+        FROM track_stats ts, elevation_changes ec, track
+        GROUP BY 
+            ts.distance, ts.start_time, ts.end_time, ts.min_elevation, 
+            ts.max_elevation, ts.elevation_range, ec.elevation_gain, ec.elevation_loss;
+        """
         
-#         stats_result = db.execute(text(stats_query)).fetchone()
+        stats_result = db.execute(text(stats_query)).fetchone()
         
-#         # Use ST_SimplifyPreserveTopology to reduce the number of points
-#         # This keeps the general shape but reduces the point count
-#         query = f"""
-#         WITH original AS (
-#             SELECT {func_name}('{flight_uuid}'::uuid) AS geom
-#         )
-#         SELECT 
-#             ST_NPoints(geom) as original_points,
-#             CASE 
-#                 -- If original has too many points, simplify to reduce size
-#                 WHEN ST_NPoints(geom) > {max_points}
-#                 THEN ST_AsEncodedPolyline(ST_SimplifyPreserveTopology(
-#                     geom, 
-#                     ST_Length(geom::geography) / (5000 * SQRT({max_points}))
-#                 ))
-#                 -- Otherwise use the original
-#                 ELSE ST_AsEncodedPolyline(geom) 
-#             END as encoded_polyline,
-#             CASE 
-#                 -- If original has too many points, get count after simplification
-#                 WHEN ST_NPoints(geom) > {max_points}
-#                 THEN ST_NPoints(ST_SimplifyPreserveTopology(
-#                     geom, 
-#                     ST_Length(geom::geography) / (5000 * SQRT({max_points}))
-#                 ))
-#                 -- Otherwise use original count
-#                 ELSE ST_NPoints(geom) 
-#             END as simplified_points
-#         FROM original;
-#         """
+        # Use ST_SimplifyPreserveTopology to reduce the number of points
+        # This keeps the general shape but reduces the point count
+        query = f"""
+        WITH original AS (
+            SELECT {func_name}('{flight_uuid}'::uuid) AS geom
+        )
+        SELECT 
+            ST_NPoints(geom) as original_points,
+            CASE 
+                -- If original has too many points, simplify to reduce size
+                WHEN ST_NPoints(geom) > {max_points}
+                THEN ST_AsEncodedPolyline(ST_SimplifyPreserveTopology(
+                    geom, 
+                    ST_Length(geom::geography) / (5000 * SQRT({max_points}))
+                ))
+                -- Otherwise use the original
+                ELSE ST_AsEncodedPolyline(geom) 
+            END as encoded_polyline,
+            CASE 
+                -- If original has too many points, get count after simplification
+                WHEN ST_NPoints(geom) > {max_points}
+                THEN ST_NPoints(ST_SimplifyPreserveTopology(
+                    geom, 
+                    ST_Length(geom::geography) / (5000 * SQRT({max_points}))
+                ))
+                -- Otherwise use original count
+                ELSE ST_NPoints(geom) 
+            END as simplified_points
+        FROM original;
+        """
 
-#         result = db.execute(text(query)).fetchone()
+        result = db.execute(text(query)).fetchone()
 
-#         if not result or not result[1]:
-#             return {
-#                 "status": "error",
-#                 "detail": "No track data available for this flight"
-#             }
+        if not result or not result[1]:
+            return {
+                "status": "error",
+                "detail": "No track data available for this flight"
+            }
 
-#         encoded_polyline = result[1]
-#         original_points = result[0]
-#         simplified_points = result[2]
+        encoded_polyline = result[1]
+        original_points = result[0]
+        simplified_points = result[2]
         
-#         # Check if the encoded polyline is still too large (> 6000 chars to be safe)
-#         # If so, further simplify by sampling points
-#         if len(encoded_polyline) > 6000:
-#             # More aggressive simplification for very long tracks
-#             simplify_factor = len(encoded_polyline) / 6000
-#             query = f"""
-#             WITH original AS (
-#                 SELECT {func_name}('{flight_uuid}'::uuid) AS geom
-#             )
-#             SELECT 
-#                 ST_AsEncodedPolyline(ST_SimplifyPreserveTopology(
-#                     geom, 
-#                     ST_Length(geom::geography) / (2000 * SQRT({max_points // 2}))
-#                 )) as encoded_polyline
-#             FROM original;
-#             """
-#             result = db.execute(text(query)).fetchone()
-#             if result and result[0]:
-#                 encoded_polyline = result[0]
+        # Check if the encoded polyline is still too large (> 6000 chars to be safe)
+        # If so, further simplify by sampling points
+        if len(encoded_polyline) > 6000:
+            # More aggressive simplification for very long tracks
+            simplify_factor = len(encoded_polyline) / 6000
+            query = f"""
+            WITH original AS (
+                SELECT {func_name}('{flight_uuid}'::uuid) AS geom
+            )
+            SELECT 
+                ST_AsEncodedPolyline(ST_SimplifyPreserveTopology(
+                    geom, 
+                    ST_Length(geom::geography) / (2000 * SQRT({max_points // 2}))
+                )) as encoded_polyline
+            FROM original;
+            """
+            result = db.execute(text(query)).fetchone()
+            if result and result[0]:
+                encoded_polyline = result[0]
             
-#             # If still too large, create a bounding box preview instead
-#             if len(encoded_polyline) > 6000:
-#                 # Get bounding box and center point
-#                 bbox_query = f"""
-#                 SELECT 
-#                     ST_XMin(ST_Envelope(geom)) as min_lon,
-#                     ST_YMin(ST_Envelope(geom)) as min_lat,
-#                     ST_XMax(ST_Envelope(geom)) as max_lon,
-#                     ST_YMax(ST_Envelope(geom)) as max_lat,
-#                     ST_X(ST_Centroid(geom)) as center_lon,
-#                     ST_Y(ST_Centroid(geom)) as center_lat
-#                 FROM (SELECT {func_name}('{flight_uuid}'::uuid) AS geom) AS track;
-#                 """
-#                 bbox_result = db.execute(text(bbox_query)).fetchone()
+            # If still too large, create a bounding box preview instead
+            if len(encoded_polyline) > 6000:
+                # Get bounding box and center point
+                bbox_query = f"""
+                SELECT 
+                    ST_XMin(ST_Envelope(geom)) as min_lon,
+                    ST_YMin(ST_Envelope(geom)) as min_lat,
+                    ST_XMax(ST_Envelope(geom)) as max_lon,
+                    ST_YMax(ST_Envelope(geom)) as max_lat,
+                    ST_X(ST_Centroid(geom)) as center_lon,
+                    ST_Y(ST_Centroid(geom)) as center_lat
+                FROM (SELECT {func_name}('{flight_uuid}'::uuid) AS geom) AS track;
+                """
+                bbox_result = db.execute(text(bbox_query)).fetchone()
                 
-#                 if bbox_result:
-#                     # Create a static map with the center point and appropriate zoom
-#                     center_lat = bbox_result[4]
-#                     center_lon = bbox_result[5]
+                if bbox_result:
+                    # Create a static map with the center point and appropriate zoom
+                    center_lat = bbox_result[4]
+                    center_lon = bbox_result[5]
                     
-#                     # Create Google Static Maps URL with center point and appropriate zoom
-#                     google_maps_preview_url = (
-#                         f"https://maps.googleapis.com/maps/api/staticmap?"
-#                         f"size={width}x{height}&center={center_lat},{center_lon}"
-#                         f"&zoom=11"  # Default zoom level that shows reasonable area
-#                         f"&markers=color:red|{center_lat},{center_lon}"
-#                         f"&sensor=false"
-#                         f"&key={settings.GOOGLE_MAPS_API_KEY}"
-#                     )
+                    # Create Google Static Maps URL with center point and appropriate zoom
+                    google_maps_preview_url = (
+                        f"https://maps.googleapis.com/maps/api/staticmap?"
+                        f"size={width}x{height}&center={center_lat},{center_lon}"
+                        f"&zoom=11"  # Default zoom level that shows reasonable area
+                        f"&markers=color:red|{center_lat},{center_lon}"
+                        f"&sensor=false"
+                        f"&key={settings.GOOGLE_MAPS_API_KEY}"
+                    )
                     
-#                     return {
-#                         "flight_id": flight.flight_id,
-#                         "flight_uuid": str(flight.id),
-#                         "preview_url": google_maps_preview_url,
-#                         "source": flight.source,
-#                         "note": "Track was too complex for detailed preview, showing center point only"
-#                     }
+                    return {
+                        "flight_uuid": str(flight_uuid),
+                        "preview_url": google_maps_preview_url,
+                        "note": "Track was too complex for detailed preview, showing center point only"
+                    }
 
-#         # Create Google Static Maps URL with the encoded polyline
-#         google_maps_preview_url = (
-#             f"https://maps.googleapis.com/maps/api/staticmap?"
-#             f"size={width}x{height}&path=color:{color}|weight:{weight}|enc:{encoded_polyline}"
-#             f"&sensor=false"
-#             f"&key={settings.GOOGLE_MAPS_API_KEY}"
-#         )
+        # Create Google Static Maps URL with the encoded polyline
+        google_maps_preview_url = (
+            f"https://maps.googleapis.com/maps/api/staticmap?"
+            f"size={width}x{height}&path=color:{color}|weight:{weight}|enc:{encoded_polyline}"
+            f"&sensor=false"
+            f"&key={settings.GOOGLE_MAPS_API_KEY}"
+        )
 
-#         # Get start location information using Google Geocoding API
-#         start_location = {
-#             "lat": float(flight.first_fix['lat']),
-#             "lon": float(flight.first_fix['lon']),
-#             "formatted_address": None,
-#             "locality": None,
-#             "administrative_area": None,
-#             "country": None
-#         }
+        # Get start location information using Google Geocoding API
+        start_location = {
+            "lat": 42.00,
+            "lon": 8.00,
+            "formatted_address": None,
+            "locality": None,
+            "administrative_area": None,
+            "country": None
+        }
 
-#         try:
-#             async with ClientSession() as session:
-#                 url = f"https://maps.googleapis.com/maps/api/geocode/json?latlng={start_location['lat']},{start_location['lon']}&key={settings.GOOGLE_MAPS_API_KEY}"
-#                 async with session.get(url) as response:
-#                     if response.status == 200:
-#                         data = await response.json()
-#                         if data['results']:
-#                             # Get the most relevant result (first one)
-#                             result = data['results'][0]
-#                             start_location["formatted_address"] = result['formatted_address']
+        try:
+            async with ClientSession() as session:
+                url = f"https://maps.googleapis.com/maps/api/geocode/json?latlng={start_location['lat']},{start_location['lon']}&key={settings.GOOGLE_MAPS_API_KEY}"
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        if data['results']:
+                            # Get the most relevant result (first one)
+                            result = data['results'][0]
+                            start_location["formatted_address"] = result['formatted_address']
                             
-#                             # Extract specific address components
-#                             for component in result['address_components']:
-#                                 if 'locality' in component['types']:
-#                                     start_location["locality"] = component['long_name']
-#                                 elif 'administrative_area_level_1' in component['types']:
-#                                     start_location["administrative_area"] = component['long_name']
-#                                 elif 'country' in component['types']:
-#                                     start_location["country"] = component['long_name']
-#         except Exception as e:
-#             logger.error(f"Error getting location data: {str(e)}")
-#             # Continue even if geocoding fails
+                            # Extract specific address components
+                            for component in result['address_components']:
+                                if 'locality' in component['types']:
+                                    start_location["locality"] = component['long_name']
+                                elif 'administrative_area_level_1' in component['types']:
+                                    start_location["administrative_area"] = component['long_name']
+                                elif 'country' in component['types']:
+                                    start_location["country"] = component['long_name']
+        except Exception as e:
+            logger.error(f"Error getting location data: {str(e)}")
+            # Continue even if geocoding fails
 
-#         # Format flight statistics
-#         stats = {}
-#         if stats_result:
-#             hours, remainder = divmod(int(stats_result.duration_seconds), 3600)
-#             minutes, seconds = divmod(remainder, 60)
+        # Format flight statistics
+        stats = {}
+        if stats_result:
+            hours, remainder = divmod(int(stats_result.duration_seconds), 3600)
+            minutes, seconds = divmod(remainder, 60)
             
-#             # Convert meters to kilometers
-#             distance_km = float(stats_result.distance) / 1000 if stats_result.distance else 0
+            # Convert meters to kilometers
+            distance_km = float(stats_result.distance) / 1000 if stats_result.distance else 0
             
-#             # Convert m/s to km/h
-#             avg_speed_kmh = float(stats_result.avg_speed_m_s) * 3.6 if stats_result.avg_speed_m_s else 0
+            # Convert m/s to km/h
+            avg_speed_kmh = float(stats_result.avg_speed_m_s) * 3.6 if stats_result.avg_speed_m_s else 0
             
-#             stats = {
-#                 "distance": {
-#                     "meters": round(float(stats_result.distance), 2) if stats_result.distance else 0,
-#                     "kilometers": round(distance_km, 2)
-#                 },
-#                 "duration": {
-#                     "seconds": int(stats_result.duration_seconds) if stats_result.duration_seconds else 0,
-#                     "formatted": f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-#                 },
-#                 "speed": {
-#                     "avg_m_s": round(float(stats_result.avg_speed_m_s), 2) if stats_result.avg_speed_m_s else 0,
-#                     "avg_km_h": round(avg_speed_kmh, 2)
-#                 },
-#                 "elevation": {
-#                     "min": round(float(stats_result.min_elevation), 1) if stats_result.min_elevation is not None else None,
-#                     "max": round(float(stats_result.max_elevation), 1) if stats_result.max_elevation is not None else None,
-#                     "range": round(float(stats_result.elevation_range), 1) if stats_result.elevation_range is not None else None,
-#                     "gain": round(float(stats_result.elevation_gain), 1) if stats_result.elevation_gain is not None else None,
-#                     "loss": round(float(stats_result.elevation_loss), 1) if stats_result.elevation_loss is not None else None
-#                 },
-#                 "points": {
-#                     "total": stats_result.total_points if hasattr(stats_result, 'total_points') else 0
-#                 },
-#                 "timestamps": {
-#                     "start": stats_result.start_time.isoformat() if stats_result.start_time else None,
-#                     "end": stats_result.end_time.isoformat() if stats_result.end_time else None
-#                 }
-#             }
+            stats = {
+                "distance": {
+                    "meters": round(float(stats_result.distance), 2) if stats_result.distance else 0,
+                    "kilometers": round(distance_km, 2)
+                },
+                "duration": {
+                    "seconds": int(stats_result.duration_seconds) if stats_result.duration_seconds else 0,
+                    "formatted": f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                },
+                "speed": {
+                    "avg_m_s": round(float(stats_result.avg_speed_m_s), 2) if stats_result.avg_speed_m_s else 0,
+                    "avg_km_h": round(avg_speed_kmh, 2)
+                },
+                "elevation": {
+                    "min": round(float(stats_result.min_elevation), 1) if stats_result.min_elevation is not None else None,
+                    "max": round(float(stats_result.max_elevation), 1) if stats_result.max_elevation is not None else None,
+                    "range": round(float(stats_result.elevation_range), 1) if stats_result.elevation_range is not None else None,
+                    "gain": round(float(stats_result.elevation_gain), 1) if stats_result.elevation_gain is not None else None,
+                    "loss": round(float(stats_result.elevation_loss), 1) if stats_result.elevation_loss is not None else None
+                },
+                "points": {
+                    "total": stats_result.total_points if hasattr(stats_result, 'total_points') else 0
+                },
+                "timestamps": {
+                    "start": stats_result.start_time.isoformat() if stats_result.start_time else None,
+                    "end": stats_result.end_time.isoformat() if stats_result.end_time else None
+                }
+            }
 
-#         return {
-#             "flight_id": flight.flight_id,
-#             "flight_uuid": str(flight.id),
-#             "preview_url": google_maps_preview_url,
-#             "source": flight.source,
-#             "original_points": original_points,
-#             "simplified_points": simplified_points,
-#             "url_length": len(google_maps_preview_url),
-#             "start_location": start_location,  # Added start location information
-#             "stats": stats
-#         }
+        return {
+            "flight_uuid": str(flight_uuid),
+            "preview_url": google_maps_preview_url,
+            "original_points": original_points,
+            "simplified_points": simplified_points,
+            "url_length": len(google_maps_preview_url),
+            "start_location": start_location,  # Added start location information
+            "stats": stats
+        }
 
-#     except HTTPException:
-#         raise
-#     except Exception as e:
-#         logger.error(f"Error generating track preview: {str(e)}")
-#         raise HTTPException(
-#             status_code=500,
-#             detail=f"Failed to generate track preview: {str(e)}"
-#         )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating track preview: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate track preview: {str(e)}"
+        )
