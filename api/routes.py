@@ -18,7 +18,7 @@ import jwt
 from config import settings
 from math import radians, sin, cos, sqrt, atan2
 from uuid import UUID
-from sqlalchemy import func  
+from sqlalchemy import func
 from aiohttp import ClientSession
 from jwt.exceptions import PyJWTError
 import asyncio
@@ -2246,7 +2246,7 @@ async def get_daily_tracks_tile(
             *([] if pilot_id is None else [Flight.pilot_id == pilot_id]),
             # Either the flight was created today
             ((Flight.created_at >= start_of_day) &
-            (Flight.created_at <= end_of_day)) |
+             (Flight.created_at <= end_of_day)) |
             # OR the flight has a last_fix during today
             (func.json_extract_path_text(Flight.last_fix, 'datetime') >=
                 start_of_day.strftime('%Y-%m-%dT%H:%M:%SZ')) &
@@ -2284,12 +2284,21 @@ async def get_daily_tracks_tile(
             # Use NULL to ensure valid SQL when list is empty
             flight_uuids_str = "(NULL)"
 
+        # Calculate tile bounds with margin for better rendering at boundaries
+        # Use 64 pixel buffer at 4096 resolution which is standard for MVT
+        buffer_size = 256
+        # Convert to ratio for ST_TileEnvelope margin parameter
+        margin_size = buffer_size / 4096.0
+
         # SQL query using ST_AsMVT
         # This generates MVT tiles with both points and lines for all flights
         query = f"""
         WITH 
         bounds AS (
             SELECT ST_TileEnvelope({z}, {x}, {y}) AS geom
+        ),
+        bounds_with_margin AS (
+            SELECT ST_TileEnvelope({z}, {x}, {y}, margin => {margin_size}) AS geom
         ),
         -- Get flight metadata to assign colors
         flights AS (
@@ -2302,9 +2311,9 @@ async def get_daily_tracks_tile(
             FROM flights 
             WHERE id::text IN {flight_uuids_str}
         ),
-        -- Select and filter points within this tile
-        filtered_points AS (
-            SELECT 
+        -- First get ALL points for each pilot's day tracks (not limited to tile)
+        all_day_points AS (
+            SELECT
                 t.id,
                 t.geom,
                 t.elevation,
@@ -2318,10 +2327,39 @@ async def get_daily_tracks_tile(
             FROM {table_name} t
             JOIN flights f ON t.flight_uuid = f.id
             WHERE t.flight_uuid::text IN {flight_uuids_str}
-              AND ST_Intersects(ST_Transform(t.geom, 3857), (SELECT geom FROM bounds))
-              -- Add time-based sampling for lower zoom levels
-              {" AND extract(second from t.datetime)::integer % 30 = 0 " if z < 10 else ""}
-            ORDER BY t.flight_uuid, t.datetime
+            ORDER BY f.pilot_id, t.datetime
+        ),
+        -- Create complete linestrings per pilot (across ALL tiles)
+        pilot_full_tracks AS (
+            SELECT
+                adp.pilot_id,
+                adp.pilot_name,
+                adp.color_index % 10 as color_index,
+                ST_MakeLine(adp.geom ORDER BY adp.datetime) AS full_track_geom
+            FROM all_day_points adp
+            GROUP BY adp.pilot_id, adp.pilot_name, adp.color_index
+        ),
+        -- Select only points within this tile (with margin) for the point layer
+        filtered_points AS (
+            SELECT 
+                t.id,
+                t.geom,
+                t.elevation,
+                t.datetime,
+                t.lat,
+                t.lon,
+                t.flight_uuid,
+                t.pilot_name,
+                t.pilot_id,
+                t.color_index
+            FROM all_day_points t
+            WHERE ST_Intersects(
+                ST_Transform(t.geom, 3857), 
+                (SELECT geom FROM bounds_with_margin)
+            )
+            -- Add time-based sampling for lower zoom levels
+            {" AND extract(second from t.datetime)::integer % 30 = 0 " if z < 10 else ""}
+            ORDER BY t.pilot_id, t.datetime
         ),
         -- Create the points layer
         point_mvt AS (
@@ -2329,9 +2367,9 @@ async def get_daily_tracks_tile(
                 ST_AsMVTGeom(
                     ST_Transform(fp.geom, 3857), 
                     (SELECT geom FROM bounds),
-                    4096,    -- Resolution: standard is 4096 for MVT
-                    256,     -- Buffer: to avoid clipping at tile edges
-                    true     -- Clip geometries
+                    4096,            -- Resolution: standard is 4096 for MVT
+                    {buffer_size},   -- Buffer: to avoid clipping at tile edges
+                    true             -- Clip geometries
                 ) AS geom,
                 fp.elevation::float as elevation,
                 fp.datetime::text as datetime,
@@ -2340,41 +2378,39 @@ async def get_daily_tracks_tile(
                 fp.flight_uuid::text as flight_uuid,
                 fp.pilot_name,
                 fp.pilot_id,
-                fp.color_index % 10 as color_index  -- Modulo 10 to cycle through colors
+                fp.color_index as color_index
             FROM filtered_points fp
         ),
-        -- Create the line layer from the same points, grouped by flight
+        -- Create the line layer by clipping the FULL track to the current tile
         line_data AS (
             SELECT 
                 ST_AsMVTGeom(
-                    ST_Transform(
-                        ST_MakeLine(fp.geom ORDER BY fp.datetime),
-                        3857
-                    ),
+                    ST_Transform(pft.full_track_geom, 3857),
                     (SELECT geom FROM bounds),
-                    4096,
-                    256,
-                    true
+                    4096,            -- Resolution
+                    {buffer_size},   -- Buffer
+                    true             -- Clip geometries
                 ) AS geom,
-                fp.flight_uuid::text as flight_uuid,
-                fp.pilot_name,
-                fp.pilot_id,
-                fp.color_index % 10 as color_index,  -- Modulo 10 to cycle through colors
-                count(fp.id) as point_count,
-                min(fp.datetime) as start_time,
-                max(fp.datetime) as end_time
-            FROM filtered_points fp
-            GROUP BY fp.flight_uuid, fp.pilot_name, fp.pilot_id, fp.color_index
+                pft.pilot_id,
+                pft.pilot_name,
+                pft.color_index,
+                ROW_NUMBER() OVER () as feature_id  -- Add a numeric feature ID
+            FROM pilot_full_tracks pft
+            WHERE ST_Intersects(
+                ST_Transform(pft.full_track_geom, 3857),
+                (SELECT geom FROM bounds_with_margin)
+            )
         )
         -- Generate and combine both MVTs
         SELECT 
             CASE 
                 WHEN EXISTS (SELECT 1 FROM line_data) AND EXISTS (SELECT 1 FROM point_mvt)
-                THEN ST_AsMVT(line_data.*, 'track_lines') || ST_AsMVT(point_mvt.*, 'track_points')
+                THEN ST_AsMVT(line_data.*, 'track_lines', 4096, 'geom', 'feature_id') || 
+                     ST_AsMVT(point_mvt.*, 'track_points', 4096, 'geom')
                 WHEN EXISTS (SELECT 1 FROM line_data) 
-                THEN ST_AsMVT(line_data.*, 'track_lines') 
+                THEN ST_AsMVT(line_data.*, 'track_lines', 4096, 'geom', 'feature_id')
                 WHEN EXISTS (SELECT 1 FROM point_mvt)
-                THEN ST_AsMVT(point_mvt.*, 'track_points')
+                THEN ST_AsMVT(point_mvt.*, 'track_points', 4096, 'geom')
                 ELSE NULL
             END AS mvt
         FROM line_data, point_mvt
@@ -2399,11 +2435,15 @@ async def get_daily_tracks_tile(
 @router.get("/track-preview/{flight_uuid}")
 async def get_track_preview(
     flight_uuid: UUID,
-    width: int = Query(600, description="Width of the preview image in pixels"),
-    height: int = Query(400, description="Height of the preview image in pixels"),
-    color: str = Query("0x0000ff", description="Color of the track path in hex format"),
+    width: int = Query(
+        600, description="Width of the preview image in pixels"),
+    height: int = Query(
+        400, description="Height of the preview image in pixels"),
+    color: str = Query(
+        "0x0000ff", description="Color of the track path in hex format"),
     weight: int = Query(5, description="Weight/thickness of the track path"),
-    max_points: int = Query(1000, description="Maximum number of points to use in the polyline"),
+    max_points: int = Query(
+        1000, description="Maximum number of points to use in the polyline"),
     credentials: HTTPAuthorizationCredentials = Security(security),
     db: Session = Depends(get_db)
 ):
@@ -2525,9 +2565,9 @@ async def get_track_preview(
             ts.distance, ts.start_time, ts.end_time, ts.min_elevation, 
             ts.max_elevation, ts.elevation_range, ec.elevation_gain, ec.elevation_loss;
         """
-        
+
         stats_result = db.execute(text(stats_query)).fetchone()
-        
+
         # Use ST_SimplifyPreserveTopology to reduce the number of points
         # This keeps the general shape but reduces the point count
         query = f"""
@@ -2570,7 +2610,7 @@ async def get_track_preview(
         encoded_polyline = result[1]
         original_points = result[0]
         simplified_points = result[2]
-        
+
         # Check if the encoded polyline is still too large (> 6000 chars to be safe)
         # If so, further simplify by sampling points
         if len(encoded_polyline) > 6000:
@@ -2590,7 +2630,7 @@ async def get_track_preview(
             result = db.execute(text(query)).fetchone()
             if result and result[0]:
                 encoded_polyline = result[0]
-            
+
             # If still too large, create a bounding box preview instead
             if len(encoded_polyline) > 6000:
                 # Get bounding box and center point
@@ -2605,12 +2645,12 @@ async def get_track_preview(
                 FROM (SELECT {func_name}('{flight_uuid}'::uuid) AS geom) AS track;
                 """
                 bbox_result = db.execute(text(bbox_query)).fetchone()
-                
+
                 if bbox_result:
                     # Create a static map with the center point and appropriate zoom
                     center_lat = bbox_result[4]
                     center_lon = bbox_result[5]
-                    
+
                     # Create Google Static Maps URL with center point and appropriate zoom
                     google_maps_preview_url = (
                         f"https://maps.googleapis.com/maps/api/staticmap?"
@@ -2620,7 +2660,7 @@ async def get_track_preview(
                         f"&sensor=false"
                         f"&key={settings.GOOGLE_MAPS_API_KEY}"
                     )
-                    
+
                     return {
                         "flight_id": flight.flight_id,
                         "flight_uuid": str(flight.id),
@@ -2657,7 +2697,7 @@ async def get_track_preview(
                             # Get the most relevant result (first one)
                             result = data['results'][0]
                             start_location["formatted_address"] = result['formatted_address']
-                            
+
                             # Extract specific address components
                             for component in result['address_components']:
                                 if 'locality' in component['types']:
@@ -2675,13 +2715,15 @@ async def get_track_preview(
         if stats_result:
             hours, remainder = divmod(int(stats_result.duration_seconds), 3600)
             minutes, seconds = divmod(remainder, 60)
-            
+
             # Convert meters to kilometers
-            distance_km = float(stats_result.distance) / 1000 if stats_result.distance else 0
-            
+            distance_km = float(stats_result.distance) / \
+                1000 if stats_result.distance else 0
+
             # Convert m/s to km/h
-            avg_speed_kmh = float(stats_result.avg_speed_m_s) * 3.6 if stats_result.avg_speed_m_s else 0
-            
+            avg_speed_kmh = float(stats_result.avg_speed_m_s) * \
+                3.6 if stats_result.avg_speed_m_s else 0
+
             stats = {
                 "distance": {
                     "meters": round(float(stats_result.distance), 2) if stats_result.distance else 0,
@@ -2731,18 +2773,23 @@ async def get_track_preview(
             status_code=500,
             detail=f"Failed to generate track preview: {str(e)}"
         )
-    
+
 
 @router.get("/track-preview/{flight_id}")
 async def get_track_preview_id(
     flight_id: str,
-    width: int = Query(600, description="Width of the preview image in pixels"),
-    height: int = Query(400, description="Height of the preview image in pixels"),
-    color: str = Query("0x0000ff", description="Color of the track path in hex format"),
+    width: int = Query(
+        600, description="Width of the preview image in pixels"),
+    height: int = Query(
+        400, description="Height of the preview image in pixels"),
+    color: str = Query(
+        "0x0000ff", description="Color of the track path in hex format"),
     weight: int = Query(5, description="Weight/thickness of the track path"),
-    max_points: int = Query(1000, description="Maximum number of points to use in the polyline"),
+    max_points: int = Query(
+        1000, description="Maximum number of points to use in the polyline"),
     token_data: Dict = Depends(verify_tracking_token),
-    source: str = Query(..., regex="^(live|upload)$", description="Either 'live' or 'upload'"),
+    source: str = Query(..., regex="^(live|upload)$",
+                        description="Either 'live' or 'upload'"),
     db: Session = Depends(get_db)
 ):
     """
@@ -2825,7 +2872,7 @@ async def get_track_preview_id(
         encoded_polyline = result[1]
         original_points = result[0]
         simplified_points = result[2]
-        
+
         # Check if the encoded polyline is still too large (> 6000 chars to be safe)
         # If so, further simplify by sampling points
         if len(encoded_polyline) > 6000:
@@ -2845,7 +2892,7 @@ async def get_track_preview_id(
             result = db.execute(text(query)).fetchone()
             if result and result[0]:
                 encoded_polyline = result[0]
-            
+
             # If still too large, create a bounding box preview instead
             if len(encoded_polyline) > 6000:
                 # Get bounding box and center point
@@ -2860,12 +2907,12 @@ async def get_track_preview_id(
                 FROM (SELECT {func_name}('{flight_uuid}'::uuid) AS geom) AS track;
                 """
                 bbox_result = db.execute(text(bbox_query)).fetchone()
-                
+
                 if bbox_result:
                     # Create a static map with the center point and appropriate zoom
                     center_lat = bbox_result[4]
                     center_lon = bbox_result[5]
-                    
+
                     # Create Google Static Maps URL with center point and appropriate zoom
                     google_maps_preview_url = (
                         f"https://maps.googleapis.com/maps/api/staticmap?"
@@ -2875,7 +2922,7 @@ async def get_track_preview_id(
                         f"&sensor=false"
                         f"&key={settings.GOOGLE_MAPS_API_KEY}"
                     )
-                    
+
                     return {
                         "flight_id": flight.flight_id,
                         "flight_uuid": str(flight.id),
@@ -2910,7 +2957,7 @@ async def get_track_preview_id(
             status_code=500,
             detail=f"Failed to generate track preview: {str(e)}"
         )
-    
+
 
 @router.get("/track-line/{flight_id}")
 async def get_track_linestring(
@@ -3439,7 +3486,7 @@ async def get_flight_bounds(
     """
     Calculate the bounding box for a flight track.
     Returns the min/max coordinates that contain the entire flight path.
-    
+
     Parameters:
     - flight_uuid: UUID of the flight
     """
@@ -3513,7 +3560,7 @@ async def get_flight_bounds(
         # Calculate recommended padding (5% of dimensions)
         lon_span = max_lon - min_lon
         lat_span = max_lat - min_lat
-        
+
         lon_padding = lon_span * 0.05
         lat_padding = lat_span * 0.05
 
@@ -3548,20 +3595,20 @@ async def get_flight_bounds(
             status_code=500,
             detail=f"Failed to calculate flight bounds: {str(e)}"
         )
-    
 
 
 @router.get("/flight/bounds/flightid/{flight_id}")
 async def get_flight_bounds_by_id(
     flight_id: str,
-    source: str = Query(..., regex="^(live|upload)$", description="Either 'live' or 'upload'"),
+    source: str = Query(..., regex="^(live|upload)$",
+                        description="Either 'live' or 'upload'"),
     token_data: Dict = Depends(verify_tracking_token),
     db: Session = Depends(get_db)
 ):
     """
     Calculate the bounding box for a flight track using flight ID.
     Returns the min/max coordinates that contain the entire flight path.
-    
+
     Parameters:
     - flight_id: ID of the flight
     - source: Either 'live' or 'upload' to specify which track to retrieve
@@ -3615,7 +3662,7 @@ async def get_flight_bounds_by_id(
         # Calculate recommended padding (5% of dimensions)
         lon_span = max_lon - min_lon
         lat_span = max_lat - min_lat
-        
+
         lon_padding = lon_span * 0.05
         lat_padding = lat_span * 0.05
 
