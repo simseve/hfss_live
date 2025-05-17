@@ -2111,7 +2111,7 @@ async def get_postgis_track_tile(
                 t.lon
             FROM {table_name} t
             WHERE t.flight_id = '{flight_id}'
-              AND ST_Intersects(ST_Transform(t.geom, 3857), (SELECT geom FROM bounds))
+              AND ST_Transform(t.geom, 3857) && (SELECT geom FROM bounds)
               -- Add time-based sampling for lower zoom levels
               {" AND extract(second from t.datetime)::integer % 30 = 0 " if z < 10 else ""}
             ORDER BY t.datetime
@@ -2353,10 +2353,7 @@ async def get_daily_tracks_tile(
                 t.pilot_id,
                 t.color_index
             FROM all_day_points t
-            WHERE ST_Intersects(
-                ST_Transform(t.geom, 3857), 
-                (SELECT geom FROM bounds_with_margin)
-            )
+            WHERE ST_Transform(t.geom, 3857) && (SELECT geom FROM bounds_with_margin)
             -- Add time-based sampling for lower zoom levels
             {" AND extract(second from t.datetime)::integer % 30 = 0 " if z < 10 else ""}
             ORDER BY t.pilot_id, t.datetime
@@ -2396,10 +2393,7 @@ async def get_daily_tracks_tile(
                 pft.color_index,
                 ROW_NUMBER() OVER () as feature_id  -- Add a numeric feature ID
             FROM pilot_full_tracks pft
-            WHERE ST_Intersects(
-                ST_Transform(pft.full_track_geom, 3857),
-                (SELECT geom FROM bounds_with_margin)
-            )
+            WHERE ST_Transform(pft.full_track_geom, 3857) && (SELECT geom FROM bounds_with_margin)
         )
         -- Generate and combine both MVTs
         SELECT 
