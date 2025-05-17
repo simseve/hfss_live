@@ -7,6 +7,7 @@ from database.schemas import (
     ScoringTrackBatchCreate,
     ScoringTrackBatchResponse,
     FlightDeleteResponse,
+    MVTRequest,
 )
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.dialects.postgresql import insert
@@ -16,7 +17,7 @@ from config import settings
 from uuid import UUID
 from sqlalchemy import text
 import json
-from typing import Optional
+from typing import Optional, List
 
 from datetime import datetime, time, timezone
 
@@ -636,39 +637,6 @@ async def get_track_preview(
             f"&key={settings.GOOGLE_MAPS_API_KEY}"
         )
 
-        # Get start location information using Google Geocoding API
-        start_location = {
-            "lat": 42.00,
-            "lon": 8.00,
-            "formatted_address": None,
-            "locality": None,
-            "administrative_area": None,
-            "country": None
-        }
-
-        try:
-            async with ClientSession() as session:
-                url = f"https://maps.googleapis.com/maps/api/geocode/json?latlng={start_location['lat']},{start_location['lon']}&key={settings.GOOGLE_MAPS_API_KEY}"
-                async with session.get(url) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        if data['results']:
-                            # Get the most relevant result (first one)
-                            result = data['results'][0]
-                            start_location["formatted_address"] = result['formatted_address']
-
-                            # Extract specific address components
-                            for component in result['address_components']:
-                                if 'locality' in component['types']:
-                                    start_location["locality"] = component['long_name']
-                                elif 'administrative_area_level_1' in component['types']:
-                                    start_location["administrative_area"] = component['long_name']
-                                elif 'country' in component['types']:
-                                    start_location["country"] = component['long_name']
-        except Exception as e:
-            logger.error(f"Error getting location data: {str(e)}")
-            # Continue even if geocoding fails
-
         # Format flight statistics
         stats = {}
         if stats_result:
@@ -718,7 +686,6 @@ async def get_track_preview(
             "original_points": original_points,
             "simplified_points": simplified_points,
             "url_length": len(google_maps_preview_url),
-            "start_location": start_location,  # Added start location information
             "stats": stats
         }
 
@@ -870,3 +837,383 @@ async def get_flight_points(
             status_code=500,
             detail="An unexpected error occurred while fetching flight points"
         )
+
+
+@router.post("/postgis-mvt/daily/{z}/{x}/{y}")
+async def get_daily_tracks_tile(
+    z: int,
+    x: int,
+    y: int,
+    request: MVTRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Serve vector tiles for all tracks from today for a specific race.
+    Returns track points and lines with different colors per pilot.
+
+    Parameters:
+    - z/x/y: Tile coordinates
+    - request: MVTRequest containing flight UUIDs to include in the tile
+    """
+    try:
+        # Log the request
+        logger.info(
+            f"MVT request received for z={z}, x={x}, y={y} with {len(request.flight_uuids)} flight UUIDs")
+        if not request.flight_uuids:
+            # No flights found, return empty tile
+            logger.warning("No flight UUIDs provided, returning empty tile")
+            return Response(content=b"", media_type="application/x-protobuf")
+
+        # Format UUIDs as a string list for the SQL query
+        # Convert each UUID to string before joining
+        flight_uuids_str = "', '".join(str(uuid)
+                                       for uuid in request.flight_uuids)
+        if flight_uuids_str:
+            flight_uuids_str = f"('{flight_uuids_str}')"
+            logger.info(f"Formatted UUIDs string: {flight_uuids_str}")
+        else:
+            # Use NULL to ensure valid SQL when list is empty
+            flight_uuids_str = "(NULL)"
+
+        # SQL query using ST_AsMVT
+        # This generates MVT tiles with both points and lines for all flights
+        query = f"""
+        WITH 
+        bounds AS (
+            SELECT ST_TileEnvelope({z}, {x}, {y}) AS geom
+        ),
+        -- Assign colors to flights based on their UUID for consistent coloring
+        flights_colors AS (
+            SELECT 
+                DISTINCT flight_uuid,
+                -- Use hash of flight_uuid for color assignment
+                (('x' || substr(md5(flight_uuid::text), 1, 6))::bit(24)::int % 10) as color_index
+            FROM scoring_tracks 
+            WHERE flight_uuid::text IN {flight_uuids_str}
+        ),
+        -- First get all points with row numbers for sampling
+        numbered_points AS (
+            SELECT 
+                ROW_NUMBER() OVER (PARTITION BY t.flight_uuid ORDER BY t.date_time) as point_num,
+                t.*,
+                fc.color_index
+            FROM scoring_tracks t
+            -- Join with the colors CTE to get consistent coloring
+            LEFT JOIN flights_colors fc ON t.flight_uuid = fc.flight_uuid
+            WHERE t.flight_uuid::text IN {flight_uuids_str}
+            -- Apply basic coordinate validation regardless of zoom level to exclude bogus data
+            AND t.lat BETWEEN -90 AND 90 
+            AND t.lon BETWEEN -180 AND 180
+        ),
+        -- For each flight, find the last point to always include
+        last_points AS (
+            SELECT DISTINCT ON (flight_uuid) 
+                *
+            FROM numbered_points
+            ORDER BY flight_uuid, date_time DESC
+        ),
+        -- Select and filter points within this tile - improved filtering for different zoom levels
+        filtered_points AS (
+            SELECT 
+                np.point_num as id,
+                ST_SetSRID(ST_MakePoint(np.lon, np.lat, COALESCE(np.gps_alt, 0)), 4326) as geom,
+                np.gps_alt as elevation,
+                np.date_time as datetime,
+                np.lat,
+                np.lon,
+                np.flight_uuid,
+                np.color_index
+            FROM numbered_points np
+            WHERE 1=1
+            -- Apply appropriate spatial filtering based on zoom level
+            {
+            "" if z == 0 else  # No spatial filtering for level 0
+            "AND (np.lat BETWEEN -85 AND 85 AND np.lon BETWEEN -180 AND 180)" if z <= 2 else
+            "AND ST_Intersects(ST_Transform(ST_SetSRID(ST_MakePoint(np.lon, np.lat), 4326), 3857), (SELECT geom FROM bounds))"
+        }
+            -- Apply sampling based on zoom level and point number
+            AND (
+                {
+            "1=1" if z == 0 else  # For zoom level 0, include ALL points for proper lines
+            "np.point_num % 60 = 0" if z < 3 else
+            "np.point_num % 30 = 0" if z < 7 else
+            "np.point_num % 10 = 0" if z < 10 else
+            "1=1"  # Include all points for high zoom levels
+        }
+                -- Always include the last point of each flight
+                OR EXISTS (
+                    SELECT 1 FROM last_points lp 
+                    WHERE lp.flight_uuid = np.flight_uuid AND lp.date_time = np.date_time
+                )
+            )
+            ORDER BY np.flight_uuid, np.date_time
+        ),
+        -- Create the points layer
+        point_mvt AS (
+            SELECT 
+                ST_AsMVTGeom(
+                    ST_Transform(fp.geom, 3857), 
+                    (SELECT geom FROM bounds),
+                    4096,    -- Resolution: standard is 4096 for MVT
+                    256,     -- Buffer: to avoid clipping at tile edges
+                    true     -- Clip geometries
+                ) AS geom,
+                fp.elevation::float as elevation,
+                fp.datetime::text as datetime,
+                fp.lat::float as lat,
+                fp.lon::float as lon,
+                fp.flight_uuid::text as flight_uuid,
+                fp.color_index
+            FROM filtered_points fp
+        ),
+        -- First group points by flight to form lines
+        flight_lines AS (
+            SELECT 
+                fp.flight_uuid,
+                fp.color_index,
+                ST_MakeLine(fp.geom ORDER BY fp.datetime) AS line_geom,
+                count(fp.id) as point_count,
+                min(fp.datetime) as start_time,
+                max(fp.datetime) as end_time
+            FROM filtered_points fp
+            GROUP BY fp.flight_uuid, fp.color_index
+            HAVING count(fp.id) > 1  -- Ensure we have at least 2 points to form a valid line
+        ),
+        -- Then create the MVT geometries for the lines
+        line_data AS (
+            SELECT 
+                ST_AsMVTGeom(
+                    ST_Transform(fl.line_geom, 3857),
+                    (SELECT geom FROM bounds),
+                    4096,
+                    256,
+                    true
+                ) AS geom,
+                fl.flight_uuid::text as flight_uuid,
+                fl.color_index,
+                fl.point_count,
+                fl.start_time,
+                fl.end_time
+            FROM flight_lines fl
+            WHERE fl.line_geom IS NOT NULL
+        )
+        -- Final SELECT statement to generate MVT - using a better approach for empty results
+        SELECT 
+            (
+                SELECT COALESCE(
+                    (SELECT ST_AsMVT(l.*, 'track_lines') FROM line_data l),
+                    ''
+                )
+            ) || 
+            (
+                SELECT COALESCE(
+                    (SELECT ST_AsMVT(p.*, 'track_points') FROM point_mvt p),
+                    ''
+                )
+            ) AS mvt
+        """
+
+        # Add a debug query to check if we have any points for these UUIDs
+        debug_query = f"""
+        SELECT COUNT(*) FROM scoring_tracks WHERE flight_uuid::text IN {flight_uuids_str};
+        """
+        debug_result = db.execute(text(debug_query)).fetchone()
+        point_count = debug_result[0] if debug_result else 0
+        logger.info(
+            f"Found {point_count} points for the requested flight UUIDs")
+
+        # Add a debug query to check if points are within the tile bounds
+        if point_count > 0:
+            bounds_query = f"""
+            WITH bounds AS (SELECT ST_TileEnvelope({z}, {x}, {y}) AS geom)
+            SELECT COUNT(*) FROM scoring_tracks t, bounds b 
+            WHERE flight_uuid::text IN {flight_uuids_str}
+            AND ST_Intersects(
+                ST_Transform(ST_SetSRID(ST_MakePoint(t.lon, t.lat), 4326), 3857), 
+                b.geom
+            );
+            """
+            bounds_result = db.execute(text(bounds_query)).fetchone()
+            bounds_count = bounds_result[0] if bounds_result else 0
+            logger.info(
+                f"Found {bounds_count} points within the requested tile bounds")
+
+        try:
+            # Execute the query and get the tile with better error handling
+            result = db.execute(text(query)).fetchone()
+
+            # Add more detailed diagnostic logging for points and lines
+
+            # Add a check specifically for line generation issues
+            line_check_query = f"""
+            WITH 
+            bounds AS (SELECT ST_TileEnvelope({z}, {x}, {y}) AS geom),
+            -- Use same numbered_points CTE as the main query
+            numbered_points AS (
+                SELECT 
+                    ROW_NUMBER() OVER (PARTITION BY t.flight_uuid ORDER BY t.date_time) as point_num,
+                    t.*
+                FROM scoring_tracks t
+                WHERE t.flight_uuid::text IN {flight_uuids_str}
+                AND t.lat BETWEEN -90 AND 90 
+                AND t.lon BETWEEN -180 AND 180
+            ),
+            -- Sample for different zoom levels - same logic as main query
+            sampled_points AS (
+                SELECT 
+                    np.flight_uuid,
+                    ST_SetSRID(ST_MakePoint(np.lon, np.lat), 4326) as geom,
+                    np.date_time
+                FROM numbered_points np
+                WHERE (
+                    {
+                "1=1" if z == 0 else  # For zoom level 0, include ALL points for proper lines
+                "np.point_num % 60 = 0" if z < 3 else
+                "np.point_num % 30 = 0" if z < 7 else
+                "np.point_num % 10 = 0" if z < 10 else
+                "1=1"  # Include all points for high zoom levels
+            }
+                )
+            ),
+            -- Group by flight to check line formation
+            line_formation AS (
+                SELECT 
+                    flight_uuid,
+                    ST_NPoints(ST_MakeLine(geom ORDER BY date_time)) as line_points,
+                    COUNT(*) as num_points
+                FROM sampled_points 
+                GROUP BY flight_uuid
+            )
+            SELECT 
+                COUNT(*) as flights_with_lines,
+                SUM(CASE WHEN line_points >= 2 THEN 1 ELSE 0 END) as valid_lines,
+                AVG(line_points) as avg_points_per_line,
+                MAX(line_points) as max_points_in_line
+            FROM line_formation
+            WHERE num_points > 1;
+            """
+
+            try:
+                line_check_result = db.execute(
+                    text(line_check_query)).fetchone()
+                if line_check_result:
+                    logger.info(
+                        f"Line diagnostic: {line_check_result[0]} flights with {line_check_result[1]} valid lines, " +
+                        f"avg {int(line_check_result[2]) if line_check_result[2] else 0} points/line, " +
+                        f"max {line_check_result[3]} points in a line"
+                    )
+            except Exception as e:
+                logger.warning(f"Line diagnostic query failed: {str(e)}")
+
+            # Run a simplified query to check if points are being properly filtered
+            check_filtered_points_query = f"""
+            WITH 
+            bounds AS (SELECT ST_TileEnvelope({z}, {x}, {y}) AS geom),
+            -- First get all points with row numbers for sampling
+            numbered_points AS (
+                SELECT 
+                    ROW_NUMBER() OVER (PARTITION BY t.flight_uuid ORDER BY t.date_time) as point_num,
+                    t.*
+                FROM scoring_tracks t
+                WHERE t.flight_uuid::text IN {flight_uuids_str}
+                -- Apply basic coordinate validation regardless of zoom level
+                AND t.lat BETWEEN -90 AND 90 
+                AND t.lon BETWEEN -180 AND 180
+            ),
+            -- For each flight, find the last point to always include
+            last_points AS (
+                SELECT DISTINCT ON (flight_uuid) 
+                    *
+                FROM numbered_points
+                ORDER BY flight_uuid, date_time DESC
+            ),
+            -- Apply the same filtering as the main query
+            filtered_check AS (
+                SELECT COUNT(*) as filtered_count
+                FROM numbered_points np
+                WHERE 1=1
+                -- Apply appropriate spatial filtering based on zoom level
+                {
+                "" if z == 0 else  # No spatial filtering for level 0
+                "AND (np.lat BETWEEN -85 AND 85 AND np.lon BETWEEN -180 AND 180)" if z <= 2 else
+                "AND ST_Intersects(ST_Transform(ST_SetSRID(ST_MakePoint(np.lon, np.lat), 4326), 3857), (SELECT geom FROM bounds))"
+            }
+                -- Apply sampling based on zoom level and point number
+                AND (
+                    {
+                "1=1" if z == 0 else  # For zoom level 0, include ALL points for proper lines
+                "np.point_num % 60 = 0" if z < 3 else
+                "np.point_num % 30 = 0" if z < 7 else
+                "np.point_num % 10 = 0" if z < 10 else
+                "1=1"  # Include all points for high zoom levels
+            }
+                    -- Always include the last point of each flight
+                    OR EXISTS (
+                        SELECT 1 FROM last_points lp 
+                        WHERE lp.flight_uuid = np.flight_uuid AND lp.date_time = np.date_time
+                    )
+                )
+            )
+            SELECT filtered_count FROM filtered_check;
+            """
+            filtered_check_result = db.execute(
+                text(check_filtered_points_query)).fetchone()
+            filtered_count = filtered_check_result[0] if filtered_check_result else 0
+
+            logger.info(
+                f"Diagnostic - Points after filtering: {filtered_count}")
+            logger.info(
+                f"Diagnostic - MVT result is {'present' if result and result[0] else 'missing'}")
+            if result and result[0]:
+                logger.info(
+                    f"MVT result type: {type(result[0])}, size: {len(result[0])}")
+
+        except Exception as e:
+            logger.error(
+                f"MVT generation or diagnostic queries failed: {str(e)}")
+            # If the main query failed, return empty tile
+            result = None
+
+        # Create a simpler but more robust tile generation approach
+        if result and result[0] is not None:
+            # Always return the MVT tile as binary data, even if it's empty
+            mvt_size = len(result[0])
+            logger.info(
+                f"Generated MVT tile successfully with size: {mvt_size} bytes")
+
+            # Add debug info but don't block valid MVT returns
+            if mvt_size > 0:
+                logger.info(
+                    f"MVT structure hex sample: {result[0][:20].hex()}")
+            else:
+                logger.warning("Empty MVT structure returned")
+
+            return Response(content=result[0], media_type="application/x-protobuf")
+        else:
+            # Create a minimal valid MVT if the result is None
+            logger.warning(
+                "No MVT tile was generated, creating minimal empty MVT response")
+
+            # Use a simple empty tile fallback query
+            fallback_query = """
+            WITH empty_table AS (
+                SELECT NULL::geometry AS geom 
+                WHERE false
+            )
+            SELECT ST_AsMVT(empty_table.*, 'empty_layer') FROM empty_table
+            """
+            try:
+                fallback_result = db.execute(text(fallback_query)).fetchone()
+                if fallback_result and fallback_result[0]:
+                    logger.info("Returning fallback empty MVT structure")
+                    return Response(content=fallback_result[0], media_type="application/x-protobuf")
+            except Exception as e:
+                logger.error(f"Failed to generate fallback MVT: {str(e)}")
+
+            # Last resort: return empty content with proper content type
+            return Response(content=b"", media_type="application/x-protobuf")
+
+    except Exception as e:
+        logger.error(f"Error generating daily tracks vector tile: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to generate daily tracks tile: {str(e)}")

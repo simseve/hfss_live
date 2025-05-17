@@ -416,3 +416,20 @@ class FlightDeleteResponse(BaseModel):
     model_config = {
         "from_attributes": True
     }
+
+
+class MVTRequest(BaseModel):
+    """Schema for requesting Map Vector Tiles with a list of flight UUIDs"""
+    flight_uuids: List[UUID] = Field(...,
+                                     description="List of flight UUIDs to include in the MVT")
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "flight_uuids": [
+                    "3d96fa37-37bc-4340-a6a0-6fe3c74279ed",
+                    "211971e5-7ab5-475f-b763-480ce0533d90"
+                ]
+            }
+        }
+    }
