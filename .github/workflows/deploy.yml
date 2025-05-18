@@ -39,7 +39,7 @@ jobs:
           echo "ENVIRONMENT=development" >> $GITHUB_ENV
           echo "SSH_HOST=ssh.hikeandfly.app" >> $GITHUB_ENV
           echo "SSH_USER=${{ secrets.DEV_SSH_USERNAME }}" >> $GITHUB_ENV
-          echo "DEPLOY_PATH=~/apps/hfss_dev" >> $GITHUB_ENV
+          echo "DEPLOY_PATH=~/apps/hfss_live" >> $GITHUB_ENV
           echo "BRANCH=dev" >> $GITHUB_ENV
         fi
     
