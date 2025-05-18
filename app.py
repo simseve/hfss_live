@@ -21,22 +21,16 @@ import api.scoring as scoring
 from background_tracking import periodic_tracking_update
 from db_cleanup import setup_scheduler
 from contextlib import asynccontextmanager
-from database.db_conf import engine
+from database.db_conf import engine, test_db_connection
 import sqlalchemy
 
 
 def check_database_connection():
     """
     Check if the database connection is working.
-    Raises exception if connection fails.
+    Returns (success, message) tuple.
     """
-    try:
-        # Execute a simple query to check connection
-        with engine.connect() as connection:
-            connection.execute(sqlalchemy.text("SELECT 1"))
-        return True, "Database connection successful"
-    except Exception as e:
-        return False, f"Database connection failed: {str(e)}"
+    return test_db_connection(max_retries=3)
 
 
 @asynccontextmanager
