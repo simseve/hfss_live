@@ -64,7 +64,7 @@ jobs:
       if: env.ENVIRONMENT == 'development'
       uses: AnimMouse/setup-cloudflared@v2
     
-    - name: Deploy to development with service tokens
+    - name: Deploy to development with TCP tunnel
       if: env.ENVIRONMENT == 'development'
       run: |
         # Verify cloudflared installation
@@ -85,11 +85,20 @@ jobs:
         echo "Deployed successfully to development on host $HOSTNAME"
         EOF
         
-        # Run cloudflared with correct syntax for service authentication
-        # Use the --url flag to specify the destination with port
-        cloudflared access ssh \
-          --hostname ${{ env.SSH_HOST }} \
-          --destination 127.0.0.1:22 \
+        # Start a TCP tunnel using cloudflared
+        # This creates a local proxy at port 2222 that connects to the remote SSH server
+        cloudflared access tcp --hostname ${{ env.SSH_HOST }} --url localhost:2222 \
           --id ${{ secrets.CLOUDFLARE_ACCESS_CLIENT_ID }} \
-          --secret ${{ secrets.CLOUDFLARE_ACCESS_CLIENT_SECRET }} \
-          -- ${{ env.SSH_USER }}@127.0.0.1 'bash -s' < deploy_commands.sh
+          --secret ${{ secrets.CLOUDFLARE_ACCESS_CLIENT_SECRET }} &
+        
+        # Store the PID to kill it later
+        CLOUDFLARED_PID=$!
+        
+        # Give the tunnel a moment to establish
+        sleep 5
+        
+        # Now SSH through the local tunnel
+        ssh -o StrictHostKeyChecking=no -p 2222 ${{ env.SSH_USER }}@localhost 'bash -s' < deploy_commands.sh
+        
+        # Kill the cloudflared process
+        kill $CLOUDFLARED_PID
