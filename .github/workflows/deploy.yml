@@ -89,8 +89,8 @@ jobs:
         chmod 600 ~/.ssh/id_rsa
 
         # Since we confirmed your tokens work, let's use them directly
-        # Create a local port forwarding with cloudflared (verbose output)
-        cloudflared access tcp -v --hostname ${{ env.SSH_HOST }} --url localhost:2222 \
+        # Create a local port forwarding with cloudflared
+        cloudflared access tcp --hostname ${{ env.SSH_HOST }} --url localhost:2222 \
           --header "CF-Access-Client-Id: ${{ secrets.CF_CLIENT_ID }}" \
           --header "CF-Access-Client-Secret: ${{ secrets.CF_CLIENT_SECRET }}" &
 
