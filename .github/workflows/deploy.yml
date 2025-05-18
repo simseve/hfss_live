@@ -70,6 +70,9 @@ jobs:
         # Verify cloudflared installation
         cloudflared -v
 
+        echo "CF_CLIENT_ID: ${{ secrets.CF_CLIENT_ID }}"
+        echo "CF_CLIENT_SECRET: ${{ secrets.CF_CLIENT_SECRET }}"
+
         # Create deployment script
         cat > deploy_commands.sh << 'EOF'
         export HOSTNAME=$(hostname)
@@ -86,8 +89,8 @@ jobs:
         chmod 600 ~/.ssh/id_rsa
 
         # Since we confirmed your tokens work, let's use them directly
-        # Create a local port forwarding with cloudflared
-        cloudflared access tcp --hostname ${{ env.SSH_HOST }} --url localhost:2222 \
+        # Create a local port forwarding with cloudflared (verbose output)
+        cloudflared access tcp -v --hostname ${{ env.SSH_HOST }} --url localhost:2222 \
           --header "CF-Access-Client-Id: ${{ secrets.CF_CLIENT_ID }}" \
           --header "CF-Access-Client-Secret: ${{ secrets.CF_CLIENT_SECRET }}" &
 
@@ -95,10 +98,12 @@ jobs:
         CLOUDFLARED_PID=$!
 
         # Wait for the tunnel to establish
-        sleep 5
+        sleep 10
 
         # Now connect via SSH to the localhost forwarded port
         ssh -o StrictHostKeyChecking=no -p 2222 ${{ env.SSH_USER }}@localhost 'bash -s' < deploy_commands.sh
 
         # Kill the tunnel process
-        kill $CLOUDFLARED_PID
+        if [ -n "$CLOUDFLARED_PID" ]; then
+          kill $CLOUDFLARED_PID
+        fi
