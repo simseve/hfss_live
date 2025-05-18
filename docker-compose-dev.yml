@@ -1,0 +1,30 @@
+version: '3.4'
+
+services:
+  hfsslive:
+    container_name: hfsslive
+    image: hfsslive:latest
+    env_file:
+      - ./.env
+    environment:
+      - PROD=True
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+    ports:
+      - 5012:8000
+    command: ['uvicorn', 'app:app', '--host', '0.0.0.0', '--port', '8000']
+    volumes:
+      - logs:/app/logs
+      - static:/app/static
+    restart: unless-stopped
+    networks:
+      - app-network
+
+volumes:
+  logs:
+  static:
+
+networks:
+  app-network:
+    external: true
