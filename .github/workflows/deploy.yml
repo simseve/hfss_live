@@ -70,8 +70,7 @@ jobs:
         # Verify cloudflared installation
         cloudflared -v
 
-        echo "CF_CLIENT_ID: ${{ secrets.CF_CLIENT_ID }}"
-        echo "CF_CLIENT_SECRET: ${{ secrets.CF_CLIENT_SECRET }}"
+
 
         # Create deployment script
         cat > deploy_commands.sh << 'EOF'
@@ -87,6 +86,9 @@ jobs:
         mkdir -p ~/.ssh
         echo "${{ secrets.DEV_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
         chmod 600 ~/.ssh/id_rsa
+
+        echo "${{ env.SSH_HOST }}"
+        echo "${{ env.SSH_USER }}"
 
         # Create a local port forwarding with cloudflared using service token flags
         cloudflared access tcp --hostname ${{ env.SSH_HOST }} --url localhost:2222 \
