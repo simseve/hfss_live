@@ -26,7 +26,7 @@ jobs:
         TZ=Europe/Berlin date +'%Y.%m.%d.%H%M'
         echo "BUILD_VERSION=$(TZ=Europe/Berlin date +'%Y.%m.%d.%H%M')-${GITHUB_SHA::7}" >> $GITHUB_ENV
     
-    # Determine environment and set variables
+    # Determine environment
     - name: Set environment variables
       id: env_vars
       run: |
@@ -35,85 +35,51 @@ jobs:
           echo "SSH_HOST=89.47.162.7" >> $GITHUB_ENV
           echo "SSH_USER=ubuntu" >> $GITHUB_ENV
           echo "DEPLOY_PATH=~/apps/hfss_live" >> $GITHUB_ENV
-          echo "SSH_METHOD=direct" >> $GITHUB_ENV
+          echo "BRANCH=main" >> $GITHUB_ENV
         elif [[ "${{ github.ref }}" == "refs/heads/dev" ]]; then
           echo "ENVIRONMENT=development" >> $GITHUB_ENV
           echo "SSH_HOST=ssh.hikeandfly.app" >> $GITHUB_ENV
           echo "SSH_USER=${{ secrets.DEV_SSH_USERNAME }}" >> $GITHUB_ENV
           echo "DEPLOY_PATH=~/apps/hfss_dev" >> $GITHUB_ENV
-          echo "SSH_METHOD=cloudflare" >> $GITHUB_ENV
+          echo "BRANCH=dev" >> $GITHUB_ENV
         fi
-    
-    # Set up SSH for production (direct method)
-    - name: Set up SSH (Production)
-      if: env.SSH_METHOD == 'direct'
-      uses: webfactory/ssh-agent@v0.5.4
-      with:
-        ssh-private-key: ${{ secrets.TIME4VPS }}
-    
-    # Set up SSH for dev (Cloudflare Access method)
-    - name: Set up Cloudflare Access and SSH (Development)
-      if: env.SSH_METHOD == 'cloudflare'
-      run: |
-        # Install cloudflared
-        wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-        sudo dpkg -i cloudflared-linux-amd64.deb
-        
-        # Set up SSH key
-        mkdir -p ~/.ssh
-        echo "${{ secrets.DEV_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-        chmod 600 ~/.ssh/id_rsa
-        ssh-keyscan github.com >> ~/.ssh/known_hosts
-        
-        # Create a non-interactive deployment script that uses service tokens
-        cat > deploy_script.sh << 'EOF'
-        #!/bin/bash
-        export TUNNEL_TOKEN="${{ secrets.CLOUDFLARE_ACCESS_CLIENT_ID }}"
-        export TUNNEL_SECRET="${{ secrets.CLOUDFLARE_ACCESS_CLIENT_SECRET }}"
-        
-        # Use cloudflared in non-interactive mode
-        cloudflared access ssh-gen --hostname ${{ env.SSH_HOST }} --destination 127.0.0.1:22
-        
-        # Now connect using the generated certificate
-        ssh -o "ProxyCommand=cloudflared access ssh --hostname %h" \
-            -o StrictHostKeyChecking=no \
-            -i ~/.ssh/id_rsa \
-            ${{ env.SSH_USER }}@${{ env.SSH_HOST }} << 'ENDSSH'
-          export HOSTNAME=$(hostname)
-          
-          cd ${{ env.DEPLOY_PATH }}
-          git pull origin dev
-          
-          docker-compose down
-          docker-compose up -d --build
-          
-          echo "Deployed successfully to development on host $HOSTNAME"
-        ENDSSH
-        EOF
-        
-        chmod +x deploy_script.sh
     
     # Deploy to production (direct SSH)
     - name: Deploy to production
-      if: env.SSH_METHOD == 'direct'
-      run: |
-        ssh -o StrictHostKeyChecking=no ${{ env.SSH_USER }}@${{ env.SSH_HOST }} << EOF
-          export HOSTNAME=\$(hostname)
-          
+      if: env.ENVIRONMENT == 'production'
+      uses: appleboy/ssh-action@master
+      with:
+        host: ${{ env.SSH_HOST }}
+        username: ${{ env.SSH_USER }}
+        key: ${{ secrets.TIME4VPS }}
+        script: |
+          export HOSTNAME=$(hostname)
           cd ${{ env.DEPLOY_PATH }}
-          git pull origin main
-          
+          git pull origin ${{ env.BRANCH }}
           docker-compose down
           docker-compose up -d --build
-          
-          echo "Deployed successfully to production on host \$HOSTNAME"
-        EOF
-      env:
-        SSH_PRIVATE_KEY: ${{ secrets.TIME4VPS }}
+          echo "Deployed successfully to production on host $HOSTNAME"
     
-    # Deploy to development (Cloudflare Access with service tokens)
+    # Deploy to development (using Cloudflare action)
     - name: Deploy to development
-      if: env.SSH_METHOD == 'cloudflare'
-      run: |
-        # Execute the non-interactive deployment script
-        ./deploy_script.sh
+      if: env.ENVIRONMENT == 'development'
+      uses: cloudflare/cloudflared-tunnel-action@v1
+      with:
+        hostname: ${{ env.SSH_HOST }}
+        service_token_id: ${{ secrets.CLOUDFLARE_ACCESS_CLIENT_ID }}
+        service_token_secret: ${{ secrets.CLOUDFLARE_ACCESS_CLIENT_SECRET }}
+        script: |
+          # Set up SSH key
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEV_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          
+          # Run SSH commands through the tunnel
+          ssh -o StrictHostKeyChecking=no ${{ env.SSH_USER }}@${{ env.SSH_HOST }} << EOF
+            export HOSTNAME=\$(hostname)
+            cd ${{ env.DEPLOY_PATH }}
+            git pull origin ${{ env.BRANCH }}
+            docker-compose down
+            docker-compose up -d --build
+            echo "Deployed successfully to development on host \$HOSTNAME"
+          EOF
