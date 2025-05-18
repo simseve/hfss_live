@@ -64,40 +64,30 @@ jobs:
       if: env.ENVIRONMENT == 'development'
       uses: AnimMouse/setup-cloudflared@v2
     
-    - name: Configure SSH for Cloudflare Access (development)
+    - name: Deploy to development with service tokens
       if: env.ENVIRONMENT == 'development'
       run: |
-        # Verify cloudflared is installed
+        # Verify cloudflared installation
         cloudflared -v
         
-        # Set up the service token auth
-        mkdir -p ~/.cloudflared
-        echo "${{ secrets.CLOUDFLARE_ACCESS_CLIENT_ID }}" > ~/.cloudflared/client_id
-        echo "${{ secrets.CLOUDFLARE_ACCESS_CLIENT_SECRET }}" > ~/.cloudflared/client_secret
-        
-        # Set up SSH for connecting via Cloudflare Access
+        # Set up SSH key
         mkdir -p ~/.ssh
         echo "${{ secrets.DEV_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
         chmod 600 ~/.ssh/id_rsa
         
-        # Configure SSH to use cloudflared
-        cat > ~/.ssh/config << EOF
-        Host ${{ env.SSH_HOST }}
-          ProxyCommand cloudflared access ssh --hostname %h
-          User ${{ env.SSH_USER }}
-          IdentityFile ~/.ssh/id_rsa
-          StrictHostKeyChecking no
+        # Use cloudflared directly with explicit service token arguments
+        # Create a script that will be executed on the remote server
+        cat > deploy_commands.sh << 'EOF'
+        export HOSTNAME=$(hostname)
+        cd ${{ env.DEPLOY_PATH }}
+        git pull origin ${{ env.BRANCH }}
+        docker-compose down
+        docker-compose up -d --build
+        echo "Deployed successfully to development on host $HOSTNAME"
         EOF
         
-    - name: Deploy to development
-      if: env.ENVIRONMENT == 'development'
-      run: |
-        # Now we can use regular SSH command with Cloudflare Access handled by the SSH config
-        ssh ${{ env.SSH_HOST }} << 'EOF'
-          export HOSTNAME=$(hostname)
-          cd ${{ env.DEPLOY_PATH }}
-          git pull origin ${{ env.BRANCH }}
-          docker-compose down
-          docker-compose up -d --build
-          echo "Deployed successfully to development on host $HOSTNAME"
-        EOF
+        # Use cloudflared access ssh command with explicit service token flags
+        cloudflared access ssh --hostname ${{ env.SSH_HOST }} \
+          --id ${{ secrets.CLOUDFLARE_ACCESS_CLIENT_ID }} \
+          --secret ${{ secrets.CLOUDFLARE_ACCESS_CLIENT_SECRET }} \
+          -- ${{ env.SSH_USER }}@${{ env.SSH_HOST }} 'bash -s' < deploy_commands.sh
