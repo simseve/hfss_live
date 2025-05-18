@@ -174,4 +174,4 @@ npx react-native log-android
 
 [List of contributors]
 Simone Severini
-Tenz
+Tenz Martino
