@@ -2,6 +2,8 @@ import logging
 import uuid
 from logs.logconfig import configure_logging
 from fastapi import FastAPI, APIRouter, Request
+from fastapi.responses import JSONResponse
+
 import logging
 import uvicorn
 from fastapi.middleware.cors import CORSMiddleware
@@ -93,6 +95,7 @@ async def log_request(request: Request, call_next):
 
 app.include_router(routes.router, tags=['Tracking'], prefix='/tracking')
 app.include_router(scoring.router, tags=['Scoring'], prefix='/scoring')
+
 
 
 # Attach the rate limiter as a middleware

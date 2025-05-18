@@ -19,11 +19,12 @@ services:
       - static:/app/static
     restart: unless-stopped
     networks:
-      - shared_network
+      - app-network
 
 volumes:
   logs:
   static:
 
 networks:
-  shared_network:
+  app-network:
+    external: true
