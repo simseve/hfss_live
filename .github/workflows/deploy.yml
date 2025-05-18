@@ -64,16 +64,11 @@ jobs:
       if: env.ENVIRONMENT == 'development'
       uses: AnimMouse/setup-cloudflared@v2
     
-    - name: Deploy to development with TCP tunnel
+    - name: Deploy to development using cloudflared
       if: env.ENVIRONMENT == 'development'
       run: |
         # Verify cloudflared installation
         cloudflared -v
-        
-        # Set up SSH key
-        mkdir -p ~/.ssh
-        echo "${{ secrets.DEV_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-        chmod 600 ~/.ssh/id_rsa
         
         # Create deployment script
         cat > deploy_commands.sh << 'EOF'
@@ -85,20 +80,25 @@ jobs:
         echo "Deployed successfully to development on host $HOSTNAME"
         EOF
         
-        # Start a TCP tunnel using cloudflared
-        # This creates a local proxy at port 2222 that connects to the remote SSH server
-        cloudflared access tcp --hostname ${{ env.SSH_HOST }} --url localhost:2222 \
-          --id ${{ secrets.CLOUDFLARE_ACCESS_CLIENT_ID }} \
-          --secret ${{ secrets.CLOUDFLARE_ACCESS_CLIENT_SECRET }} &
+        # Set up SSH key
+        mkdir -p ~/.ssh
+        echo "${{ secrets.DEV_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
         
-        # Store the PID to kill it later
+        # Since we confirmed your tokens work, let's use them directly
+        # Create a local port forwarding with cloudflared
+        cloudflared access tcp --hostname ${{ env.SSH_HOST }} --url localhost:2222 \
+          --header "CF-Access-Client-Id: ${{ secrets.CF_CLIENT_ID }}" \
+          --header "CF-Access-Client-Secret: ${{ secrets.CF_CLIENT_SECRET }}" &
+          
+        # Store the PID so we can kill it later
         CLOUDFLARED_PID=$!
         
-        # Give the tunnel a moment to establish
+        # Wait for the tunnel to establish
         sleep 5
         
-        # Now SSH through the local tunnel
+        # Now connect via SSH to the localhost forwarded port
         ssh -o StrictHostKeyChecking=no -p 2222 ${{ env.SSH_USER }}@localhost 'bash -s' < deploy_commands.sh
         
-        # Kill the cloudflared process
+        # Kill the tunnel process
         kill $CLOUDFLARED_PID
