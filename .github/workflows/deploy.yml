@@ -28,7 +28,6 @@ jobs:
     
     # Determine environment
     - name: Set environment variables
-      id: env_vars
       run: |
         if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
           echo "ENVIRONMENT=production" >> $GITHUB_ENV
@@ -60,26 +59,45 @@ jobs:
           docker-compose up -d --build
           echo "Deployed successfully to production on host $HOSTNAME"
     
-    # Deploy to development (using Cloudflare action)
+    # For development environment with Cloudflare Access
+    - name: Setup cloudflared (for development)
+      if: env.ENVIRONMENT == 'development'
+      uses: AnimMouse/setup-cloudflared@v2
+    
+    - name: Configure SSH for Cloudflare Access (development)
+      if: env.ENVIRONMENT == 'development'
+      run: |
+        # Verify cloudflared is installed
+        cloudflared -v
+        
+        # Set up the service token auth
+        mkdir -p ~/.cloudflared
+        echo "${{ secrets.CLOUDFLARE_ACCESS_CLIENT_ID }}" > ~/.cloudflared/client_id
+        echo "${{ secrets.CLOUDFLARE_ACCESS_CLIENT_SECRET }}" > ~/.cloudflared/client_secret
+        
+        # Set up SSH for connecting via Cloudflare Access
+        mkdir -p ~/.ssh
+        echo "${{ secrets.DEV_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+        
+        # Configure SSH to use cloudflared
+        cat > ~/.ssh/config << EOF
+        Host ${{ env.SSH_HOST }}
+          ProxyCommand cloudflared access ssh --hostname %h
+          User ${{ env.SSH_USER }}
+          IdentityFile ~/.ssh/id_rsa
+          StrictHostKeyChecking no
+        EOF
+        
     - name: Deploy to development
       if: env.ENVIRONMENT == 'development'
-      uses: cloudflare/cloudflared-tunnel-action@v1
-      with:
-        hostname: ${{ env.SSH_HOST }}
-        service_token_id: ${{ secrets.CLOUDFLARE_ACCESS_CLIENT_ID }}
-        service_token_secret: ${{ secrets.CLOUDFLARE_ACCESS_CLIENT_SECRET }}
-        script: |
-          # Set up SSH key
-          mkdir -p ~/.ssh
-          echo "${{ secrets.DEV_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          
-          # Run SSH commands through the tunnel
-          ssh -o StrictHostKeyChecking=no ${{ env.SSH_USER }}@${{ env.SSH_HOST }} << EOF
-            export HOSTNAME=\$(hostname)
-            cd ${{ env.DEPLOY_PATH }}
-            git pull origin ${{ env.BRANCH }}
-            docker-compose down
-            docker-compose up -d --build
-            echo "Deployed successfully to development on host \$HOSTNAME"
-          EOF
+      run: |
+        # Now we can use regular SSH command with Cloudflare Access handled by the SSH config
+        ssh ${{ env.SSH_HOST }} << 'EOF'
+          export HOSTNAME=$(hostname)
+          cd ${{ env.DEPLOY_PATH }}
+          git pull origin ${{ env.BRANCH }}
+          docker-compose down
+          docker-compose up -d --build
+          echo "Deployed successfully to development on host $HOSTNAME"
+        EOF
