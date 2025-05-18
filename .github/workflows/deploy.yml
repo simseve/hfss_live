@@ -19,7 +19,7 @@ jobs:
       uses: actions/setup-node@v4
       with:
         node-version: '20'
-        
+    
     - name: Generate version
       id: version
       run: |
@@ -33,13 +33,13 @@ jobs:
           echo "ENVIRONMENT=production" >> $GITHUB_ENV
           echo "SSH_HOST=89.47.162.7" >> $GITHUB_ENV
           echo "SSH_USER=ubuntu" >> $GITHUB_ENV
-          echo "DEPLOY_PATH=~/apps/hfss_live" >> $GITHUB_ENV
+          echo "DEPLOY_PATH=~/apps/hfss" >> $GITHUB_ENV
           echo "BRANCH=main" >> $GITHUB_ENV
         elif [[ "${{ github.ref }}" == "refs/heads/dev" ]]; then
           echo "ENVIRONMENT=development" >> $GITHUB_ENV
           echo "SSH_HOST=ssh.hikeandfly.app" >> $GITHUB_ENV
           echo "SSH_USER=${{ secrets.DEV_SSH_USERNAME }}" >> $GITHUB_ENV
-          echo "DEPLOY_PATH=~/apps/hfss_live" >> $GITHUB_ENV
+          echo "DEPLOY_PATH=~/apps/hfss" >> $GITHUB_ENV
           echo "BRANCH=dev" >> $GITHUB_ENV
         fi
     
@@ -53,11 +53,20 @@ jobs:
         key: ${{ secrets.TIME4VPS }}
         script: |
           export HOSTNAME=$(hostname)
+          export BUILD_VERSION=${{ env.BUILD_VERSION }}
+          export ENVIRONMENT=${{ env.ENVIRONMENT }}
+          
           cd ${{ env.DEPLOY_PATH }}
-          git pull origin ${{ env.BRANCH }}
-          docker compose down
-          docker compose up -d --build
-          echo "Deployed successfully to production on host $HOSTNAME"
+          git checkout main
+          git pull origin main
+          
+          # Create or update version file
+          echo "${{ env.BUILD_VERSION }}" > version.txt
+          
+          HOSTNAME=$HOSTNAME BUILD_VERSION=${{ env.BUILD_VERSION }} ENVIRONMENT=${{ env.ENVIRONMENT }} docker-compose down
+          HOSTNAME=$HOSTNAME BUILD_VERSION=${{ env.BUILD_VERSION }} ENVIRONMENT=${{ env.ENVIRONMENT }} docker-compose up -d --build
+          
+          echo "Deployed version ${{ env.BUILD_VERSION }} to ${{ env.ENVIRONMENT }} environment on host $HOSTNAME"
     
     # For development environment with Cloudflare Access
     - name: Setup cloudflared (for development)
@@ -69,41 +78,48 @@ jobs:
       run: |
         # Verify cloudflared installation
         cloudflared -v
-
-
-
+        
         # Create deployment script
         cat > deploy_commands.sh << 'EOF'
         export HOSTNAME=$(hostname)
+        export BUILD_VERSION=${{ env.BUILD_VERSION }}
+        export ENVIRONMENT=${{ env.ENVIRONMENT }}
+        
         cd ${{ env.DEPLOY_PATH }}
-        git pull origin ${{ env.BRANCH }}
-        docker compose down
-        docker compose -f docker-compose-dev.yml up -d --build
-        echo "Deployed successfully to development on host $HOSTNAME"
+        git checkout dev
+        git pull origin dev
+        
+        # Create or update version file
+        echo "${{ env.BUILD_VERSION }}" > version.txt
+        
+        HOSTNAME=$HOSTNAME BUILD_VERSION=${{ env.BUILD_VERSION }} ENVIRONMENT=${{ env.ENVIRONMENT }} docker-compose down
+        HOSTNAME=$HOSTNAME BUILD_VERSION=${{ env.BUILD_VERSION }} ENVIRONMENT=${{ env.ENVIRONMENT }} docker-compose up -d --build
+        
+        echo "Deployed version ${{ env.BUILD_VERSION }} to ${{ env.ENVIRONMENT }} environment on host $HOSTNAME"
         EOF
-
+        
         # Set up SSH key
         mkdir -p ~/.ssh
         echo "${{ secrets.DEV_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
         chmod 600 ~/.ssh/id_rsa
-
+        
         echo "${{ env.SSH_HOST }}"
         echo "${{ env.SSH_USER }}"
-
+        
         # Create a local port forwarding with cloudflared using service token flags
         cloudflared access tcp --hostname ${{ env.SSH_HOST }} --url localhost:2222 \
           --service-token-id "${{ secrets.CF_CLIENT_ID }}" \
           --service-token-secret "${{ secrets.CF_CLIENT_SECRET }}" &
-
+        
         # Store the PID so we can kill it later
         CLOUDFLARED_PID=$!
-
+        
         # Wait for the tunnel to establish
         sleep 10
-
+        
         # Now connect via SSH to the localhost forwarded port
         ssh -o StrictHostKeyChecking=no -p 2222 ${{ env.SSH_USER }}@localhost 'bash -s' < deploy_commands.sh
-
+        
         # Kill the tunnel process
         if [ -n "$CLOUDFLARED_PID" ]; then
           kill $CLOUDFLARED_PID
