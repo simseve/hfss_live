@@ -55,8 +55,8 @@ jobs:
           export HOSTNAME=$(hostname)
           cd ${{ env.DEPLOY_PATH }}
           git pull origin ${{ env.BRANCH }}
-          docker-compose down
-          docker-compose up -d --build
+          docker compose down
+          docker compose up -d --build
           echo "Deployed successfully to production on host $HOSTNAME"
     
     # For development environment with Cloudflare Access
@@ -77,8 +77,8 @@ jobs:
         export HOSTNAME=$(hostname)
         cd ${{ env.DEPLOY_PATH }}
         git pull origin ${{ env.BRANCH }}
-        docker-compose down
-        docker-compose up -d --build
+        docker compose down
+        docker compose -f docker-compose-dev.yml up -d --build
         echo "Deployed successfully to development on host $HOSTNAME"
         EOF
 
