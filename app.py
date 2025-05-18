@@ -1,3 +1,4 @@
+import json
 import logging
 import uuid
 from logs.logconfig import configure_logging
@@ -20,10 +21,29 @@ import api.scoring as scoring
 from background_tracking import periodic_tracking_update
 from db_cleanup import setup_scheduler
 from contextlib import asynccontextmanager
+from database.db_conf import engine, test_db_connection
+import sqlalchemy
+
+
+def check_database_connection():
+    """
+    Check if the database connection is working.
+    Returns (success, message) tuple.
+    """
+    return test_db_connection(max_retries=3)
 
 
 @asynccontextmanager
 async def lifespan(app):
+    # Check database connection first
+    logger = logging.getLogger(__name__)
+    is_connected, message = check_database_connection()
+    if not is_connected:
+        logger.critical(f"Failed to connect to PostgreSQL database: {message}")
+        raise RuntimeError(f"Database connection check failed: {message}")
+    else:
+        logger.info(f"Database connection check: {message}")
+
     # Start the background tracking task when the application starts
     track_task = asyncio.create_task(
         periodic_tracking_update(10))  # Update every 10 seconds
@@ -97,26 +117,52 @@ app.include_router(routes.router, tags=['Tracking'], prefix='/tracking')
 app.include_router(scoring.router, tags=['Scoring'], prefix='/scoring')
 
 
-
 # Attach the rate limiter as a middleware
 app.state.limiter = rate_limiter
 app.add_middleware(SlowAPIMiddleware)
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
+class DateTimeEncoder(json.JSONEncoder):
+    """Custom JSON encoder that handles datetime objects."""
+
+    def default(self, obj):
+        if isinstance(obj, datetime.datetime):
+            return obj.isoformat()
+        return super().default(obj)
+
+
 @app.get('/health')
-def root():
+async def root():
     now = datetime.datetime.now()
     uptime = now - system_startup_time
+
+    # Check database connection
+    is_db_connected, db_message = check_database_connection()
+    status = 'healthy' if is_db_connected else 'unhealthy'
+
     response = {
-        'status': 'healthy',
-        'system_startup_time': system_startup_time,
-        'current_time': now,
+        'status': status,
+        # Convert to ISO format string
+        'system_startup_time': system_startup_time.isoformat(),
+        'current_time': now.isoformat(),  # Convert to ISO format string
         'uptime': str(uptime),
-        'scheduled_tasks': ['live_tracking_update', 'old_flights_cleanup']
+        'scheduled_tasks': ['live_tracking_update', 'old_flights_cleanup'],
+        'database': {
+            'status': 'connected' if is_db_connected else 'disconnected',
+            'message': db_message
+        }
     }
-    logger.info(f"Healthcheck requested on {now}")
-    return response
+
+    logger.info(
+        f"Healthcheck requested on {now}. Database status: {response['database']['status']}")
+
+    # Return an appropriate status code based on health
+    # 503 Service Unavailable if DB is down
+    status_code = 200 if is_db_connected else 503
+
+    # Return the response with pre-serialized datetime values
+    return JSONResponse(content=response, status_code=status_code)
 
 
 if __name__ == "__main__":
