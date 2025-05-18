@@ -75,8 +75,7 @@ jobs:
         echo "${{ secrets.DEV_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
         chmod 600 ~/.ssh/id_rsa
         
-        # Use cloudflared directly with explicit service token arguments
-        # Create a script that will be executed on the remote server
+        # Create deployment script
         cat > deploy_commands.sh << 'EOF'
         export HOSTNAME=$(hostname)
         cd ${{ env.DEPLOY_PATH }}
@@ -86,8 +85,11 @@ jobs:
         echo "Deployed successfully to development on host $HOSTNAME"
         EOF
         
-        # Use cloudflared access ssh command with explicit service token flags
-        cloudflared access ssh --hostname ${{ env.SSH_HOST }} \
+        # Run cloudflared with correct syntax for service authentication
+        # Use the --url flag to specify the destination with port
+        cloudflared access ssh \
+          --hostname ${{ env.SSH_HOST }} \
+          --destination 127.0.0.1:22 \
           --id ${{ secrets.CLOUDFLARE_ACCESS_CLIENT_ID }} \
           --secret ${{ secrets.CLOUDFLARE_ACCESS_CLIENT_SECRET }} \
-          -- ${{ env.SSH_USER }}@${{ env.SSH_HOST }} 'bash -s' < deploy_commands.sh
+          -- ${{ env.SSH_USER }}@127.0.0.1 'bash -s' < deploy_commands.sh
