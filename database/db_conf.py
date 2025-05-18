@@ -60,6 +60,22 @@ def get_db(max_retries=3, retry_delay=0.5):
     retry_count = 0
     last_error = None
 
+    # Ensure max_retries is an integer
+    try:
+        max_retries = int(max_retries)
+    except (ValueError, TypeError):
+        logger.warning(
+            f"Invalid max_retries value: {max_retries}, using default of 3")
+        max_retries = 3
+
+    # Ensure retry_delay is a float
+    try:
+        retry_delay = float(retry_delay)
+    except (ValueError, TypeError):
+        logger.warning(
+            f"Invalid retry_delay value: {retry_delay}, using default of 0.5")
+        retry_delay = 0.5
+
     while retry_count < max_retries:
         session = Session()
         try:
@@ -118,7 +134,18 @@ def test_db_connection(max_retries=3):
         tuple: (success boolean, message string)
     """
     import time
+    import logging
     from sqlalchemy.exc import OperationalError, DisconnectionError
+
+    logger = logging.getLogger(__name__)
+
+    # Ensure max_retries is an integer
+    try:
+        max_retries = int(max_retries)
+    except (ValueError, TypeError):
+        logger.warning(
+            f"Invalid max_retries value: {max_retries}, using default of 3")
+        max_retries = 3
 
     retry_count = 0
 
