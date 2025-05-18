@@ -88,8 +88,8 @@ jobs:
         echo "${{ secrets.DEV_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
         chmod 600 ~/.ssh/id_rsa
 
-        # Create a local port forwarding with cloudflared using service token flags and no autologin
-        cloudflared access tcp --no-autologin --hostname ${{ env.SSH_HOST }} --url localhost:2222 \
+        # Create a local port forwarding with cloudflared using service token flags
+        cloudflared access tcp --hostname ${{ env.SSH_HOST }} --url localhost:2222 \
           --service-token-id "${{ secrets.CF_CLIENT_ID }}" \
           --service-token-secret "${{ secrets.CF_CLIENT_SECRET }}" &
 
