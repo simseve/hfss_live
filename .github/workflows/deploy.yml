@@ -1,9 +1,11 @@
-name: Deploy to VPS
+name: Deploy to Production and Development
 
 on:
   push:
     branches:
-      - main  # Trigger the workflow on push to the main branch
+      - main  # Deploys to production
+      - dev   # Deploys to development
+  workflow_dispatch:  # Allows manual triggering
 
 jobs:
   deploy:
@@ -17,30 +19,96 @@ jobs:
       uses: actions/setup-node@v4
       with:
         node-version: '20'
-
+        
     - name: Generate version
       id: version
       run: |
         TZ=Europe/Berlin date +'%Y.%m.%d.%H%M'
         echo "BUILD_VERSION=$(TZ=Europe/Berlin date +'%Y.%m.%d.%H%M')-${GITHUB_SHA::7}" >> $GITHUB_ENV
-
-    - name: Set up SSH
+    
+    # Determine environment and set variables
+    - name: Set environment variables
+      id: env_vars
+      run: |
+        if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+          echo "ENVIRONMENT=production" >> $GITHUB_ENV
+          echo "SSH_HOST=89.47.162.7" >> $GITHUB_ENV
+          echo "SSH_USER=ubuntu" >> $GITHUB_ENV
+          echo "DEPLOY_PATH=~/apps/hfss_live" >> $GITHUB_ENV
+          echo "SSH_METHOD=direct" >> $GITHUB_ENV
+        elif [[ "${{ github.ref }}" == "refs/heads/dev" ]]; then
+          echo "ENVIRONMENT=development" >> $GITHUB_ENV
+          echo "SSH_HOST=ssh.hikeandfly.app" >> $GITHUB_ENV
+          echo "SSH_USER=${{ secrets.DEV_SSH_USERNAME }}" >> $GITHUB_ENV
+          echo "DEPLOY_PATH=~/apps/hfss_dev" >> $GITHUB_ENV
+          echo "SSH_METHOD=cloudflare" >> $GITHUB_ENV
+        fi
+    
+    # Set up SSH for production (direct method)
+    - name: Set up SSH (Production)
+      if: env.SSH_METHOD == 'direct'
       uses: webfactory/ssh-agent@v0.5.4
       with:
         ssh-private-key: ${{ secrets.TIME4VPS }}
-
-    - name: Deploy to VPS
+    
+    # Set up SSH for dev (Cloudflare Access method)
+    - name: Set up Cloudflare Access and SSH (Development)
+      if: env.SSH_METHOD == 'cloudflare'
       run: |
-        ssh -o StrictHostKeyChecking=no ubuntu@89.47.162.7 << EOF
+        # Install cloudflared
+        wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+        sudo dpkg -i cloudflared-linux-amd64.deb
+        
+        # Set up service token credentials
+        mkdir -p ~/.cloudflared
+        echo "${{ secrets.CLOUDFLARE_ACCESS_CLIENT_ID }}" > ~/.cloudflared/client_id
+        echo "${{ secrets.CLOUDFLARE_ACCESS_CLIENT_SECRET }}" > ~/.cloudflared/client_secret
+        
+        # Set up SSH for Cloudflare Access
+        mkdir -p ~/.ssh
+        echo "${{ secrets.DEV_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+        ssh-keyscan github.com >> ~/.ssh/known_hosts
+        
+        # Create SSH config for Cloudflare Access
+        cat > ~/.ssh/config << 'EOF'
+        Host ${{ env.SSH_HOST }}
+          ProxyCommand cloudflared access ssh --hostname %h
+          User ${{ env.SSH_USER }}
+          IdentityFile ~/.ssh/id_rsa
+          StrictHostKeyChecking no
+        EOF
+    
+    # Deploy to production (direct SSH)
+    - name: Deploy to production
+      if: env.SSH_METHOD == 'direct'
+      run: |
+        ssh -o StrictHostKeyChecking=no ${{ env.SSH_USER }}@${{ env.SSH_HOST }} << EOF
           export HOSTNAME=\$(hostname)
           
-          cd ~/apps/hfss_live
+          cd ${{ env.DEPLOY_PATH }}
           git pull origin main
           
           docker-compose down
           docker-compose up -d --build
           
-          echo "Deployed successfully on host \$HOSTNAME"
+          echo "Deployed successfully to production on host \$HOSTNAME"
         EOF
       env:
         SSH_PRIVATE_KEY: ${{ secrets.TIME4VPS }}
+    
+    # Deploy to development (Cloudflare Access)
+    - name: Deploy to development
+      if: env.SSH_METHOD == 'cloudflare'
+      run: |
+        ssh ${{ env.SSH_HOST }} << EOF
+          export HOSTNAME=\$(hostname)
+          
+          cd ${{ env.DEPLOY_PATH }}
+          git pull origin dev
+          
+          docker-compose down
+          docker-compose up -d --build
+          
+          echo "Deployed successfully to development on host \$HOSTNAME"
+        EOF
