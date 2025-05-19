@@ -469,7 +469,7 @@ async def get_track_preview(
         # First get track statistics using PostGIS - fixed query to handle elevation gain/loss
         stats_query = f"""
         WITH track AS (
-            SELECT 
+            SELECT
                 tp.date_time,
                 tp.elevation,
                 tp.geom
@@ -523,8 +523,8 @@ async def get_track_preview(
             END as avg_speed_m_s,
             COUNT(*) as total_points
         FROM track_stats ts, elevation_changes ec, track
-        GROUP BY 
-            ts.distance, ts.start_time, ts.end_time, ts.min_elevation, 
+        GROUP BY
+            ts.distance, ts.start_time, ts.end_time, ts.min_elevation,
             ts.max_elevation, ts.elevation_range, ec.elevation_gain, ec.elevation_loss;
         """
 
@@ -536,27 +536,27 @@ async def get_track_preview(
         WITH original AS (
             SELECT {func_name}('{flight_uuid}'::uuid) AS geom
         )
-        SELECT 
+        SELECT
             ST_NPoints(geom) as original_points,
-            CASE 
+            CASE
                 -- If original has too many points, simplify to reduce size
                 WHEN ST_NPoints(geom) > {max_points}
                 THEN ST_AsEncodedPolyline(ST_SimplifyPreserveTopology(
-                    geom, 
+                    geom,
                     ST_Length(geom::geography) / (5000 * SQRT({max_points}))
                 ))
                 -- Otherwise use the original
-                ELSE ST_AsEncodedPolyline(geom) 
+                ELSE ST_AsEncodedPolyline(geom)
             END as encoded_polyline,
-            CASE 
+            CASE
                 -- If original has too many points, get count after simplification
                 WHEN ST_NPoints(geom) > {max_points}
                 THEN ST_NPoints(ST_SimplifyPreserveTopology(
-                    geom, 
+                    geom,
                     ST_Length(geom::geography) / (5000 * SQRT({max_points}))
                 ))
                 -- Otherwise use original count
-                ELSE ST_NPoints(geom) 
+                ELSE ST_NPoints(geom)
             END as simplified_points
         FROM original;
         """
@@ -574,30 +574,33 @@ async def get_track_preview(
         simplified_points = result[2]
 
         # Check if the encoded polyline is still too large (> 6000 chars to be safe)
-        # If so, further simplify by sampling points
+        # If so, further simplify using a more aggressive tolerance
         if len(encoded_polyline) > 6000:
-            # More aggressive simplification for very long tracks
-            simplify_factor = len(encoded_polyline) / 6000
-            query = f"""
+            simplify_tolerance_query = f"""
             WITH original AS (
                 SELECT {func_name}('{flight_uuid}'::uuid) AS geom
             )
-            SELECT 
+            SELECT
                 ST_AsEncodedPolyline(ST_SimplifyPreserveTopology(
-                    geom, 
+                    geom,
                     ST_Length(geom::geography) / (2000 * SQRT({max_points // 2}))
-                )) as encoded_polyline
+                )) as encoded_polyline,
+                ST_NPoints(ST_SimplifyPreserveTopology(
+                    geom,
+                    ST_Length(geom::geography) / (2000 * SQRT({max_points // 2}))
+                )) as simplified_points
             FROM original;
             """
-            result = db.execute(text(query)).fetchone()
-            if result and result[0]:
-                encoded_polyline = result[0]
+            simplified_result = db.execute(text(simplify_tolerance_query)).fetchone()
+            if simplified_result and simplified_result[0]:
+                encoded_polyline = simplified_result[0]
+                simplified_points = simplified_result[1]
 
             # If still too large, create a bounding box preview instead
             if len(encoded_polyline) > 6000:
                 # Get bounding box and center point
                 bbox_query = f"""
-                SELECT 
+                SELECT
                     ST_XMin(ST_Envelope(geom)) as min_lon,
                     ST_YMin(ST_Envelope(geom)) as min_lat,
                     ST_XMax(ST_Envelope(geom)) as max_lon,
@@ -609,7 +612,6 @@ async def get_track_preview(
                 bbox_result = db.execute(text(bbox_query)).fetchone()
 
                 if bbox_result:
-                    # Create a static map with the center point and appropriate zoom
                     center_lat = bbox_result[4]
                     center_lon = bbox_result[5]
 
@@ -626,7 +628,38 @@ async def get_track_preview(
                     return {
                         "flight_uuid": str(flight_uuid),
                         "preview_url": google_maps_preview_url,
-                        "note": "Track was too complex for detailed preview, showing center point only"
+                        "original_points": original_points,
+                        "simplified_points": 1, # Representing the marker
+                        "url_length": len(google_maps_preview_url),
+                        "note": "Track was too complex for detailed preview, showing center point only",
+                        "stats": {} if not stats_result else {
+                            "distance": {
+                                "meters": round(float(stats_result.distance), 2) if stats_result.distance else 0,
+                                "kilometers": round(float(stats_result.distance) / 1000, 2) if stats_result.distance else 0
+                            },
+                            "duration": {
+                                "seconds": int(stats_result.duration_seconds) if stats_result.duration_seconds else 0,
+                                "formatted": f"{divmod(int(stats_result.duration_seconds), 3600)[0]:02d}:{divmod(divmod(int(stats_result.duration_seconds), 3600)[1], 60)[0]:02d}:{divmod(divmod(int(stats_result.duration_seconds), 3600)[1], 60)[1]:02d}" if stats_result.duration_seconds else "00:00:00"
+                            },
+                            "speed": {
+                                "avg_m_s": round(float(stats_result.avg_speed_m_s), 2) if stats_result.avg_speed_m_s else 0,
+                                "avg_km_h": round(float(stats_result.avg_speed_m_s) * 3.6, 2) if stats_result.avg_speed_m_s else 0
+                            },
+                            "elevation": {
+                                "min": round(float(stats_result.min_elevation), 1) if stats_result.min_elevation is not None else None,
+                                "max": round(float(stats_result.max_elevation), 1) if stats_result.max_elevation is not None else None,
+                                "range": round(float(stats_result.elevation_range), 1) if stats_result.elevation_range is not None else None,
+                                "gain": round(float(stats_result.elevation_gain), 1) if stats_result.elevation_gain is not None else None,
+                                "loss": round(float(stats_result.elevation_loss), 1) if stats_result.elevation_loss is not None else None
+                            },
+                            "points": {
+                                "total": stats_result.total_points if hasattr(stats_result, 'total_points') else 0
+                            },
+                            "timestamps": {
+                                "start": stats_result.start_time.isoformat() if stats_result.start_time else None,
+                                "end": stats_result.end_time.isoformat() if stats_result.end_time else None
+                            }
+                        }
                     }
 
         # Create Google Static Maps URL with the encoded polyline
@@ -697,7 +730,6 @@ async def get_track_preview(
             status_code=500,
             detail=f"Failed to generate track preview: {str(e)}"
         )
-
 
 @router.get("/flight/{flight_uuid}/points", status_code=200)
 async def get_flight_points(
