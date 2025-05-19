@@ -2290,7 +2290,39 @@ async def get_daily_tracks_tile(
         # Convert to ratio for ST_TileEnvelope margin parameter
         margin_size = buffer_size / 4096.0
 
-        # SQL query using ST_AsMVT
+        # Define simplification tolerances based on zoom level
+        # These values represent meters at different zoom levels
+        simplify_tolerance = 0
+        min_distance = 0
+
+        if z <= 3:
+            simplify_tolerance = 1000  # ~1km at global zoom
+            min_distance = 200         # 200m min distance between points
+        elif z <= 5:
+            simplify_tolerance = 500   # ~500m at continent zoom
+            min_distance = 100         # 100m min distance
+        elif z <= 8:
+            simplify_tolerance = 200   # ~200m at regional zoom
+            min_distance = 50          # 50m min distance
+        elif z <= 10:
+            simplify_tolerance = 50    # ~50m at local zoom
+            min_distance = 20          # 20m min distance
+        elif z <= 13:
+            simplify_tolerance = 20    # ~20m at city zoom
+            min_distance = 10          # 10m min distance
+        elif z <= 15:
+            simplify_tolerance = 10    # ~10m at neighborhood zoom
+            min_distance = 5           # 5m min distance
+        elif z <= 17:
+            simplify_tolerance = 5     # ~5m at street level
+            min_distance = 2           # 2m min distance
+
+        # We'll use ST_Simplify for lower zoom levels (faster) and ST_SimplifyPreserveTopology
+        # for higher zoom levels (safer for detailed views)
+        use_preserve_topology = z >= 14
+        simplify_func = "ST_SimplifyPreserveTopology" if use_preserve_topology else "ST_Simplify"
+
+        # SQL query using ST_AsMVT with improved simplification
         # This generates MVT tiles with both points and lines for all flights
         query = f"""
         WITH 
@@ -2311,51 +2343,109 @@ async def get_daily_tracks_tile(
             FROM flights 
             WHERE id::text IN {flight_uuids_str}
         ),
-        -- First get ALL points for each pilot's day tracks (not limited to tile)
-        all_day_points AS (
-            SELECT
-                t.id,
-                t.geom,
-                t.elevation,
-                t.datetime,
-                t.lat,
-                t.lon,
-                t.flight_uuid,
+        -- Get all points with row numbers for sampling
+        numbered_points AS (
+            SELECT 
+                ROW_NUMBER() OVER (PARTITION BY t.flight_uuid ORDER BY t.datetime) as point_num,
+                t.*,
                 f.pilot_name,
                 f.pilot_id,
-                f.color_index
+                f.color_index % 10 as color_index,
+                -- Calculate the distance from previous point (for minimum distance filtering)
+                CASE 
+                    WHEN LAG(t.geom) OVER (PARTITION BY t.flight_uuid ORDER BY t.datetime) IS NULL THEN 999999
+                    ELSE ST_Distance(
+                        t.geom::geography, 
+                        LAG(t.geom) OVER (PARTITION BY t.flight_uuid ORDER BY t.datetime)::geography
+                    ) 
+                END as dist_from_prev
             FROM {table_name} t
             JOIN flights f ON t.flight_uuid = f.id
             WHERE t.flight_uuid::text IN {flight_uuids_str}
-            ORDER BY f.pilot_id, t.datetime
+            -- Apply basic coordinate validation
+            AND t.lat BETWEEN -90 AND 90 
+            AND t.lon BETWEEN -180 AND 180
+        ),
+        -- For each flight, find the first and last point to always include
+        special_points AS (
+            -- First points
+            (SELECT DISTINCT ON (flight_uuid) *
+             FROM numbered_points
+             ORDER BY flight_uuid, datetime)
+            UNION
+            -- Last points 
+            (SELECT DISTINCT ON (flight_uuid) *
+             FROM numbered_points
+             ORDER BY flight_uuid, datetime DESC)
+        ),
+        -- First apply minimum distance filtering (to eliminate stationary noise)
+        filtered_by_distance AS (
+            SELECT *
+            FROM numbered_points
+            WHERE 
+                -- Always include first point for each track
+                point_num = 1
+                -- Include points that meet the minimum distance
+                OR dist_from_prev >= {min_distance}
+                -- Always include special points (first/last)
+                OR EXISTS (
+                    SELECT 1 FROM special_points sp 
+                    WHERE sp.id = numbered_points.id
+                )
+        ),
+        -- Get all points by pilot (for creating full track lines)
+        all_pilot_points AS (
+            SELECT 
+                fp.id,
+                fp.geom,
+                fp.elevation,
+                fp.datetime,
+                fp.pilot_id,
+                fp.pilot_name,
+                fp.color_index
+            FROM filtered_by_distance fp
         ),
         -- Create complete linestrings per pilot (across ALL tiles)
         pilot_full_tracks AS (
             SELECT
                 adp.pilot_id,
                 adp.pilot_name,
-                adp.color_index % 10 as color_index,
-                ST_MakeLine(adp.geom ORDER BY adp.datetime) AS full_track_geom
-            FROM all_day_points adp
+                adp.color_index,
+                -- Apply simplification to the track - resolves the issue with tiny stationary variations
+                {simplify_func}(
+                    ST_MakeLine(adp.geom ORDER BY adp.datetime), 
+                    {simplify_tolerance}
+                ) AS full_track_geom
+            FROM all_pilot_points adp
             GROUP BY adp.pilot_id, adp.pilot_name, adp.color_index
         ),
-        -- Select only points within this tile (with margin) for the point layer
+        -- Filter just the points within this tile for the point layer
+        -- with a second tier of sampling based on zoom level
         filtered_points AS (
             SELECT 
                 t.id,
                 t.geom,
                 t.elevation,
                 t.datetime,
-                t.lat,
-                t.lon,
                 t.flight_uuid,
                 t.pilot_name,
                 t.pilot_id,
-                t.color_index
-            FROM all_day_points t
+                t.color_index,
+                t.point_num
+            FROM filtered_by_distance t
             WHERE ST_Transform(t.geom, 3857) && (SELECT geom FROM bounds_with_margin)
-            -- Add time-based sampling for lower zoom levels
-            {" AND extract(second from t.datetime)::integer % 30 = 0 " if z < 10 else ""}
+            -- Apply additional time-based sampling for lower zoom levels
+            AND (
+                {
+            "t.point_num % 10 = 0" if z < 10 else
+            "1=1"  # Include all distance-filtered points at higher zoom
+        }
+                -- Always include special points
+                OR EXISTS (
+                    SELECT 1 FROM special_points sp 
+                    WHERE sp.id = t.id
+                )
+            )
             ORDER BY t.pilot_id, t.datetime
         ),
         -- Create the points layer
@@ -2370,12 +2460,11 @@ async def get_daily_tracks_tile(
                 ) AS geom,
                 fp.elevation::float as elevation,
                 fp.datetime::text as datetime,
-                fp.lat::float as lat,
-                fp.lon::float as lon,
                 fp.flight_uuid::text as flight_uuid,
                 fp.pilot_name,
                 fp.pilot_id,
-                fp.color_index as color_index
+                fp.color_index as color_index,
+                fp.point_num as point_num
             FROM filtered_points fp
         ),
         -- Create the line layer by clipping the FULL track to the current tile
@@ -2424,1268 +2513,3 @@ async def get_daily_tracks_tile(
         logger.error(f"Error generating daily tracks vector tile: {str(e)}")
         raise HTTPException(
             status_code=500, detail=f"Failed to generate daily tracks tile: {str(e)}")
-
-
-@router.get("/track-preview/{flight_uuid}")
-async def get_track_preview(
-    flight_uuid: UUID,
-    width: int = Query(
-        600, description="Width of the preview image in pixels"),
-    height: int = Query(
-        400, description="Height of the preview image in pixels"),
-    color: str = Query(
-        "0x0000ff", description="Color of the track path in hex format"),
-    weight: int = Query(5, description="Weight/thickness of the track path"),
-    max_points: int = Query(
-        1000, description="Maximum number of points to use in the polyline"),
-    credentials: HTTPAuthorizationCredentials = Security(security),
-    db: Session = Depends(get_db)
-):
-    """
-    Generate a Google Static Maps preview URL for a flight track using the encoded polyline.
-    Also returns track statistics including distance, duration, speeds, and elevation data.
-    Includes location information for the start point of the flight.
-
-    Parameters:
-    - flight_uuid: UUID of the flight
-    - width: Width of the preview image (default: 600)
-    - height: Height of the preview image (default: 400)
-    - color: Color of the track path in hex format (default: 0x0000ff - blue)
-    - weight: Weight/thickness of the track path (default: 5)
-    - max_points: Maximum number of points to use (default: 1000, reduces URL length)
-    """
-    try:
-        # Verify token
-        token = credentials.credentials
-        try:
-            token_data = jwt.decode(
-                token,
-                settings.SECRET_KEY,
-                algorithms=["HS256"],
-                audience="api.hikeandfly.app",
-                issuer="hikeandfly.app",
-                verify=True
-            )
-
-            if not token_data.get("sub", "").startswith("contest:"):
-                raise HTTPException(
-                    status_code=403,
-                    detail="Invalid token subject - must be contest-specific"
-                )
-
-        except jwt.ExpiredSignatureError:
-            raise HTTPException(status_code=401, detail="Token expired")
-        except PyJWTError as e:
-            raise HTTPException(
-                status_code=401, detail=f"Invalid token: {str(e)}")
-
-        # Get flight from database
-        flight = db.query(Flight).filter(
-            Flight.id == flight_uuid
-        ).first()
-
-        if not flight:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Flight not found with UUID {flight_uuid}"
-            )
-
-        # Get the encoded polyline for the flight with simplification
-        if flight.source == 'live':
-            func_name = 'generate_live_track_linestring'
-            table_name = 'live_track_points'
-        else:  # source == 'upload'
-            func_name = 'generate_uploaded_track_linestring'
-            table_name = 'uploaded_track_points'
-
-        # First get track statistics using PostGIS - fixed query to handle elevation gain/loss
-        stats_query = f"""
-        WITH track AS (
-            SELECT 
-                tp.datetime,
-                tp.elevation,
-                tp.geom
-            FROM {table_name} tp
-            WHERE tp.flight_uuid = '{flight_uuid}'
-            ORDER BY tp.datetime
-        ),
-        track_stats AS (
-            SELECT
-                -- Distance in meters
-                ST_Length(ST_MakeLine(geom)::geography) as distance,
-                -- Time values
-                MIN(datetime) as start_time,
-                MAX(datetime) as end_time,
-                -- Elevation values
-                MIN(elevation) as min_elevation,
-                MAX(elevation) as max_elevation,
-                MAX(elevation) - MIN(elevation) as elevation_range
-            FROM track
-        ),
-        -- Handle elevation gain/loss without using window functions inside aggregates
-        track_with_prev AS (
-            SELECT
-                datetime,
-                elevation,
-                LAG(elevation) OVER (ORDER BY datetime) as prev_elevation
-            FROM track
-        ),
-        elevation_changes AS (
-            SELECT
-                SUM(CASE WHEN (elevation - prev_elevation) > 1 THEN (elevation - prev_elevation) ELSE 0 END) as elevation_gain,
-                SUM(CASE WHEN (elevation - prev_elevation) < -1 THEN ABS(elevation - prev_elevation) ELSE 0 END) as elevation_loss
-            FROM track_with_prev
-            WHERE prev_elevation IS NOT NULL
-        )
-        SELECT
-            ts.distance,
-            ts.start_time,
-            ts.end_time,
-            EXTRACT(EPOCH FROM (ts.end_time - ts.start_time)) as duration_seconds,
-            ts.min_elevation,
-            ts.max_elevation,
-            ts.elevation_range,
-            ec.elevation_gain,
-            ec.elevation_loss,
-            -- Speed calculations
-            CASE
-                WHEN EXTRACT(EPOCH FROM (ts.end_time - ts.start_time)) > 0
-                THEN ts.distance / EXTRACT(EPOCH FROM (ts.end_time - ts.start_time))
-                ELSE 0
-            END as avg_speed_m_s,
-            COUNT(*) as total_points
-        FROM track_stats ts, elevation_changes ec, track
-        GROUP BY 
-            ts.distance, ts.start_time, ts.end_time, ts.min_elevation, 
-            ts.max_elevation, ts.elevation_range, ec.elevation_gain, ec.elevation_loss;
-        """
-
-        stats_result = db.execute(text(stats_query)).fetchone()
-
-        # Use ST_SimplifyPreserveTopology to reduce the number of points
-        # This keeps the general shape but reduces the point count
-        query = f"""
-        WITH original AS (
-            SELECT {func_name}('{flight_uuid}'::uuid) AS geom
-        )
-        SELECT 
-            ST_NPoints(geom) as original_points,
-            CASE 
-                -- If original has too many points, simplify to reduce size
-                WHEN ST_NPoints(geom) > {max_points}
-                THEN ST_AsEncodedPolyline(ST_SimplifyPreserveTopology(
-                    geom, 
-                    ST_Length(geom::geography) / (5000 * SQRT({max_points}))
-                ))
-                -- Otherwise use the original
-                ELSE ST_AsEncodedPolyline(geom) 
-            END as encoded_polyline,
-            CASE 
-                -- If original has too many points, get count after simplification
-                WHEN ST_NPoints(geom) > {max_points}
-                THEN ST_NPoints(ST_SimplifyPreserveTopology(
-                    geom, 
-                    ST_Length(geom::geography) / (5000 * SQRT({max_points}))
-                ))
-                -- Otherwise use original count
-                ELSE ST_NPoints(geom) 
-            END as simplified_points
-        FROM original;
-        """
-
-        result = db.execute(text(query)).fetchone()
-
-        if not result or not result[1]:
-            return {
-                "status": "error",
-                "detail": "No track data available for this flight"
-            }
-
-        encoded_polyline = result[1]
-        original_points = result[0]
-        simplified_points = result[2]
-
-        # Check if the encoded polyline is still too large (> 6000 chars to be safe)
-        # If so, further simplify by sampling points
-        if len(encoded_polyline) > 6000:
-            # More aggressive simplification for very long tracks
-            simplify_factor = len(encoded_polyline) / 6000
-            query = f"""
-            WITH original AS (
-                SELECT {func_name}('{flight_uuid}'::uuid) AS geom
-            )
-            SELECT 
-                ST_AsEncodedPolyline(ST_SimplifyPreserveTopology(
-                    geom, 
-                    ST_Length(geom::geography) / (2000 * SQRT({max_points // 2}))
-                )) as encoded_polyline
-            FROM original;
-            """
-            result = db.execute(text(query)).fetchone()
-            if result and result[0]:
-                encoded_polyline = result[0]
-
-            # If still too large, create a bounding box preview instead
-            if len(encoded_polyline) > 6000:
-                # Get bounding box and center point
-                bbox_query = f"""
-                SELECT 
-                    ST_XMin(ST_Envelope(geom)) as min_lon,
-                    ST_YMin(ST_Envelope(geom)) as min_lat,
-                    ST_XMax(ST_Envelope(geom)) as max_lon,
-                    ST_YMax(ST_Envelope(geom)) as max_lat,
-                    ST_X(ST_Centroid(geom)) as center_lon,
-                    ST_Y(ST_Centroid(geom)) as center_lat
-                FROM (SELECT {func_name}('{flight_uuid}'::uuid) AS geom) AS track;
-                """
-                bbox_result = db.execute(text(bbox_query)).fetchone()
-
-                if bbox_result:
-                    # Create a static map with the center point and appropriate zoom
-                    center_lat = bbox_result[4]
-                    center_lon = bbox_result[5]
-
-                    # Create Google Static Maps URL with center point and appropriate zoom
-                    google_maps_preview_url = (
-                        f"https://maps.googleapis.com/maps/api/staticmap?"
-                        f"size={width}x{height}&center={center_lat},{center_lon}"
-                        f"&zoom=11"  # Default zoom level that shows reasonable area
-                        f"&markers=color:red|{center_lat},{center_lon}"
-                        f"&sensor=false"
-                        f"&key={settings.GOOGLE_MAPS_API_KEY}"
-                    )
-
-                    return {
-                        "flight_id": flight.flight_id,
-                        "flight_uuid": str(flight.id),
-                        "preview_url": google_maps_preview_url,
-                        "source": flight.source,
-                        "note": "Track was too complex for detailed preview, showing center point only"
-                    }
-
-        # Create Google Static Maps URL with the encoded polyline
-        google_maps_preview_url = (
-            f"https://maps.googleapis.com/maps/api/staticmap?"
-            f"size={width}x{height}&path=color:{color}|weight:{weight}|enc:{encoded_polyline}"
-            f"&sensor=false"
-            f"&key={settings.GOOGLE_MAPS_API_KEY}"
-        )
-
-        # Get start location information using Google Geocoding API
-        start_location = {
-            "lat": float(flight.first_fix['lat']),
-            "lon": float(flight.first_fix['lon']),
-            "formatted_address": None,
-            "locality": None,
-            "administrative_area": None,
-            "country": None
-        }
-
-        try:
-            async with ClientSession() as session:
-                url = f"https://maps.googleapis.com/maps/api/geocode/json?latlng={start_location['lat']},{start_location['lon']}&key={settings.GOOGLE_MAPS_API_KEY}"
-                async with session.get(url) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        if data['results']:
-                            # Get the most relevant result (first one)
-                            result = data['results'][0]
-                            start_location["formatted_address"] = result['formatted_address']
-
-                            # Extract specific address components
-                            for component in result['address_components']:
-                                if 'locality' in component['types']:
-                                    start_location["locality"] = component['long_name']
-                                elif 'administrative_area_level_1' in component['types']:
-                                    start_location["administrative_area"] = component['long_name']
-                                elif 'country' in component['types']:
-                                    start_location["country"] = component['long_name']
-        except Exception as e:
-            logger.error(f"Error getting location data: {str(e)}")
-            # Continue even if geocoding fails
-
-        # Format flight statistics
-        stats = {}
-        if stats_result:
-            hours, remainder = divmod(int(stats_result.duration_seconds), 3600)
-            minutes, seconds = divmod(remainder, 60)
-
-            # Convert meters to kilometers
-            distance_km = float(stats_result.distance) / \
-                1000 if stats_result.distance else 0
-
-            # Convert m/s to km/h
-            avg_speed_kmh = float(stats_result.avg_speed_m_s) * \
-                3.6 if stats_result.avg_speed_m_s else 0
-
-            stats = {
-                "distance": {
-                    "meters": round(float(stats_result.distance), 2) if stats_result.distance else 0,
-                    "kilometers": round(distance_km, 2)
-                },
-                "duration": {
-                    "seconds": int(stats_result.duration_seconds) if stats_result.duration_seconds else 0,
-                    "formatted": f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-                },
-                "speed": {
-                    "avg_m_s": round(float(stats_result.avg_speed_m_s), 2) if stats_result.avg_speed_m_s else 0,
-                    "avg_km_h": round(avg_speed_kmh, 2)
-                },
-                "elevation": {
-                    "min": round(float(stats_result.min_elevation), 1) if stats_result.min_elevation is not None else None,
-                    "max": round(float(stats_result.max_elevation), 1) if stats_result.max_elevation is not None else None,
-                    "range": round(float(stats_result.elevation_range), 1) if stats_result.elevation_range is not None else None,
-                    "gain": round(float(stats_result.elevation_gain), 1) if stats_result.elevation_gain is not None else None,
-                    "loss": round(float(stats_result.elevation_loss), 1) if stats_result.elevation_loss is not None else None
-                },
-                "points": {
-                    "total": stats_result.total_points if hasattr(stats_result, 'total_points') else 0
-                },
-                "timestamps": {
-                    "start": stats_result.start_time.isoformat() if stats_result.start_time else None,
-                    "end": stats_result.end_time.isoformat() if stats_result.end_time else None
-                }
-            }
-
-        return {
-            "flight_id": flight.flight_id,
-            "flight_uuid": str(flight.id),
-            "preview_url": google_maps_preview_url,
-            "source": flight.source,
-            "original_points": original_points,
-            "simplified_points": simplified_points,
-            "url_length": len(google_maps_preview_url),
-            "start_location": start_location,  # Added start location information
-            "stats": stats
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error generating track preview: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to generate track preview: {str(e)}"
-        )
-
-
-@router.get("/track-preview/{flight_id}")
-async def get_track_preview_id(
-    flight_id: str,
-    width: int = Query(
-        600, description="Width of the preview image in pixels"),
-    height: int = Query(
-        400, description="Height of the preview image in pixels"),
-    color: str = Query(
-        "0x0000ff", description="Color of the track path in hex format"),
-    weight: int = Query(5, description="Weight/thickness of the track path"),
-    max_points: int = Query(
-        1000, description="Maximum number of points to use in the polyline"),
-    token_data: Dict = Depends(verify_tracking_token),
-    source: str = Query(..., regex="^(live|upload)$",
-                        description="Either 'live' or 'upload'"),
-    db: Session = Depends(get_db)
-):
-    """
-    Generate a Google Static Maps preview URL for a flight track using the encoded polyline.
-
-    Parameters:
-    - flight_uuid: UUID of the flight
-    - width: Width of the preview image (default: 600)
-    - height: Height of the preview image (default: 400)
-    - color: Color of the track path in hex format (default: 0x0000ff - blue)
-    - weight: Weight/thickness of the track path (default: 5)
-    - max_points: Maximum number of points to use (default: 1000, reduces URL length)
-    """
-    try:
-
-        # Get flight from database
-        flight = db.query(Flight).filter(
-            Flight.flight_id == flight_id,
-            Flight.source == source
-        ).first()
-
-        flight_uuid = str(flight.id) if flight else None
-        if not flight_uuid:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Flight not found with ID {flight_id}"
-            )
-
-        if not flight:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Flight not found with UUID {flight_uuid}"
-            )
-
-        # Get the encoded polyline for the flight with simplification
-        if flight.source == 'live':
-            func_name = 'generate_live_track_linestring'
-        else:  # source == 'upload'
-            func_name = 'generate_uploaded_track_linestring'
-
-        # Use ST_SimplifyPreserveTopology to reduce the number of points
-        # This keeps the general shape but reduces the point count
-        query = f"""
-        WITH original AS (
-            SELECT {func_name}('{flight_uuid}'::uuid) AS geom
-        )
-        SELECT 
-            ST_NPoints(geom) as original_points,
-            CASE 
-                -- If original has too many points, simplify to reduce size
-                WHEN ST_NPoints(geom) > {max_points}
-                THEN ST_AsEncodedPolyline(ST_SimplifyPreserveTopology(
-                    geom, 
-                    ST_Length(geom::geography) / (5000 * SQRT({max_points}))
-                ))
-                -- Otherwise use the original
-                ELSE ST_AsEncodedPolyline(geom) 
-            END as encoded_polyline,
-            CASE 
-                -- If original has too many points, get count after simplification
-                WHEN ST_NPoints(geom) > {max_points}
-                THEN ST_NPoints(ST_SimplifyPreserveTopology(
-                    geom, 
-                    ST_Length(geom::geography) / (5000 * SQRT({max_points}))
-                ))
-                -- Otherwise use original count
-                ELSE ST_NPoints(geom) 
-            END as simplified_points
-        FROM original;
-        """
-
-        result = db.execute(text(query)).fetchone()
-
-        if not result or not result[1]:
-            return {
-                "status": "error",
-                "detail": "No track data available for this flight"
-            }
-
-        encoded_polyline = result[1]
-        original_points = result[0]
-        simplified_points = result[2]
-
-        # Check if the encoded polyline is still too large (> 6000 chars to be safe)
-        # If so, further simplify by sampling points
-        if len(encoded_polyline) > 6000:
-            # More aggressive simplification for very long tracks
-            simplify_factor = len(encoded_polyline) / 6000
-            query = f"""
-            WITH original AS (
-                SELECT {func_name}('{flight_uuid}'::uuid) AS geom
-            )
-            SELECT 
-                ST_AsEncodedPolyline(ST_SimplifyPreserveTopology(
-                    geom, 
-                    ST_Length(geom::geography) / (2000 * SQRT({max_points // 2}))
-                )) as encoded_polyline
-            FROM original;
-            """
-            result = db.execute(text(query)).fetchone()
-            if result and result[0]:
-                encoded_polyline = result[0]
-
-            # If still too large, create a bounding box preview instead
-            if len(encoded_polyline) > 6000:
-                # Get bounding box and center point
-                bbox_query = f"""
-                SELECT 
-                    ST_XMin(ST_Envelope(geom)) as min_lon,
-                    ST_YMin(ST_Envelope(geom)) as min_lat,
-                    ST_XMax(ST_Envelope(geom)) as max_lon,
-                    ST_YMax(ST_Envelope(geom)) as max_lat,
-                    ST_X(ST_Centroid(geom)) as center_lon,
-                    ST_Y(ST_Centroid(geom)) as center_lat
-                FROM (SELECT {func_name}('{flight_uuid}'::uuid) AS geom) AS track;
-                """
-                bbox_result = db.execute(text(bbox_query)).fetchone()
-
-                if bbox_result:
-                    # Create a static map with the center point and appropriate zoom
-                    center_lat = bbox_result[4]
-                    center_lon = bbox_result[5]
-
-                    # Create Google Static Maps URL with center point and appropriate zoom
-                    google_maps_preview_url = (
-                        f"https://maps.googleapis.com/maps/api/staticmap?"
-                        f"size={width}x{height}&center={center_lat},{center_lon}"
-                        f"&zoom=11"  # Default zoom level that shows reasonable area
-                        f"&markers=color:red|{center_lat},{center_lon}"
-                        f"&sensor=false"
-                        f"&key={settings.GOOGLE_MAPS_API_KEY}"
-                    )
-
-                    return {
-                        "flight_id": flight.flight_id,
-                        "flight_uuid": str(flight.id),
-                        "preview_url": google_maps_preview_url,
-                        "source": flight.source,
-                        "note": "Track was too complex for detailed preview, showing center point only"
-                    }
-
-        # Create Google Static Maps URL with the encoded polyline
-        google_maps_preview_url = (
-            f"https://maps.googleapis.com/maps/api/staticmap?"
-            f"size={width}x{height}&path=color:{color}|weight:{weight}|enc:{encoded_polyline}"
-            f"&sensor=false"
-            f"&key={settings.GOOGLE_MAPS_API_KEY}"
-        )
-
-        return {
-            "flight_id": flight.flight_id,
-            "flight_uuid": str(flight.id),
-            "preview_url": google_maps_preview_url,
-            "source": flight.source,
-            "original_points": original_points,
-            "simplified_points": simplified_points,
-            "url_length": len(google_maps_preview_url)
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error generating track preview: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to generate track preview: {str(e)}"
-        )
-
-
-@router.get("/track-line/{flight_id}")
-async def get_track_linestring(
-    flight_id: str,
-    source: str = Query(..., regex="^(live|upload)$",
-                        description="Either 'live' or 'upload'"),
-    simplify: bool = Query(
-        False, description="Whether to simplify the track geometry. If true, provides sampled coordinates for better performance."),
-    credentials: HTTPAuthorizationCredentials = Security(security),
-    db: Session = Depends(get_db)
-):
-    """
-    Return the complete flight track as a GeoJSON LineString.
-    Uses the PostGIS functions to generate the geometry.
-
-    Parameters:
-    - flight_uuid: UUID of the flight
-    - source: Either 'live' or 'upload' to specify which track to retrieve
-    - simplify: Optional parameter to simplify the line geometry (useful for large tracks)
-    """
-    try:
-        # Verify token
-        token = credentials.credentials
-        try:
-            token_data = jwt.decode(
-                token,
-                settings.SECRET_KEY,
-                algorithms=["HS256"],
-                audience="api.hikeandfly.app",
-                issuer="hikeandfly.app",
-                verify=True
-            )
-
-            if not token_data.get("sub", "").startswith("contest:"):
-                raise HTTPException(
-                    status_code=403,
-                    detail="Invalid token subject - must be contest-specific"
-                )
-
-        except jwt.ExpiredSignatureError:
-            raise HTTPException(status_code=401, detail="Token expired")
-        except PyJWTError as e:
-            raise HTTPException(
-                status_code=401, detail=f"Invalid token: {str(e)}")
-
-        # Check if flight exists
-        flight = db.query(Flight).filter(
-            Flight.flight_id == flight_id,
-            Flight.source == source
-        ).first()
-
-        if not flight:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Flight not found with ID {flight_id}"
-            )
-
-        flight_uuid = str(flight.id)
-
-        # Build query to get LineString
-        if flight.source == 'live':
-            func_name = 'generate_live_track_linestring'
-        else:  # source == 'upload'
-            func_name = 'generate_uploaded_track_linestring'
-
-        # Handle simplification - treat simplify as a boolean flag
-        if simplify:
-            # Use a default moderate value for simplification
-            simplify_value = 0.0001
-
-            # Use a simpler, more reliable approach with ST_SimplifyPreserveTopology
-            query = f"""
-            WITH original AS (
-                SELECT {func_name}('{flight_uuid}'::uuid) AS geom
-            )
-            SELECT 
-                CASE 
-                    -- Check if the simplified geometry has enough points to be useful
-                    WHEN ST_NPoints(ST_SimplifyPreserveTopology(geom, {simplify_value})) >= 10 
-                        THEN ST_AsGeoJSON(ST_SimplifyPreserveTopology(geom, {simplify_value}))
-                    -- Otherwise return the original geometry
-                    ELSE ST_AsGeoJSON(geom) 
-                END as geojson,
-                CASE 
-                    WHEN ST_NPoints(ST_SimplifyPreserveTopology(geom, {simplify_value})) >= 10 
-                        THEN ST_AsEncodedPolyline(ST_SimplifyPreserveTopology(geom, {simplify_value}))
-                    ELSE ST_AsEncodedPolyline(geom) 
-                END as encoded_polyline
-            FROM original;
-            """
-        else:
-            # No simplification, return all points
-            query = f"""
-            SELECT 
-                ST_AsGeoJSON({func_name}('{flight_uuid}'::uuid)) as geojson,
-                ST_AsEncodedPolyline({func_name}('{flight_uuid}'::uuid)) as encoded_polyline;
-            """
-
-        # Execute query
-        result = db.execute(text(query)).fetchone()
-
-        if not result or not result[0]:
-            # If no tracking points, return empty LineString
-            return {
-                "type": "Feature",
-                "geometry": {
-                    "type": "LineString",
-                    "coordinates": []
-                },
-                "properties": {
-                    "flight_id": flight.flight_id,
-                    "flight_uuid": str(flight.id),
-                    "pilot_name": flight.pilot_name,
-                    "source": flight.source,
-                    "total_points": flight.total_points,
-                    "empty": True,
-                    "encoded_polyline": ""
-                }
-            }
-
-        # Build GeoJSON response
-        linestring_geojson = result[0]
-        encoded_polyline = result[1] if result[1] else ""
-
-        # Parse the GeoJSON
-        geometry = json.loads(linestring_geojson)
-
-        # Handle sampling of coordinates for response when simplify=true
-        sampled_coords = []
-        if geometry and geometry.get('coordinates') and len(geometry['coordinates']) > 0:
-            coords = geometry['coordinates']
-
-            # Sample coordinates if needed for response
-            if len(coords) > 50 and simplify:
-                # Always include first and last points
-                first_point = coords[0]
-                last_point = coords[-1]
-
-                # Sample middle points - take about 48 points evenly distributed
-                sample_step = len(coords) // 48
-                sampled_coords = [coords[i]
-                                  for i in range(0, len(coords), sample_step)]
-
-                # Ensure we include the last point if it wasn't included in sampling
-                if sampled_coords[-1] != last_point:
-                    sampled_coords.append(last_point)
-            else:
-                sampled_coords = coords
-
-        # Use sampled coordinates for the response geometry if simplify=true
-        response_geometry = None
-        if simplify and len(sampled_coords) > 0:
-            response_geometry = {
-                "type": "LineString",
-                "coordinates": sampled_coords
-            }
-        else:
-            response_geometry = json.loads(linestring_geojson)
-
-        # Return formatted response
-        return {
-            "type": "Feature",
-            "geometry": response_geometry,
-            "properties": {
-                "flight_id": flight.flight_id,
-                "flight_uuid": str(flight.id),
-                "pilot_name": flight.pilot_name,
-                "pilot_id": flight.pilot_id,
-                "source": flight.source,
-                "total_points": flight.total_points,
-                "first_fix": flight.first_fix,
-                "last_fix": flight.last_fix,
-                "simplified": simplify,
-                "sampled": simplify and len(sampled_coords) > 0,
-                "encoded_polyline": encoded_polyline
-            }
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error generating track linestring: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to generate track linestring: {str(e)}"
-        )
-
-
-@router.get("/track-line-uuid/{flight_uuid}")
-async def get_track_linestring_uuid(
-    flight_uuid: UUID,
-    simplify: bool = Query(
-        False, description="Whether to simplify the track geometry. If true, provides sampled coordinates for better performance."),
-    credentials: HTTPAuthorizationCredentials = Security(security),
-    db: Session = Depends(get_db)
-):
-    """
-    Return the complete flight track as a GeoJSON LineString.
-    Uses the PostGIS functions to generate the geometry.
-
-    Parameters:
-    - flight_uuid: UUID of the flight
-    - simplify: Optional parameter to simplify the line geometry (useful for large tracks)
-    """
-    try:
-        # Verify token
-        token = credentials.credentials
-        try:
-            token_data = jwt.decode(
-                token,
-                settings.SECRET_KEY,
-                algorithms=["HS256"],
-                audience="api.hikeandfly.app",
-                issuer="hikeandfly.app",
-                verify=True
-            )
-
-            if not token_data.get("sub", "").startswith("contest:"):
-                raise HTTPException(
-                    status_code=403,
-                    detail="Invalid token subject - must be contest-specific"
-                )
-
-        except jwt.ExpiredSignatureError:
-            raise HTTPException(status_code=401, detail="Token expired")
-        except PyJWTError as e:
-            raise HTTPException(
-                status_code=401, detail=f"Invalid token: {str(e)}")
-
-        # Check if flight exists
-        flight = db.query(Flight).filter(
-            Flight.id == flight_uuid
-        ).first()
-
-        if not flight:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Flight not found with UUID {flight_uuid}"
-            )
-
-        # Build query to get LineString
-        if flight.source == 'live':
-            func_name = 'generate_live_track_linestring'
-        else:  # source == 'upload'
-            func_name = 'generate_uploaded_track_linestring'
-
-        # Handle simplification
-        if simplify:
-            # Use a default moderate value for simplification
-            simplify_value = 0.0001
-
-            query = f"""
-            WITH original AS (
-                SELECT {func_name}('{flight_uuid}'::uuid) AS geom
-            )
-            SELECT 
-                CASE 
-                    -- Check if the simplified geometry has enough points to be useful
-                    WHEN ST_NPoints(ST_SimplifyPreserveTopology(geom, {simplify_value})) >= 10 
-                        THEN ST_AsGeoJSON(ST_SimplifyPreserveTopology(geom, {simplify_value}))
-                    -- Otherwise return the original geometry
-                    ELSE ST_AsGeoJSON(geom) 
-                END as geojson,
-                CASE 
-                    WHEN ST_NPoints(ST_SimplifyPreserveTopology(geom, {simplify_value})) >= 10 
-                        THEN ST_AsEncodedPolyline(ST_SimplifyPreserveTopology(geom, {simplify_value}))
-                    ELSE ST_AsEncodedPolyline(geom) 
-                END as encoded_polyline
-            FROM original;
-            """
-        else:
-            # No simplification, return all points
-            query = f"""
-            SELECT 
-                ST_AsGeoJSON({func_name}('{flight_uuid}'::uuid)) as geojson,
-                ST_AsEncodedPolyline({func_name}('{flight_uuid}'::uuid)) as encoded_polyline;
-            """
-
-        # Execute query
-        result = db.execute(text(query)).fetchone()
-
-        if not result or not result[0]:
-            # If no tracking points, return empty LineString
-            return {
-                "type": "Feature",
-                "geometry": {
-                    "type": "LineString",
-                    "coordinates": []
-                },
-                "properties": {
-                    "flight_id": flight.flight_id,
-                    "flight_uuid": str(flight.id),
-                    "pilot_name": flight.pilot_name,
-                    "source": flight.source,
-                    "total_points": flight.total_points,
-                    "empty": True,
-                    "encoded_polyline": ""
-                }
-            }
-
-        # Build GeoJSON response
-        linestring_geojson = result[0]
-        encoded_polyline = result[1] if result[1] else ""
-
-        # Parse the GeoJSON
-        geometry = json.loads(linestring_geojson)
-
-        # Handle sampling of coordinates for response when simplify=true
-        sampled_coords = []
-        if geometry and geometry.get('coordinates') and len(geometry['coordinates']) > 0:
-            coords = geometry['coordinates']
-
-            # Sample coordinates if needed for response
-            if len(coords) > 50 and simplify:
-                # Always include first and last points
-                first_point = coords[0]
-                last_point = coords[-1]
-
-                # Sample middle points - take about 48 points evenly distributed
-                sample_step = len(coords) // 48
-                sampled_coords = [coords[i]
-                                  for i in range(0, len(coords), sample_step)]
-
-                # Ensure we include the last point if it wasn't included in sampling
-                if sampled_coords[-1] != last_point:
-                    sampled_coords.append(last_point)
-            else:
-                sampled_coords = coords
-
-        # Use sampled coordinates for the response geometry if simplify=true
-        response_geometry = None
-        if simplify and len(sampled_coords) > 0:
-            response_geometry = {
-                "type": "LineString",
-                "coordinates": sampled_coords
-            }
-        else:
-            response_geometry = json.loads(linestring_geojson)
-
-        # Return formatted response
-        return {
-            "type": "Feature",
-            "geometry": response_geometry,
-            "properties": {
-                "flight_id": flight.flight_id,
-                "flight_uuid": str(flight.id),
-                "pilot_name": flight.pilot_name,
-                "pilot_id": flight.pilot_id,
-                "source": flight.source,
-                "total_points": flight.total_points,
-                "first_fix": flight.first_fix,
-                "last_fix": flight.last_fix,
-                "simplified": simplify,
-                "sampled": simplify and len(sampled_coords) > 0,
-                "encoded_polyline": encoded_polyline
-            }
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error generating track linestring: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to generate track linestring: {str(e)}"
-        )
-
-
-@router.get("/flight-state/{flight_uuid}", response_model=Dict)
-async def get_flight_state_endpoint(
-    flight_uuid: str,
-    history: bool = Query(
-        False, description="Include state history in response"),
-    history_points: int = Query(
-        10, description="Number of history points to include if history=True"),
-    credentials: HTTPAuthorizationCredentials = Security(security),
-    source: str = Query(..., regex="^(live|upload)$"),
-    db: Session = Depends(get_db)
-):
-    """
-    Get the current state of a flight (flying, walking, stationary, etc.)
-    Requires JWT token in Authorization header (Bearer token).
-    """
-    try:
-        # Get token from Authorization header and verify it
-        token = credentials.credentials
-        try:
-            token_data = jwt.decode(
-                token,
-                settings.SECRET_KEY,
-                algorithms=["HS256"],
-                audience="api.hikeandfly.app",
-                issuer="hikeandfly.app",
-                verify=True
-            )
-
-            if not token_data.get("sub", "").startswith("contest:"):
-                raise HTTPException(
-                    status_code=403,
-                    detail="Invalid token subject - must be contest-specific"
-                )
-
-        except jwt.ExpiredSignatureError:
-            raise HTTPException(
-                status_code=401,
-                detail="Token has expired"
-            )
-        except PyJWTError as e:
-            raise HTTPException(
-                status_code=401,
-                detail=f"Invalid token: {str(e)}"
-            )
-
-        # Get flight from database
-        flight = db.query(Flight).filter(Flight.flight_id ==
-                                         flight_uuid and Flight.source == source).first()
-
-        if not flight:
-            raise HTTPException(
-                status_code=404,
-                detail="Flight not found"
-            )
-
-        # Format the response
-        response = {
-            "flight_uuid": str(flight_uuid),
-            "pilot_id": flight.pilot_id,
-            "pilot_name": flight.pilot_name,
-            "state": flight.flight_state.get('state', 'unknown') if flight.flight_state else 'unknown',
-            "state_info": flight.flight_state,
-            "last_updated": flight.flight_state.get('last_updated', None),
-            "source": flight.source
-        }
-
-        # If history is requested, include state changes over time
-        if history:
-            # Get more track points to analyze state changes
-            track_points = db.query(LiveTrackPoint).filter(
-                LiveTrackPoint.flight_uuid == flight_uuid
-            ).order_by(LiveTrackPoint.datetime.desc()).limit(history_points * 5).all()
-
-            if track_points:
-                # Format points for processing
-                formatted_points = [{
-                    'lat': float(point.lat),
-                    'lon': float(point.lon),
-                    'elevation': float(point.elevation) if point.elevation is not None else None,
-                    'datetime': point.datetime
-                } for point in track_points]
-
-                # Calculate state history
-                history_data = []
-                window_size = min(5, len(formatted_points))
-
-                for i in range(0, len(formatted_points), window_size):
-                    window = formatted_points[i:i + window_size]
-                    if window:
-                        window_state, window_info = detect_flight_state(window)
-                        history_data.append({
-                            "datetime": window[-1]['datetime'].isoformat(),
-                            "state": window_state,
-                            "avg_speed": window_info.get('avg_speed'),
-                            "altitude_change": window_info.get('altitude_change')
-                        })
-
-                response["state_history"] = history_data
-
-        return response
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting flight state: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to get flight state: {str(e)}"
-        )
-
-
-async def update_flight_state(flight_uuid, db, source=None):
-    """
-    Update the flight state for a specific flight and broadcast it to WebSocket clients
-    This is designed to be called as an async background task
-
-    Args:
-        flight_uuid: UUID of the flight
-        db: Database session
-        source: Source of the flight data ('live' or 'upload') - if None, will be determined from the flight record
-    """
-    try:
-        # Import here to avoid circular imports
-        from api.flight_state import update_flight_state_in_db
-
-        # Create a new session to avoid conflicts
-        from database.db_conf import Session
-        db_session = Session()
-
-        try:
-            # If source wasn't provided, determine it from the flight record
-            if source is None:
-                flight_info = db_session.query(Flight).filter(
-                    Flight.id == flight_uuid).first()
-                if flight_info:
-                    source = flight_info.source
-
-            # Update the flight state with the appropriate source
-            state, state_info = update_flight_state_in_db(
-                flight_uuid, db_session, source=source)
-
-            # No need to broadcast separately as flight state will be included in regular track updates
-
-        finally:
-            # Always close the session
-            db_session.close()
-    except Exception as e:
-        # Log but don't raise - this is a background task
-        logger.error(f"Error updating flight state: {str(e)}")
-
-
-@router.get("/flight/bounds/{flight_uuid}")
-async def get_flight_bounds(
-    flight_uuid: UUID,
-    credentials: HTTPAuthorizationCredentials = Security(security),
-    db: Session = Depends(get_db)
-):
-    """
-    Calculate the bounding box for a flight track.
-    Returns the min/max coordinates that contain the entire flight path.
-
-    Parameters:
-    - flight_uuid: UUID of the flight
-    """
-    try:
-        # Verify token
-        token = credentials.credentials
-        try:
-            token_data = jwt.decode(
-                token,
-                settings.SECRET_KEY,
-                algorithms=["HS256"],
-                audience="api.hikeandfly.app",
-                issuer="hikeandfly.app",
-                verify=True
-            )
-
-            if not token_data.get("sub", "").startswith("contest:"):
-                raise HTTPException(
-                    status_code=403,
-                    detail="Invalid token subject - must be contest-specific"
-                )
-
-        except jwt.ExpiredSignatureError:
-            raise HTTPException(status_code=401, detail="Token expired")
-        except PyJWTError as e:
-            raise HTTPException(
-                status_code=401, detail=f"Invalid token: {str(e)}")
-
-        # Check if flight exists
-        flight = db.query(Flight).filter(
-            Flight.id == flight_uuid
-        ).first()
-
-        if not flight:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Flight not found with UUID {flight_uuid}"
-            )
-
-        # Determine which function to use based on flight source
-        if flight.source == 'live':
-            func_name = 'generate_live_track_linestring'
-        else:  # source == 'upload'
-            func_name = 'generate_uploaded_track_linestring'
-
-        # Query to get the bounding box
-        query = f"""
-        SELECT 
-            ST_XMin(ST_Envelope(geom)) as min_lon,
-            ST_YMin(ST_Envelope(geom)) as min_lat,
-            ST_XMax(ST_Envelope(geom)) as max_lon,
-            ST_YMax(ST_Envelope(geom)) as max_lat,
-            ST_X(ST_Centroid(geom)) as center_lon,
-            ST_Y(ST_Centroid(geom)) as center_lat
-        FROM (SELECT {func_name}('{flight_uuid}'::uuid) AS geom) AS track;
-        """
-
-        result = db.execute(text(query)).fetchone()
-
-        if not result:
-            return {
-                "flight_id": flight.flight_id,
-                "flight_uuid": str(flight.id),
-                "bounds": None,
-                "error": "No track data available"
-            }
-
-        # Extract results
-        min_lon, min_lat, max_lon, max_lat, center_lon, center_lat = result
-
-        # Calculate recommended padding (5% of dimensions)
-        lon_span = max_lon - min_lon
-        lat_span = max_lat - min_lat
-
-        lon_padding = lon_span * 0.05
-        lat_padding = lat_span * 0.05
-
-        return {
-            "flight_id": flight.flight_id,
-            "flight_uuid": str(flight.id),
-            "pilot_name": flight.pilot_name,
-            "source": flight.source,
-            "bounds": {
-                "min_lon": float(min_lon),
-                "min_lat": float(min_lat),
-                "max_lon": float(max_lon),
-                "max_lat": float(max_lat)
-            },
-            "bounds_padded": {
-                "min_lon": float(min_lon - lon_padding),
-                "min_lat": float(min_lat - lat_padding),
-                "max_lon": float(max_lon + lon_padding),
-                "max_lat": float(max_lat + lat_padding)
-            },
-            "center": {
-                "lon": float(center_lon),
-                "lat": float(center_lat)
-            }
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error calculating flight bounds: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to calculate flight bounds: {str(e)}"
-        )
-
-
-@router.get("/flight/bounds/flightid/{flight_id}")
-async def get_flight_bounds_by_id(
-    flight_id: str,
-    source: str = Query(..., regex="^(live|upload)$",
-                        description="Either 'live' or 'upload'"),
-    token_data: Dict = Depends(verify_tracking_token),
-    db: Session = Depends(get_db)
-):
-    """
-    Calculate the bounding box for a flight track using flight ID.
-    Returns the min/max coordinates that contain the entire flight path.
-
-    Parameters:
-    - flight_id: ID of the flight
-    - source: Either 'live' or 'upload' to specify which track to retrieve
-    """
-    try:
-        # Check if flight exists
-        flight = db.query(Flight).filter(
-            Flight.flight_id == flight_id,
-            Flight.source == source
-        ).first()
-
-        if not flight:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Flight not found with ID {flight_id} and source {source}"
-            )
-
-        flight_uuid = str(flight.id)
-
-        # Determine which function to use based on flight source
-        if flight.source == 'live':
-            func_name = 'generate_live_track_linestring'
-        else:  # source == 'upload'
-            func_name = 'generate_uploaded_track_linestring'
-
-        # Query to get the bounding box
-        query = f"""
-        SELECT 
-            ST_XMin(ST_Envelope(geom)) as min_lon,
-            ST_YMin(ST_Envelope(geom)) as min_lat,
-            ST_XMax(ST_Envelope(geom)) as max_lon,
-            ST_YMax(ST_Envelope(geom)) as max_lat,
-            ST_X(ST_Centroid(geom)) as center_lon,
-            ST_Y(ST_Centroid(geom)) as center_lat
-        FROM (SELECT {func_name}('{flight_uuid}'::uuid) AS geom) AS track;
-        """
-
-        result = db.execute(text(query)).fetchone()
-
-        if not result:
-            return {
-                "flight_id": flight.flight_id,
-                "flight_uuid": str(flight.id),
-                "bounds": None,
-                "error": "No track data available"
-            }
-
-        # Extract results
-        min_lon, min_lat, max_lon, max_lat, center_lon, center_lat = result
-
-        # Calculate recommended padding (5% of dimensions)
-        lon_span = max_lon - min_lon
-        lat_span = max_lat - min_lat
-
-        lon_padding = lon_span * 0.05
-        lat_padding = lat_span * 0.05
-
-        return {
-            "flight_id": flight.flight_id,
-            "flight_uuid": str(flight.id),
-            "pilot_name": flight.pilot_name,
-            "source": flight.source,
-            "bounds": {
-                "min_lon": float(min_lon),
-                "min_lat": float(min_lat),
-                "max_lon": float(max_lon),
-                "max_lat": float(max_lat)
-            },
-            "bounds_padded": {
-                "min_lon": float(min_lon - lon_padding),
-                "min_lat": float(min_lat - lat_padding),
-                "max_lon": float(max_lon + lon_padding),
-                "max_lat": float(max_lat + lat_padding)
-            },
-            "center": {
-                "lon": float(center_lon),
-                "lat": float(center_lat)
-            }
-        }
-
-    except Exception as e:
-        logger.error(f"Error calculating flight bounds: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to calculate flight bounds: {str(e)}"
-        )
