@@ -2651,34 +2651,53 @@ async def get_track_preview(
 
         stats_result = db.execute(text(stats_query)).fetchone()
 
-        # Use ST_SimplifyPreserveTopology to reduce the number of points
-        # This keeps the general shape but reduces the point count
+        # Get the track geometry and simplify it for preview in a single query
+        # This approach uses Douglas-Peucker algorithm with a dynamic tolerance
+        # that adapts based on the track length and point count
         query = f"""
         WITH original AS (
-            SELECT {func_name}('{flight_uuid}'::uuid) AS geom
+            SELECT 
+                {func_name}('{flight_uuid}'::uuid) AS geom,
+                ST_NPoints({func_name}('{flight_uuid}'::uuid)) AS point_count,
+                ST_Length({func_name}('{flight_uuid}'::uuid)::geography) AS track_length
         )
         SELECT 
-            ST_NPoints(geom) as original_points,
+            point_count as original_points,
             CASE 
-                -- If original has too many points, simplify to reduce size
-                WHEN ST_NPoints(geom) > {max_points}
-                THEN ST_AsEncodedPolyline(ST_SimplifyPreserveTopology(
-                    geom, 
-                    ST_Length(geom::geography) / (5000 * SQRT({max_points}))
-                ))
-                -- Otherwise use the original
-                ELSE ST_AsEncodedPolyline(geom) 
+                -- For tracks with fewer points than max_points, use as is
+                WHEN point_count <= {max_points} THEN
+                    ST_AsEncodedPolyline(geom)
+                
+                -- For tracks with more points, simplify with adaptive tolerance
+                ELSE
+                    ST_AsEncodedPolyline(
+                        ST_SimplifyPreserveTopology(
+                            geom, 
+                            -- Calculate tolerance dynamically based on track length
+                            -- Longer tracks get more aggressive simplification
+                            0.00001 * (track_length / point_count) * SQRT(point_count / {max_points})
+                        )
+                    )
             END as encoded_polyline,
+            -- Also get the number of points after simplification
             CASE 
-                -- If original has too many points, get count after simplification
-                WHEN ST_NPoints(geom) > {max_points}
-                THEN ST_NPoints(ST_SimplifyPreserveTopology(
-                    geom, 
-                    ST_Length(geom::geography) / (5000 * SQRT({max_points}))
-                ))
-                -- Otherwise use original count
-                ELSE ST_NPoints(geom) 
-            END as simplified_points
+                WHEN point_count <= {max_points} THEN
+                    point_count
+                ELSE
+                    ST_NPoints(
+                        ST_SimplifyPreserveTopology(
+                            geom, 
+                            0.00001 * (track_length / point_count) * SQRT(point_count / {max_points})
+                        )
+                    )
+            END as simplified_points,
+            -- Calculate bbox in single query for potential fallback
+            ST_XMin(ST_Envelope(geom)) as min_lon,
+            ST_YMin(ST_Envelope(geom)) as min_lat, 
+            ST_XMax(ST_Envelope(geom)) as max_lon,
+            ST_YMax(ST_Envelope(geom)) as max_lat,
+            ST_X(ST_Centroid(geom)) as center_lon,
+            ST_Y(ST_Centroid(geom)) as center_lat
         FROM original;
         """
 
@@ -2694,63 +2713,61 @@ async def get_track_preview(
         original_points = result[0]
         simplified_points = result[2]
 
-        # Check if the encoded polyline is still too large (> 6000 chars to be safe)
-        # If so, further simplify by sampling points
-        if len(encoded_polyline) > 6000:
-            # More aggressive simplification for very long tracks
-            simplify_factor = len(encoded_polyline) / 6000
+        # Get bounding box values for potential fallback
+        min_lon, min_lat = result[3], result[4]
+        max_lon, max_lat = result[5], result[6]
+        center_lon, center_lat = result[7], result[8]
+
+        # If encoded polyline is still too large (> 8000 chars), use a more aggressive simplification
+        if len(encoded_polyline) > 8000:
+            # Try one more level of simplification with Douglas-Peucker but more aggressive
             query = f"""
-            WITH original AS (
+            WITH track AS (
                 SELECT {func_name}('{flight_uuid}'::uuid) AS geom
             )
-            SELECT 
-                ST_AsEncodedPolyline(ST_SimplifyPreserveTopology(
-                    geom, 
-                    ST_Length(geom::geography) / (2000 * SQRT({max_points // 2}))
-                )) as encoded_polyline
-            FROM original;
+            SELECT ST_AsEncodedPolyline(
+                ST_SimplifyPreserveTopology(
+                    geom,
+                    -- More aggressive simplification for very long tracks
+                    0.0001 * ST_Length(geom::geography) / {max_points // 4}
+                )
+            ) as encoded_polyline
+            FROM track;
             """
+
             result = db.execute(text(query)).fetchone()
             if result and result[0]:
                 encoded_polyline = result[0]
 
-            # If still too large, create a bounding box preview instead
-            if len(encoded_polyline) > 6000:
-                # Get bounding box and center point
-                bbox_query = f"""
-                SELECT 
-                    ST_XMin(ST_Envelope(geom)) as min_lon,
-                    ST_YMin(ST_Envelope(geom)) as min_lat,
-                    ST_XMax(ST_Envelope(geom)) as max_lon,
-                    ST_YMax(ST_Envelope(geom)) as max_lat,
-                    ST_X(ST_Centroid(geom)) as center_lon,
-                    ST_Y(ST_Centroid(geom)) as center_lat
-                FROM (SELECT {func_name}('{flight_uuid}'::uuid) AS geom) AS track;
-                """
-                bbox_result = db.execute(text(bbox_query)).fetchone()
+            # If still too large, fall back to center point marker
+            if len(encoded_polyline) > 8000:
+                # Create a static map with the center point and appropriate zoom
+                # Determine appropriate zoom based on bounding box size
+                lon_diff = abs(max_lon - min_lon)
+                lat_diff = abs(max_lat - min_lat)
 
-                if bbox_result:
-                    # Create a static map with the center point and appropriate zoom
-                    center_lat = bbox_result[4]
-                    center_lon = bbox_result[5]
+                # Dynamic zoom calculation based on bbox size
+                zoom = max(
+                    8, min(14, int(360 / (max(lon_diff, lat_diff * 2) * 111))))
 
-                    # Create Google Static Maps URL with center point and appropriate zoom
-                    google_maps_preview_url = (
-                        f"https://maps.googleapis.com/maps/api/staticmap?"
-                        f"size={width}x{height}&center={center_lat},{center_lon}"
-                        f"&zoom=11"  # Default zoom level that shows reasonable area
-                        f"&markers=color:red|{center_lat},{center_lon}"
-                        f"&sensor=false"
-                        f"&key={settings.GOOGLE_MAPS_API_KEY}"
-                    )
+                google_maps_preview_url = (
+                    f"https://maps.googleapis.com/maps/api/staticmap?"
+                    f"size={width}x{height}&center={center_lat},{center_lon}"
+                    f"&zoom={zoom}"
+                    f"&markers=color:red|{center_lat},{center_lon}"
+                    f"&sensor=false"
+                    f"&key={settings.GOOGLE_MAPS_API_KEY}"
+                )
 
-                    return {
-                        "flight_id": flight.flight_id,
-                        "flight_uuid": str(flight.id),
-                        "preview_url": google_maps_preview_url,
-                        "source": flight.source,
-                        "note": "Track was too complex for detailed preview, showing center point only"
-                    }
+                return {
+                    "flight_id": flight.flight_id,
+                    "flight_uuid": str(flight.id),
+                    "preview_url": google_maps_preview_url,
+                    "source": flight.source,
+                    "original_points": original_points,
+                    "simplified_points": 1,
+                    "note": "Track was too complex for detailed preview, showing center point with adjusted zoom"
+                }
 
         # Create Google Static Maps URL with the encoded polyline
         google_maps_preview_url = (
@@ -2913,34 +2930,53 @@ async def get_track_preview_id(
         else:  # source == 'upload'
             func_name = 'generate_uploaded_track_linestring'
 
-        # Use ST_SimplifyPreserveTopology to reduce the number of points
-        # This keeps the general shape but reduces the point count
+        # Get the track geometry and simplify it for preview in a single query
+        # This approach uses Douglas-Peucker algorithm with a dynamic tolerance
+        # that adapts based on the track length and point count
         query = f"""
         WITH original AS (
-            SELECT {func_name}('{flight_uuid}'::uuid) AS geom
+            SELECT 
+                {func_name}('{flight_uuid}'::uuid) AS geom,
+                ST_NPoints({func_name}('{flight_uuid}'::uuid)) AS point_count,
+                ST_Length({func_name}('{flight_uuid}'::uuid)::geography) AS track_length
         )
         SELECT 
-            ST_NPoints(geom) as original_points,
+            point_count as original_points,
             CASE 
-                -- If original has too many points, simplify to reduce size
-                WHEN ST_NPoints(geom) > {max_points}
-                THEN ST_AsEncodedPolyline(ST_SimplifyPreserveTopology(
-                    geom, 
-                    ST_Length(geom::geography) / (5000 * SQRT({max_points}))
-                ))
-                -- Otherwise use the original
-                ELSE ST_AsEncodedPolyline(geom) 
+                -- For tracks with fewer points than max_points, use as is
+                WHEN point_count <= {max_points} THEN
+                    ST_AsEncodedPolyline(geom)
+                
+                -- For tracks with more points, simplify with adaptive tolerance
+                ELSE
+                    ST_AsEncodedPolyline(
+                        ST_SimplifyPreserveTopology(
+                            geom, 
+                            -- Calculate tolerance dynamically based on track length
+                            -- Longer tracks get more aggressive simplification
+                            0.00001 * (track_length / point_count) * SQRT(point_count / {max_points})
+                        )
+                    )
             END as encoded_polyline,
+            -- Also get the number of points after simplification
             CASE 
-                -- If original has too many points, get count after simplification
-                WHEN ST_NPoints(geom) > {max_points}
-                THEN ST_NPoints(ST_SimplifyPreserveTopology(
-                    geom, 
-                    ST_Length(geom::geography) / (5000 * SQRT({max_points}))
-                ))
-                -- Otherwise use original count
-                ELSE ST_NPoints(geom) 
-            END as simplified_points
+                WHEN point_count <= {max_points} THEN
+                    point_count
+                ELSE
+                    ST_NPoints(
+                        ST_SimplifyPreserveTopology(
+                            geom, 
+                            0.00001 * (track_length / point_count) * SQRT(point_count / {max_points})
+                        )
+                    )
+            END as simplified_points,
+            -- Calculate bbox in single query for potential fallback
+            ST_XMin(ST_Envelope(geom)) as min_lon,
+            ST_YMin(ST_Envelope(geom)) as min_lat, 
+            ST_XMax(ST_Envelope(geom)) as max_lon,
+            ST_YMax(ST_Envelope(geom)) as max_lat,
+            ST_X(ST_Centroid(geom)) as center_lon,
+            ST_Y(ST_Centroid(geom)) as center_lat
         FROM original;
         """
 
@@ -2956,63 +2992,61 @@ async def get_track_preview_id(
         original_points = result[0]
         simplified_points = result[2]
 
-        # Check if the encoded polyline is still too large (> 6000 chars to be safe)
-        # If so, further simplify by sampling points
-        if len(encoded_polyline) > 6000:
-            # More aggressive simplification for very long tracks
-            simplify_factor = len(encoded_polyline) / 6000
+        # Get bounding box values for potential fallback
+        min_lon, min_lat = result[3], result[4]
+        max_lon, max_lat = result[5], result[6]
+        center_lon, center_lat = result[7], result[8]
+
+        # If encoded polyline is still too large (> 8000 chars), use a more aggressive simplification
+        if len(encoded_polyline) > 8000:
+            # Try one more level of simplification with Douglas-Peucker but more aggressive
             query = f"""
-            WITH original AS (
+            WITH track AS (
                 SELECT {func_name}('{flight_uuid}'::uuid) AS geom
             )
-            SELECT 
-                ST_AsEncodedPolyline(ST_SimplifyPreserveTopology(
-                    geom, 
-                    ST_Length(geom::geography) / (2000 * SQRT({max_points // 2}))
-                )) as encoded_polyline
-            FROM original;
+            SELECT ST_AsEncodedPolyline(
+                ST_SimplifyPreserveTopology(
+                    geom,
+                    -- More aggressive simplification for very long tracks
+                    0.0001 * ST_Length(geom::geography) / {max_points // 4}
+                )
+            ) as encoded_polyline
+            FROM track;
             """
+
             result = db.execute(text(query)).fetchone()
             if result and result[0]:
                 encoded_polyline = result[0]
 
-            # If still too large, create a bounding box preview instead
-            if len(encoded_polyline) > 6000:
-                # Get bounding box and center point
-                bbox_query = f"""
-                SELECT 
-                    ST_XMin(ST_Envelope(geom)) as min_lon,
-                    ST_YMin(ST_Envelope(geom)) as min_lat,
-                    ST_XMax(ST_Envelope(geom)) as max_lon,
-                    ST_YMax(ST_Envelope(geom)) as max_lat,
-                    ST_X(ST_Centroid(geom)) as center_lon,
-                    ST_Y(ST_Centroid(geom)) as center_lat
-                FROM (SELECT {func_name}('{flight_uuid}'::uuid) AS geom) AS track;
-                """
-                bbox_result = db.execute(text(bbox_query)).fetchone()
+            # If still too large, fall back to center point marker
+            if len(encoded_polyline) > 8000:
+                # Create a static map with the center point and appropriate zoom
+                # Determine appropriate zoom based on bounding box size
+                lon_diff = abs(max_lon - min_lon)
+                lat_diff = abs(max_lat - min_lat)
 
-                if bbox_result:
-                    # Create a static map with the center point and appropriate zoom
-                    center_lat = bbox_result[4]
-                    center_lon = bbox_result[5]
+                # Dynamic zoom calculation based on bbox size
+                zoom = max(
+                    8, min(14, int(360 / (max(lon_diff, lat_diff * 2) * 111))))
 
-                    # Create Google Static Maps URL with center point and appropriate zoom
-                    google_maps_preview_url = (
-                        f"https://maps.googleapis.com/maps/api/staticmap?"
-                        f"size={width}x{height}&center={center_lat},{center_lon}"
-                        f"&zoom=11"  # Default zoom level that shows reasonable area
-                        f"&markers=color:red|{center_lat},{center_lon}"
-                        f"&sensor=false"
-                        f"&key={settings.GOOGLE_MAPS_API_KEY}"
-                    )
+                google_maps_preview_url = (
+                    f"https://maps.googleapis.com/maps/api/staticmap?"
+                    f"size={width}x{height}&center={center_lat},{center_lon}"
+                    f"&zoom={zoom}"
+                    f"&markers=color:red|{center_lat},{center_lon}"
+                    f"&sensor=false"
+                    f"&key={settings.GOOGLE_MAPS_API_KEY}"
+                )
 
-                    return {
-                        "flight_id": flight.flight_id,
-                        "flight_uuid": str(flight.id),
-                        "preview_url": google_maps_preview_url,
-                        "source": flight.source,
-                        "note": "Track was too complex for detailed preview, showing center point only"
-                    }
+                return {
+                    "flight_id": flight.flight_id,
+                    "flight_uuid": str(flight.id),
+                    "preview_url": google_maps_preview_url,
+                    "source": flight.source,
+                    "original_points": original_points,
+                    "simplified_points": 1,
+                    "note": "Track was too complex for detailed preview, showing center point with adjusted zoom"
+                }
 
         # Create Google Static Maps URL with the encoded polyline
         google_maps_preview_url = (
