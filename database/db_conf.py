@@ -8,11 +8,12 @@ database_uri = settings.DATABASE_URI
 
 # Create the engine
 engine = create_engine(database_uri,
-                       pool_size=10,
-                       max_overflow=20,
+                       pool_size=50,        # Increased for high traffic tile endpoint
+                       max_overflow=50,     # Increased to handle traffic spikes
                        pool_pre_ping=True,  # Check connection validity before using it
-                       pool_recycle=60,     # Recycle connections after 1 minute to avoid SSL timeouts
-                       pool_timeout=30,     # Wait up to 30 seconds for a connection from the pool
+                       pool_recycle=300,    # Recycle connections after 5 minutes to avoid SSL timeouts
+                       pool_timeout=60,     # Extended wait time to 60 seconds for a connection from the pool
+                       pool_use_lifo=True,  # Use LIFO to improve connection reuse
                        echo=False)
 
 # # Create the Session class
@@ -35,8 +36,8 @@ def get_db():
     finally:
         session.close()
 
-db_context = contextmanager(get_db)
 
+db_context = contextmanager(get_db)
 
 
 def test_db_connection(max_retries=3):
