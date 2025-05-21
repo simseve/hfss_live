@@ -185,7 +185,6 @@ async def delete_flight_tracks(
             detail="An unexpected error occurred while deleting flight tracks"
         )
 
-
 @router.put("/flight/{flight_uuid}", status_code=200, response_model=ScoringTrackBatchResponse)
 async def update_flight_tracks(
     flight_uuid: uuid.UUID,
@@ -193,8 +192,9 @@ async def update_flight_tracks(
     db: Session = Depends(get_db)
 ):
     """
-    Update all scoring tracks for a specific flight UUID.
-    First deletes all existing track points, then adds new ones while preserving the flight UUID.
+    Update or create scoring tracks for a specific flight UUID.
+    If tracks exist, deletes all existing track points, then adds new ones.
+    If no tracks exist for this flight UUID, creates new ones.
 
     Parameters:
     - flight_uuid: UUID of the flight to update
@@ -202,8 +202,7 @@ async def update_flight_tracks(
     """
     try:
         # Log the update attempt
-        logger.info(
-            f"Attempting to update tracks for flight UUID: {flight_uuid}")
+        logger.info(f"Attempting to update tracks for flight UUID: {flight_uuid}")
 
         # Validate that we have track points to process
         if not track_batch.tracks:
@@ -213,25 +212,20 @@ async def update_flight_tracks(
 
         # Begin transaction
         try:
-            # Step 1: Check if flight exists
+            # Step 1: Check if flight has existing tracks (just for logging)
             count = db.query(ScoringTracks).filter(
                 ScoringTracks.flight_uuid == flight_uuid
             ).count()
 
-            # If no records were found, return a 404
-            if count == 0:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"No tracks found for flight UUID: {flight_uuid}"
-                )
-
-            # Step 2: Delete all existing track points for this flight
-            result = db.query(ScoringTracks).filter(
-                ScoringTracks.flight_uuid == flight_uuid
-            ).delete(synchronize_session=False)
-
-            logger.info(
-                f"Deleted {result} existing track points for flight UUID: {flight_uuid}")
+            # Step 2: Delete existing track points if they exist
+            if count > 0:
+                result = db.query(ScoringTracks).filter(
+                    ScoringTracks.flight_uuid == flight_uuid
+                ).delete(synchronize_session=False)
+                
+                logger.info(f"Deleted {result} existing track points for flight UUID: {flight_uuid}")
+            else:
+                logger.info(f"No existing tracks found for flight UUID: {flight_uuid}. Creating new tracks.")
 
             # Step 3: Insert new track points while preserving the flight UUID
             track_objects = []
@@ -259,7 +253,9 @@ async def update_flight_tracks(
 
             # Log successful update
             logger.info(
-                f"Successfully updated flight {flight_uuid}: deleted {result} old points, added {points_to_add} new points")
+                f"Successfully {'updated' if count > 0 else 'created'} tracks for flight {flight_uuid}: " 
+                f"{'deleted ' + str(count) + ' old points, ' if count > 0 else ''}added {points_to_add} new points"
+            )
 
             # Return success response
             return ScoringTrackBatchResponse(
@@ -274,8 +270,7 @@ async def update_flight_tracks(
 
     except SQLAlchemyError as e:
         # Log the error with more details
-        logger.error(
-            f"Database error while updating flight tracks: {str(e)}")
+        logger.error(f"Database error while updating flight tracks: {str(e)}")
         # Return a more specific error message based on the exception type
         if "duplicate key" in str(e).lower() or "unique constraint" in str(e).lower():
             raise HTTPException(
@@ -285,7 +280,7 @@ async def update_flight_tracks(
         elif "foreign key" in str(e).lower():
             raise HTTPException(
                 status_code=400,
-                detail=f"Foreign key constraint failed. Flight UUID {flight_uuid} may not exist"
+                detail=f"Foreign key constraint failed. Flight UUID {flight_uuid} may not exist in the referenced table"
             )
         else:
             raise HTTPException(
@@ -299,13 +294,11 @@ async def update_flight_tracks(
 
     except Exception as e:
         # Handle any other exceptions
-        logger.error(
-            f"Unexpected error updating flight tracks: {str(e)}", exc_info=True)
+        logger.error(f"Unexpected error updating flight tracks: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=500,
             detail="An unexpected error occurred while updating flight tracks"
         )
-
 
 @router.get("/track-line/{flight_uuid}")
 async def get_track_linestring_uuid(
