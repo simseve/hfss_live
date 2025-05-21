@@ -29,4 +29,5 @@ volumes:
 
 networks:
   app-network:
-    driver: bridge
+    external: true
+    name: app-network
