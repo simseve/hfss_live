@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# PostgreSQL Restoration Script with Remote Fetch
+# PostgreSQL Restoration Script for pg_basebackup with -Ft format
 
 # Configuration variables
 # Remote server details
@@ -12,7 +12,7 @@ DATA_DIR="/var/lib/postgresql/14/main"
 TEMP_EXTRACT_DIR="/tmp/pg_restore_temp"
 PG_USER="postgres"
 PG_GROUP="postgres"
-PG_VERSION="14" # Added: PostgreSQL version for config file restore
+PG_VERSION="14" # PostgreSQL version for config file restore
 
 # Output colors
 GREEN='\033[0;32m'
@@ -88,21 +88,22 @@ if [ $? -ne 0 ]; then
 fi
 echo_status "Backup copied successfully."
 
+# 4. Prepare the data directory
+echo_status "Preparing data directory..."
+OLD_DATA_DIR="${DATA_DIR}_old"
 
-
-# 4. Extract the backup to the temporary directory
-echo_status "Extracting backup archive to temporary directory..."
-tar -xzf "$BACKUP_FILE" -C "$TEMP_EXTRACT_DIR"
-if [ $? -ne 0 ]; then
-  echo -e "${RED}Failed to extract the backup archive. Exiting.${NC}"
-  exit 1
+if [ -d "$OLD_DATA_DIR" ]; then
+  echo_status "Old data directory found: $OLD_DATA_DIR. Removing it..."
+  rm -rf "$OLD_DATA_DIR"
+  if [ $? -ne 0 ]; then
+    echo -e "${RED}Failed to remove old data directory. Exiting.${NC}"
+    exit 1
+  fi
 fi
 
-# 5. Prepare the data directory
-echo_status "Preparing data directory..."
 if [ -d "$DATA_DIR" ]; then
-  echo_status "Backing up existing data directory to ${DATA_DIR}_old"
-  mv "$DATA_DIR" "${DATA_DIR}_old"
+  echo_status "Backing up existing data directory to $OLD_DATA_DIR"
+  mv "$DATA_DIR" "$OLD_DATA_DIR"
 fi
 
 echo_status "Creating new data directory..."
@@ -110,27 +111,89 @@ mkdir -p "$DATA_DIR"
 chown "$PG_USER:$PG_GROUP" "$DATA_DIR"
 chmod 700 "$DATA_DIR"
 
-# 6. Copy the extracted backup to the data directory
-echo_status "Copying extracted backup to data directory..."
-cp -r "$TEMP_EXTRACT_DIR"/* "$DATA_DIR"/
-
-# 7. Restore Configuration Files
-echo_status "Restoring configuration files..."
-CONFIG_SOURCE_DIR="${TEMP_EXTRACT_DIR}/config" # Config files are in a 'config' subdir
-
-if [ -d "$CONFIG_SOURCE_DIR" ]; then
-  echo_status "Configuration backup found. Restoring..."
-  cp "$CONFIG_SOURCE_DIR/postgresql.conf" "/etc/postgresql/$PG_VERSION/main/postgresql.conf"
-  cp "$CONFIG_SOURCE_DIR/pg_hba.conf"     "/etc/postgresql/$PG_VERSION/main/pg_hba.conf"
-  cp "$CONFIG_SOURCE_DIR/pg_ident.conf"   "/etc/postgresql/$PG_VERSION/main/pg_ident.conf"
-  if [ $? -ne 0 ]; then
-     echo -e "${RED}Failed to restore configuration files.  Restoration may be incomplete.${NC}"
-  fi
-else
-  echo_status "Configuration backup not found. Using default configuration."
+# 5. Extract the backup directly to the data directory
+echo_status "Extracting backup archive to data directory..."
+tar -xzf "$BACKUP_FILE" -C "$DATA_DIR"
+if [ $? -ne 0 ]; then
+  echo -e "${RED}Failed to extract the backup archive to data directory. Exiting.${NC}"
+  exit 1
 fi
 
+# 5a. Extract nested tar.gz files found in the data directory
+echo_status "Processing nested tar.gz files in data directory..."
+for tarfile in "$DATA_DIR"/*.tar.gz; do
+  if [ -f "$tarfile" ]; then
+    filename=$(basename "$tarfile")
+    echo_status "Extracting nested archive: $filename"
+    
+    # Create a temp directory for extraction
+    extract_temp="$DATA_DIR/extract_temp_$"
+    mkdir -p "$extract_temp"
+    
+    # Extract to temp directory
+    tar -xzf "$tarfile" -C "$extract_temp"
+    
+    if [ $? -ne 0 ]; then
+      echo -e "${RED}Failed to extract nested archive: $filename. Continuing...${NC}"
+    else
+      # Move files to appropriate location
+      if [[ "$filename" == "base.tar.gz" ]]; then
+        echo_status "Moving base files to data directory..."
+        cp -a "$extract_temp"/* "$DATA_DIR/"
+      elif [[ "$filename" == "pg_wal.tar.gz" ]]; then
+        echo_status "Moving WAL files to pg_wal directory..."
+        mkdir -p "$DATA_DIR/pg_wal"
+        cp -a "$extract_temp"/* "$DATA_DIR/pg_wal/"
+      else
+        echo_status "Moving files from $filename to data directory..."
+        cp -a "$extract_temp"/* "$DATA_DIR/"
+      fi
+      
+      # Remove the temp directory
+      rm -rf "$extract_temp"
+      
+      # Remove the processed tar.gz file
+      rm -f "$tarfile"
+    fi
+  fi
+done
 
+echo_status "All nested archives processed."
+
+# 6. Handle TimescaleDB if present
+echo_status "Checking for TimescaleDB configuration..."
+if grep -q "timescaledb" "$DATA_DIR/postgresql.auto.conf" || grep -q "timescaledb" "$OLD_DATA_DIR/postgresql.conf" 2>/dev/null; then
+  echo_status "TimescaleDB configuration found. Checking if it's installed on this server..."
+  
+  # Try to find any version of timescaledb library
+  TIMESCALEDB_LIB=$(find /usr/lib/postgresql -name "timescaledb*.so" | head -n 1)
+  
+  if [ -z "$TIMESCALEDB_LIB" ]; then
+    echo_status "TimescaleDB not installed. Temporarily disabling TimescaleDB in configuration..."
+    
+    # Modify postgresql.auto.conf if it exists
+    if [ -f "$DATA_DIR/postgresql.auto.conf" ]; then
+      sed -i "s/shared_preload_libraries\s*=\s*['\"].*timescaledb.*['\"]/shared_preload_libraries = ''/" "$DATA_DIR/postgresql.auto.conf"
+    fi
+    
+    # Modify postgresql.conf if it exists
+    if [ -f "$DATA_DIR/postgresql.conf" ]; then
+      sed -i "s/shared_preload_libraries\s*=\s*['\"].*timescaledb.*['\"]/shared_preload_libraries = ''/" "$DATA_DIR/postgresql.conf"
+    fi
+    
+    echo_status "TimescaleDB disabled in configuration. You may need to install it later: sudo apt install postgresql-14-timescaledb"
+  else
+    echo_status "TimescaleDB is installed: $TIMESCALEDB_LIB"
+  fi
+fi
+
+# 7. Handle recovery if backup_label exists
+echo_status "Checking for backup_label file..."
+if [ -f "$DATA_DIR/backup_label" ]; then
+  echo_status "Found backup_label file. This is a pg_basebackup backup taken during operation."
+  echo_status "Removing backup_label to enable direct startup..."
+  rm -f "$DATA_DIR/backup_label"
+fi
 
 # 8. Ensure correct permissions
 echo_status "Setting correct permissions..."
@@ -146,8 +209,34 @@ echo_status "Starting PostgreSQL server..."
 systemctl start postgresql
 if [ $? -ne 0 ]; then
   echo -e "${RED}Failed to start PostgreSQL server. Check logs for details.${NC}"
-  echo -e "${YELLOW}Possible solution: Look at PostgreSQL logs with: sudo -u postgres tail -n 50 /var/log/postgresql/postgresql-14-main.log${NC}"
-  exit 1
+  echo -e "${YELLOW}Looking at PostgreSQL logs for clues...${NC}"
+  sudo -u "$PG_USER" tail -n 50 /var/log/postgresql/postgresql-14-main.log
+  
+  echo_status "Trying minimal configuration approach..."
+  # Create a minimal configuration
+  cat > "$DATA_DIR/postgresql.conf" << EOF
+# Minimal configuration for recovery
+listen_addresses = 'localhost'
+port = 5432
+unix_socket_directories = '/var/run/postgresql'
+shared_preload_libraries = ''
+EOF
+  chown "$PG_USER:$PG_GROUP" "$DATA_DIR/postgresql.conf"
+  
+  # Start PostgreSQL with this minimal configuration
+  systemctl start postgresql
+  if [ $? -ne 0 ]; then
+    echo -e "${RED}All recovery attempts failed. Manual intervention required.${NC}"
+    echo -e "${YELLOW}Suggestions:${NC}"
+    echo -e "${YELLOW}1. Check PostgreSQL logs: sudo -u postgres tail -n 50 /var/log/postgresql/postgresql-14-main.log${NC}"
+    echo -e "${YELLOW}2. Install TimescaleDB if needed: sudo apt install postgresql-14-timescaledb${NC}"
+    echo -e "${YELLOW}3. Consider using pg_dump/pg_restore instead of file-level backup${NC}"
+    exit 1
+  else
+    echo_status "PostgreSQL started with minimal configuration!"
+  fi
+else
+  echo_status "PostgreSQL server started successfully."
 fi
 
 # 11. Verify Restoration
@@ -168,6 +257,3 @@ echo_status "Cleaning up temporary files..."
 rm -rf "$TEMP_EXTRACT_DIR"
 
 echo_status "Restoration process completed."
-
-# End of script
-# Note: Ensure that the PostgreSQL service is enabled to start on boot
