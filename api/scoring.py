@@ -185,6 +185,7 @@ async def delete_flight_tracks(
             detail="An unexpected error occurred while deleting flight tracks"
         )
 
+
 @router.put("/flight/{flight_uuid}", status_code=200, response_model=ScoringTrackBatchResponse)
 async def update_flight_tracks(
     flight_uuid: uuid.UUID,
