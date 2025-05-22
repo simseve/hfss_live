@@ -2325,30 +2325,30 @@ async def get_daily_tracks_tile(
         simplify_tolerance = 0
         min_distance = 0
 
-        if z <= 3:
-            simplify_tolerance = 100  # Drastically reduced from 1000
-            min_distance = 30        # Drastically reduced from 200
-        elif z <= 5:
-            simplify_tolerance = 50   # Drastically reduced from 500
-            min_distance = 15        # Drastically reduced from 100
-        elif z <= 8:
-            simplify_tolerance = 25   # Drastically reduced from 200
-            min_distance = 8         # Drastically reduced from 50
-        elif z <= 10:
-            simplify_tolerance = 10   # Drastically reduced from 50
-            min_distance = 4         # Drastically reduced from 20
-        elif z <= 13:
-            simplify_tolerance = 5    # Drastically reduced from 20
-            min_distance = 2         # Drastically reduced from 10
-        elif z <= 15:
-            simplify_tolerance = 2    # Drastically reduced from 10
-            min_distance = 1         # Drastically reduced from 5
-        elif z <= 17:
-            simplify_tolerance = 1    # Drastically reduced from 5
-            min_distance = 0.5       # Drastically reduced from 2
-        else:  # z >= 18
-            simplify_tolerance = 0    # No simplification at highest zoom
-            min_distance = 0         # No distance filtering at highest zoom
+        # if z <= 3:
+        #     simplify_tolerance = 100  # Drastically reduced from 1000
+        #     min_distance = 30        # Drastically reduced from 200
+        # elif z <= 5:
+        #     simplify_tolerance = 50   # Drastically reduced from 500
+        #     min_distance = 15        # Drastically reduced from 100
+        # elif z <= 8:
+        #     simplify_tolerance = 25   # Drastically reduced from 200
+        #     min_distance = 8         # Drastically reduced from 50
+        # elif z <= 10:
+        #     simplify_tolerance = 10   # Drastically reduced from 50
+        #     min_distance = 4         # Drastically reduced from 20
+        # elif z <= 13:
+        #     simplify_tolerance = 5    # Drastically reduced from 20
+        #     min_distance = 2         # Drastically reduced from 10
+        # elif z <= 15:
+        #     simplify_tolerance = 2    # Drastically reduced from 10
+        #     min_distance = 1         # Drastically reduced from 5
+        # elif z <= 17:
+        #     simplify_tolerance = 1    # Drastically reduced from 5
+        #     min_distance = 0.5       # Drastically reduced from 2
+        # else:  # z >= 18
+        #     simplify_tolerance = 0    # No simplification at highest zoom
+        #     min_distance = 0         # No distance filtering at highest zoom
 
         # Always use the preserve topology function for all zoom levels
         use_preserve_topology = True  # Changed from z >= 8
@@ -2468,11 +2468,7 @@ async def get_daily_tracks_tile(
             WHERE ST_Transform(t.geom, 3857) && (SELECT geom FROM bounds_with_margin)
             -- Apply additional time-based sampling for lower zoom levels
             AND (
-                {
-                    "t.point_num % 4 = 0" if z < 6 else  # Only sample 1 in 4 points at very low zooms
-                    "t.point_num % 2 = 0" if z < 9 else  # Sample 1 in 2 at medium-low zooms
-                    "1=1"  # Include all distance-filtered points at higher zoom
-                }
+                1=1  # Always true - include all points at all zoom levels
                 -- Always include special points
                 OR EXISTS (
                     SELECT 1 FROM special_points sp 
