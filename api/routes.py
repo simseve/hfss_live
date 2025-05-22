@@ -2468,7 +2468,7 @@ async def get_daily_tracks_tile(
             WHERE ST_Transform(t.geom, 3857) && (SELECT geom FROM bounds_with_margin)
             -- Apply additional time-based sampling for lower zoom levels
             AND (
-                1=1  # Always true - include all points at all zoom levels
+                1=1
                 -- Always include special points
                 OR EXISTS (
                     SELECT 1 FROM special_points sp 
