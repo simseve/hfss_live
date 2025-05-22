@@ -2326,34 +2326,34 @@ async def get_daily_tracks_tile(
         min_distance = 0
 
         if z <= 3:
-            simplify_tolerance = 300  # Reduced from 1000
-            min_distance = 80        # Reduced from 200
+            simplify_tolerance = 100  # Drastically reduced from 1000
+            min_distance = 30        # Drastically reduced from 200
         elif z <= 5:
-            simplify_tolerance = 150  # Reduced from 500
-            min_distance = 40        # Reduced from 100
+            simplify_tolerance = 50   # Drastically reduced from 500
+            min_distance = 15        # Drastically reduced from 100
         elif z <= 8:
-            simplify_tolerance = 80   # Reduced from 200
-            min_distance = 20        # Reduced from 50
+            simplify_tolerance = 25   # Drastically reduced from 200
+            min_distance = 8         # Drastically reduced from 50
         elif z <= 10:
-            simplify_tolerance = 20   # Reduced from 50
-            min_distance = 8         # Reduced from 20
+            simplify_tolerance = 10   # Drastically reduced from 50
+            min_distance = 4         # Drastically reduced from 20
         elif z <= 13:
-            simplify_tolerance = 8    # Reduced from 20
-            min_distance = 4         # Reduced from 10
+            simplify_tolerance = 5    # Drastically reduced from 20
+            min_distance = 2         # Drastically reduced from 10
         elif z <= 15:
-            simplify_tolerance = 4    # Reduced from 10
-            min_distance = 2         # Reduced from 5
+            simplify_tolerance = 2    # Drastically reduced from 10
+            min_distance = 1         # Drastically reduced from 5
         elif z <= 17:
-            simplify_tolerance = 2    # Reduced from 5
-            min_distance = 1         # Reduced from 2
+            simplify_tolerance = 1    # Drastically reduced from 5
+            min_distance = 0.5       # Drastically reduced from 2
         else:  # z >= 18
             simplify_tolerance = 0    # No simplification at highest zoom
             min_distance = 0         # No distance filtering at highest zoom
 
-        # Set the topology preservation to start at lower zoom level
-        use_preserve_topology = z >= 5  # Changed from z >= 8
-        simplify_func = "ST_SimplifyPreserveTopology" if use_preserve_topology else "ST_Simplify"
-        
+        # Always use the preserve topology function for all zoom levels
+        use_preserve_topology = True  # Changed from z >= 8
+        simplify_func = "ST_SimplifyPreserveTopology"
+
         # SQL query using ST_AsMVT with improved simplification
         # This generates MVT tiles with both points and lines for all flights
         query = f"""
@@ -2469,9 +2469,10 @@ async def get_daily_tracks_tile(
             -- Apply additional time-based sampling for lower zoom levels
             AND (
                 {
-            "t.point_num % 10 = 0" if z < 10 else
-            "1=1"  # Include all distance-filtered points at higher zoom
-        }
+                    "t.point_num % 4 = 0" if z < 6 else  # Only sample 1 in 4 points at very low zooms
+                    "t.point_num % 2 = 0" if z < 9 else  # Sample 1 in 2 at medium-low zooms
+                    "1=1"  # Include all distance-filtered points at higher zoom
+                }
                 -- Always include special points
                 OR EXISTS (
                     SELECT 1 FROM special_points sp 
