@@ -2292,36 +2292,68 @@ async def get_daily_tracks_tile(
 
         # Define simplification tolerances based on zoom level
         # These values represent meters at different zoom levels
+        # simplify_tolerance = 0
+        # min_distance = 0
+
+        # if z <= 3:
+        #     simplify_tolerance = 1000  # ~1km at global zoom
+        #     min_distance = 200         # 200m min distance between points
+        # elif z <= 5:
+        #     simplify_tolerance = 500   # ~500m at continent zoom
+        #     min_distance = 100         # 100m min distance
+        # elif z <= 8:
+        #     simplify_tolerance = 200   # ~200m at regional zoom
+        #     min_distance = 50          # 50m min distance
+        # elif z <= 10:
+        #     simplify_tolerance = 50    # ~50m at local zoom
+        #     min_distance = 20          # 20m min distance
+        # elif z <= 13:
+        #     simplify_tolerance = 20    # ~20m at city zoom
+        #     min_distance = 10          # 10m min distance
+        # elif z <= 15:
+        #     simplify_tolerance = 10    # ~10m at neighborhood zoom
+        #     min_distance = 5           # 5m min distance
+        # elif z <= 17:
+        #     simplify_tolerance = 5     # ~5m at street level
+        #     min_distance = 2           # 2m min distance
+
+        # # We'll use ST_Simplify for lower zoom levels (faster) and ST_SimplifyPreserveTopology
+        # # for higher zoom levels (safer for detailed views)
+        # use_preserve_topology = z >= 8
+        # simplify_func = "ST_SimplifyPreserveTopology" if use_preserve_topology else "ST_Simplify"
+
         simplify_tolerance = 0
         min_distance = 0
 
         if z <= 3:
-            simplify_tolerance = 1000  # ~1km at global zoom
-            min_distance = 200         # 200m min distance between points
+            simplify_tolerance = 300  # Reduced from 1000
+            min_distance = 80        # Reduced from 200
         elif z <= 5:
-            simplify_tolerance = 500   # ~500m at continent zoom
-            min_distance = 100         # 100m min distance
+            simplify_tolerance = 150  # Reduced from 500
+            min_distance = 40        # Reduced from 100
         elif z <= 8:
-            simplify_tolerance = 200   # ~200m at regional zoom
-            min_distance = 50          # 50m min distance
+            simplify_tolerance = 80   # Reduced from 200
+            min_distance = 20        # Reduced from 50
         elif z <= 10:
-            simplify_tolerance = 50    # ~50m at local zoom
-            min_distance = 20          # 20m min distance
+            simplify_tolerance = 20   # Reduced from 50
+            min_distance = 8         # Reduced from 20
         elif z <= 13:
-            simplify_tolerance = 20    # ~20m at city zoom
-            min_distance = 10          # 10m min distance
+            simplify_tolerance = 8    # Reduced from 20
+            min_distance = 4         # Reduced from 10
         elif z <= 15:
-            simplify_tolerance = 10    # ~10m at neighborhood zoom
-            min_distance = 5           # 5m min distance
+            simplify_tolerance = 4    # Reduced from 10
+            min_distance = 2         # Reduced from 5
         elif z <= 17:
-            simplify_tolerance = 5     # ~5m at street level
-            min_distance = 2           # 2m min distance
+            simplify_tolerance = 2    # Reduced from 5
+            min_distance = 1         # Reduced from 2
+        else:  # z >= 18
+            simplify_tolerance = 0    # No simplification at highest zoom
+            min_distance = 0         # No distance filtering at highest zoom
 
-        # We'll use ST_Simplify for lower zoom levels (faster) and ST_SimplifyPreserveTopology
-        # for higher zoom levels (safer for detailed views)
-        use_preserve_topology = z >= 14
+        # Set the topology preservation to start at lower zoom level
+        use_preserve_topology = z >= 5  # Changed from z >= 8
         simplify_func = "ST_SimplifyPreserveTopology" if use_preserve_topology else "ST_Simplify"
-
+        
         # SQL query using ST_AsMVT with improved simplification
         # This generates MVT tiles with both points and lines for all flights
         query = f"""
