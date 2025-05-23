@@ -3773,6 +3773,7 @@ async def send_notification(
                 "success": False,
                 "message": "No subscribers found for this race",
                 "sent": 0,
+                "recipients_count": 0,  # Frontend expects this field
                 "total": 0,
                 "errors": 0
             }
@@ -3819,6 +3820,7 @@ async def send_notification(
             "success": is_successful,
             "message": f"Sent {successful_sends} of {total_tokens} notifications" if is_successful else "Failed to send any notifications",
             "sent": successful_sends,
+            "recipients_count": successful_sends,  # Frontend expects this field
             "total": total_tokens,
             "errors": total_errors,
             "error_details": errors if errors else None
@@ -3833,7 +3835,7 @@ async def send_notification(
         logger.error(f"Error sending notifications: {str(e)}")
         raise HTTPException(
             status_code=500, detail=f"Failed to send notifications: {str(e)}")
-    
+        
 
 # Keep your existing send_push_message function - just pass data through
 async def send_push_message(token: str, title: str, message: str, extra_data: dict = None):
