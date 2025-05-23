@@ -255,11 +255,19 @@ class UnsubscriptionRequest(BaseModel):
     raceId: str
 
 
+class NotificationAction(BaseModel):
+    label: str
+    type: str  # open_url, call_phone, show_map, emergency_contact, download_file
+    url: Optional[str] = None
+    phone: Optional[str] = None
+    coordinates: Optional[str] = None  # "lat,lng" format
+    file_url: Optional[str] = None
+
 class NotificationRequest(BaseModel):
     raceId: str
     title: str
     body: str
-    data: Optional[dict] = None
+    data: Optional[Dict[str, Any]] = {}
 
 
 # ScoringTracks schemas

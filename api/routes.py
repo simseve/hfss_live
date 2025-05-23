@@ -1,7 +1,7 @@
 from api.flight_state import determine_if_landed, detect_flight_state
 from fastapi import APIRouter, Depends, HTTPException, Query, Security, WebSocket, WebSocketDisconnect, Response
 from sqlalchemy.orm import Session
-from database.schemas import LiveTrackingRequest, LiveTrackPointCreate, FlightResponse, TrackUploadRequest, NotificationCommand, SubscriptionRequest, UnsubscriptionRequest, NotificationRequest
+from database.schemas import LiveTrackingRequest, LiveTrackPointCreate, FlightResponse, TrackUploadRequest, NotificationCommand, SubscriptionRequest, UnsubscriptionRequest, NotificationRequest, NotificationAction
 from database.models import UploadedTrackPoint, Flight, LiveTrackPoint, Race, NotificationTokenDB
 from typing import Dict, Optional
 from database.db_conf import get_db
@@ -1852,111 +1852,6 @@ async def unsubscribe_from_notifications(
             status_code=500, detail=f"Failed to unsubscribe: {str(e)}")
 
 
-@router.post("/notifications/send")
-async def send_notification(
-    request: NotificationRequest,
-    credentials: HTTPAuthorizationCredentials = Security(security),
-    db: Session = Depends(get_db)
-):
-    """Send a notification to all subscribers of a specific race"""
-    try:
-        # Verify token
-        token = credentials.credentials
-        try:
-            token_data = jwt.decode(
-                token,
-                settings.SECRET_KEY,
-                algorithms=["HS256"],
-                audience="api.hikeandfly.app",
-                issuer="hikeandfly.app",
-                verify=True
-            )
-        except jwt.ExpiredSignatureError:
-            raise HTTPException(status_code=401, detail="Token has expired")
-        except PyJWTError as e:
-            raise HTTPException(
-                status_code=401, detail=f"Invalid token: {str(e)}")
-
-        # Find all tokens for this race
-        subscription_tokens = db.query(NotificationTokenDB).filter(
-            NotificationTokenDB.race_id == request.raceId
-        ).all()
-
-        if not subscription_tokens:
-            return {
-                "success": False,
-                "message": "No subscribers found for this race",
-                "sent": 0
-            }
-
-        # Send notifications
-        tickets = []
-        errors = []
-        tokens_to_remove = []
-
-        for token_record in subscription_tokens:
-            try:
-                ticket = await send_push_message(
-                    token=token_record.token,
-                    title=request.title,
-                    message=request.body,
-                    extra_data=request.data
-                )
-                tickets.append(ticket)
-            except ValueError as e:
-                if "Device not registered" in str(e):
-                    # Mark token for removal
-                    tokens_to_remove.append(token_record.id)
-                errors.append(
-                    {"token": token_record.token[:10] + "...", "error": str(e)})
-
-        # Clean up invalid tokens
-        if tokens_to_remove:
-            for token_id in tokens_to_remove:
-                db.query(NotificationTokenDB).filter(
-                    NotificationTokenDB.id == token_id
-                ).delete()
-            db.commit()
-
-        return {
-            "success": len(errors) == 0,
-            "sent": len(tickets),
-            "errors": len(errors),
-            "error_details": errors if errors else None
-        }
-
-    except SQLAlchemyError as e:
-        db.rollback()
-        logger.error(f"Database error while sending notifications: {str(e)}")
-        raise HTTPException(
-            status_code=500, detail="Database error while sending notifications")
-    except Exception as e:
-        logger.error(f"Error sending notifications: {str(e)}")
-        raise HTTPException(
-            status_code=500, detail=f"Failed to send notifications: {str(e)}")
-
-# Updated Expo Push Notification Helper Function
-
-
-async def send_push_message(token: str, title: str, message: str, extra_data: dict = None):
-    """Send a push notification using Expo's push notification service"""
-    try:
-        # PushClient().publish() returns a PushTicket directly, not a coroutine
-        # so we shouldn't await it
-        message = PushMessage(
-            to=token,
-            title=title,
-            body=message,
-            data=extra_data or {},
-        )
-        response = PushClient().publish(message)
-        return response
-    except DeviceNotRegisteredError:
-        raise ValueError("Device not registered")
-    except PushServerError as e:
-        raise ValueError(f"Push server error: {e}")
-    except Exception as e:
-        raise ValueError(f"Error sending push notification: {e}")
 
 
 @router.get("/mvt/{z}/{x}/{y}")
@@ -3841,3 +3736,130 @@ async def get_flight_bounds_by_id(
             status_code=500,
             detail=f"Failed to calculate flight bounds: {str(e)}"
         )
+    
+
+
+
+
+# Keep your existing endpoint structure, just enhance the data payload
+@router.post("/notifications/send")
+async def send_notification(
+    request: NotificationRequest,
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    db: Session = Depends(get_db)
+):
+    """Send a notification to all subscribers of a specific race"""
+    try:
+        # Existing auth logic remains the same
+        token = credentials.credentials
+        try:
+            token_data = jwt.decode(
+                token,
+                settings.SECRET_KEY,
+                algorithms=["HS256"],
+                audience="api.hikeandfly.app",
+                issuer="hikeandfly.app",
+                verify=True
+            )
+        except jwt.ExpiredSignatureError:
+            raise HTTPException(status_code=401, detail="Token has expired")
+        except PyJWTError as e:
+            raise HTTPException(
+                status_code=401, detail=f"Invalid token: {str(e)}")
+
+        # Find all tokens for this race (existing logic)
+        subscription_tokens = db.query(NotificationTokenDB).filter(
+            NotificationTokenDB.race_id == request.raceId
+        ).all()
+
+        if not subscription_tokens:
+            return {
+                "success": False,
+                "message": "No subscribers found for this race",
+                "sent": 0
+            }
+
+        # Send notifications (simplified - just pass data through)
+        tickets = []
+        errors = []
+        tokens_to_remove = []
+
+        for token_record in subscription_tokens:
+            try:
+                # Just pass the data through - let mobile app handle priority logic
+                ticket = await send_push_message(
+                    token=token_record.token,
+                    title=request.title,
+                    message=request.body,
+                    extra_data=request.data  # Contains priority, actions, etc.
+                )
+                tickets.append(ticket)
+            except ValueError as e:
+                if "Device not registered" in str(e):
+                    tokens_to_remove.append(token_record.id)
+                errors.append(
+                    {"token": token_record.token[:10] + "...", "error": str(e)})
+
+        # Clean up invalid tokens (existing logic)
+        if tokens_to_remove:
+            for token_id in tokens_to_remove:
+                db.query(NotificationTokenDB).filter(
+                    NotificationTokenDB.id == token_id
+                ).delete()
+            db.commit()
+
+        return {
+            "success": len(errors) == 0,
+            "sent": len(tickets),
+            "errors": len(errors),
+            "error_details": errors if errors else None
+        }
+
+    except SQLAlchemyError as e:
+        db.rollback()
+        logger.error(f"Database error while sending notifications: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail="Database error while sending notifications")
+    except Exception as e:
+        logger.error(f"Error sending notifications: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to send notifications: {str(e)}")
+
+
+# Keep your existing send_push_message function - just pass data through
+async def send_push_message(token: str, title: str, message: str, extra_data: dict = None):
+    """Send a push notification using Expo's push notification service"""
+    try:
+        message = PushMessage(
+            to=token,
+            title=title,
+            body=message,
+            data=extra_data or {},  # Mobile app will read priority, actions, etc. from here
+        )
+        response = PushClient().publish(message)
+        return response
+    except DeviceNotRegisteredError:
+        raise ValueError("Device not registered")
+    except PushServerError as e:
+        raise ValueError(f"Push server error: {e}")
+    except Exception as e:
+        raise ValueError(f"Error sending push notification: {e}")
+
+
+
+# {
+#   "title": "🚨 EMERGENCY ALERT",
+#   "body": "Severe weather approaching. Land immediately.",
+#   "data": {
+#     "priority": "critical",
+#     "category": "safety", 
+#     "urgent": true,
+#     "actions": [
+#       {
+#         "label": "Emergency Contact",
+#         "type": "call_phone", 
+#         "phone": "+41791234567"
+#       }
+#     ]
+#   }
+# }
