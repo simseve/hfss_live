@@ -3738,10 +3738,6 @@ async def get_flight_bounds_by_id(
         )
     
 
-
-
-
-# Keep your existing endpoint structure, just enhance the data payload
 @router.post("/notifications/send")
 async def send_notification(
     request: NotificationRequest,
@@ -3776,13 +3772,16 @@ async def send_notification(
             return {
                 "success": False,
                 "message": "No subscribers found for this race",
-                "sent": 0
+                "sent": 0,
+                "total": 0,
+                "errors": 0
             }
 
-        # Send notifications (simplified - just pass data through)
+        # Send notifications
         tickets = []
         errors = []
         tokens_to_remove = []
+        total_tokens = len(subscription_tokens)
 
         for token_record in subscription_tokens:
             try:
@@ -3808,10 +3807,20 @@ async def send_notification(
                 ).delete()
             db.commit()
 
+        # Calculate success based on whether we sent at least one notification
+        successful_sends = len(tickets)
+        total_errors = len(errors)
+        
+        # Consider it successful if we sent at least one notification
+        # OR if there were no tokens to begin with but auth was successful
+        is_successful = successful_sends > 0
+
         return {
-            "success": len(errors) == 0,
-            "sent": len(tickets),
-            "errors": len(errors),
+            "success": is_successful,
+            "message": f"Sent {successful_sends} of {total_tokens} notifications" if is_successful else "Failed to send any notifications",
+            "sent": successful_sends,
+            "total": total_tokens,
+            "errors": total_errors,
             "error_details": errors if errors else None
         }
 
@@ -3824,7 +3833,7 @@ async def send_notification(
         logger.error(f"Error sending notifications: {str(e)}")
         raise HTTPException(
             status_code=500, detail=f"Failed to send notifications: {str(e)}")
-
+    
 
 # Keep your existing send_push_message function - just pass data through
 async def send_push_message(token: str, title: str, message: str, extra_data: dict = None):
