@@ -1615,7 +1615,7 @@ async def websocket_tracking_endpoint(
 
                 for point in track_points:
                     current_time = point.datetime
-                    if last_added_time is None or (current_time - last_added_time).total_seconds() >= 5:
+                    if last_added_time is None or (current_time - last_added_time).total_seconds() >= 3:
                         downsampled_points.append({
                             "lat": float(point.lat),
                             "lon": float(point.lon),
