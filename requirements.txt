@@ -28,3 +28,5 @@ apscheduler
 mercantile
 mapbox-vector-tile
 GeoAlchemy2
+firebase-admin>=6.0.0
+google-auth>=2.0.0

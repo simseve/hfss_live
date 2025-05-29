@@ -44,6 +44,14 @@ async def lifespan(app):
     else:
         logger.info(f"Database connection check: {message}")
 
+    # Initialize Firebase for FCM notifications
+    try:
+        from api.send_notifications import initialize_firebase
+        initialize_firebase()
+    except Exception as e:
+        logger.error(f"Failed to initialize Firebase: {e}")
+        logger.warning("FCM notifications will not be available")
+
     # Start the background tracking task when the application starts
     track_task = asyncio.create_task(
         periodic_tracking_update(10))  # Update every 10 seconds

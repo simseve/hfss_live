@@ -33,6 +33,14 @@ from exponent_server_sdk import (
 )
 from zoneinfo import ZoneInfo
 
+from .send_notifications import (
+        send_push_message_unified,
+        send_push_messages_batch_unified,
+        detect_token_type,
+        TokenType
+        )
+
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -3740,13 +3748,15 @@ async def get_flight_bounds_by_id(
         )
 
 
+
+
 @router.post("/notifications/send")
 async def send_notification(
     request: NotificationRequest,
     credentials: HTTPAuthorizationCredentials = Security(security),
     db: Session = Depends(get_db)
 ):
-    """Send a notification to all subscribers of a specific race"""
+    """Send a notification to all subscribers of a specific race (supports both Expo and FCM)"""
     try:
         # Existing auth logic remains the same
         token = credentials.credentials
@@ -3775,39 +3785,45 @@ async def send_notification(
                 "success": False,
                 "message": "No subscribers found for this race",
                 "sent": 0,
-                "recipients_count": 0,  # Frontend expects this field
+                "recipients_count": 0,
                 "total": 0,
                 "errors": 0
             }
 
-        # Send notifications using batch processing
+        # Analyze token distribution for logging
+        expo_count = sum(1 for token in subscription_tokens 
+                        if detect_token_type(token.token) == TokenType.EXPO)
+        fcm_count = len(subscription_tokens) - expo_count
+        
+        logger.info(f"Token distribution: {expo_count} Expo, {fcm_count} FCM tokens")
+
+        # Send notifications using unified batch processing
         tickets = []
         errors = []
         tokens_to_remove = []
         total_tokens = len(subscription_tokens)
 
-        # Create batch messages (up to 100 per batch as per Expo limits)
-        batch_size = EXPO_BATCH_SIZE
+        # For FCM, batch size can be up to 500, but we'll keep it consistent
+        batch_size = min(EXPO_BATCH_SIZE, 100)  # Use smaller of the two limits
         logger.info(
-            f"Starting batch notification send for {total_tokens} recipients in batches of {batch_size}")
+            f"Starting unified batch notification send for {total_tokens} recipients in batches of {batch_size}")
 
         for i in range(0, len(subscription_tokens), batch_size):
             batch_tokens = subscription_tokens[i:i + batch_size]
             batch_num = (i // batch_size) + 1
-            total_batches = (len(subscription_tokens) +
-                             batch_size - 1) // batch_size
+            total_batches = (len(subscription_tokens) + batch_size - 1) // batch_size
 
             logger.debug(
                 f"Processing batch {batch_num}/{total_batches} with {len(batch_tokens)} tokens")
 
             try:
-                # Send batch of notifications
-                batch_tickets, batch_errors, batch_tokens_to_remove = await send_push_messages_batch(
+                # Use unified batch sending that handles both Expo and FCM
+                batch_tickets, batch_errors, batch_tokens_to_remove = await send_push_messages_batch_unified(
                     tokens=[token_record.token for token_record in batch_tokens],
                     token_records=batch_tokens,
                     title=request.title,
                     message=request.body,
-                    extra_data=request.data  # Contains priority, actions, etc.
+                    extra_data=request.data
                 )
 
                 tickets.extend(batch_tickets)
@@ -3818,7 +3834,6 @@ async def send_notification(
                     f"Batch {batch_num} completed: {len(batch_tickets)} sent, {len(batch_errors)} errors")
 
                 # Add small delay between batches to respect rate limits
-                # Don't delay after last batch
                 if i + batch_size < len(subscription_tokens):
                     await asyncio.sleep(EXPO_RATE_LIMIT_DELAY)
 
@@ -3826,9 +3841,11 @@ async def send_notification(
                 # If batch fails, fall back to individual sending for this batch
                 logger.warning(
                     f"Batch {batch_num} send failed, falling back to individual sends: {str(e)}")
+                
                 for token_record in batch_tokens:
                     try:
-                        ticket = await send_push_message(
+                        # Use unified individual sending
+                        ticket = await send_push_message_unified(
                             token=token_record.token,
                             title=request.title,
                             message=request.body,
@@ -3836,10 +3853,12 @@ async def send_notification(
                         )
                         tickets.append(ticket)
                     except ValueError as e:
-                        if "Device not registered" in str(e):
+                        if "Device not registered" in str(e) or "not registered" in str(e).lower():
                             tokens_to_remove.append(token_record.id)
-                        errors.append(
-                            {"token": token_record.token[:10] + "...", "error": str(e)})
+                        errors.append({
+                            "token": token_record.token[:10] + "...", 
+                            "error": str(e)
+                        })
 
         # Clean up invalid tokens (existing logic)
         if tokens_to_remove:
@@ -3848,27 +3867,33 @@ async def send_notification(
                     NotificationTokenDB.id == token_id
                 ).delete()
             db.commit()
+            logger.info(f"Removed {len(tokens_to_remove)} invalid tokens")
 
         # Calculate success based on whether we sent at least one notification
         successful_sends = len(tickets)
         total_errors = len(errors)
-
-        # Consider it successful if we sent at least one notification
         is_successful = successful_sends > 0
 
-        # Log batch results for monitoring
+        # Enhanced logging with token type breakdown
         logger.info(
-            f"Batch notification results: {successful_sends}/{total_tokens} sent successfully, {total_errors} errors, {len(tokens_to_remove)} tokens removed")
+            f"Unified notification results: {successful_sends}/{total_tokens} sent successfully, "
+            f"{total_errors} errors, {len(tokens_to_remove)} tokens removed. "
+            f"Token types: {expo_count} Expo, {fcm_count} FCM"
+        )
 
         return {
             "success": is_successful,
             "message": f"Sent {successful_sends} of {total_tokens} notifications" if is_successful else "Failed to send any notifications",
             "sent": successful_sends,
-            "recipients_count": successful_sends,  # Frontend expects this field
+            "recipients_count": successful_sends,
             "total": total_tokens,
             "errors": total_errors,
             "error_details": errors if errors else None,
-            "batch_processing": True  # Indicate this used batch processing
+            "batch_processing": True,
+            "token_distribution": {
+                "expo": expo_count,
+                "fcm": fcm_count
+            }
         }
 
     except SQLAlchemyError as e:
@@ -3880,110 +3905,6 @@ async def send_notification(
         logger.error(f"Error sending notifications: {str(e)}")
         raise HTTPException(
             status_code=500, detail=f"Failed to send notifications: {str(e)}")
-
-
-# Keep your existing send_push_message function - just pass data through
-async def send_push_message(token: str, title: str, message: str, extra_data: dict = None):
-    """Send a push notification using Expo's push notification service"""
-    try:
-        message = PushMessage(
-            to=token,
-            title=title,
-            body=message,
-            data=extra_data or {},  # Mobile app will read priority, actions, etc. from here
-        )
-        response = PushClient().publish(message)
-        return response
-    except DeviceNotRegisteredError:
-        raise ValueError("Device not registered")
-    except PushServerError as e:
-        raise ValueError(f"Push server error: {e}")
-    except Exception as e:
-        raise ValueError(f"Error sending push notification: {e}")
-
-
-async def send_push_messages_batch(tokens: list, token_records: list, title: str, message: str, extra_data: dict = None):
-    """Send multiple push notifications in a single batch using Expo's push notification service"""
-    try:
-        # Create batch of messages
-        messages = []
-        for token in tokens:
-            messages.append(PushMessage(
-                to=token,
-                title=title,
-                body=message,
-                data=extra_data or {},
-            ))
-
-        # Send batch
-        client = PushClient()
-        responses = client.publish_multiple(messages)
-
-        # Process responses
-        tickets = []
-        errors = []
-        tokens_to_remove = []
-
-        # Handle both list and single response cases
-        if not isinstance(responses, list):
-            responses = [responses]
-
-        for i, response in enumerate(responses):
-            if i >= len(token_records):
-                # Safety check - more responses than expected
-                break
-
-            token_record = token_records[i]
-
-            # Check if response indicates an error
-            # Expo responses can be dict-like or have attributes
-            if isinstance(response, dict):
-                status = response.get('status')
-                if status == 'error':
-                    details = response.get('details', {})
-                    message_text = response.get('message', 'Unknown error')
-
-                    if details.get('error') == 'DeviceNotRegistered':
-                        tokens_to_remove.append(token_record.id)
-
-                    errors.append({
-                        "token": token_record.token[:10] + "...",
-                        "error": message_text
-                    })
-                else:
-                    # Successful response
-                    tickets.append(response)
-            elif hasattr(response, 'status'):
-                # Object-like response
-                if response.status == 'error':
-                    error_details = getattr(response, 'details', {})
-                    error_message = getattr(
-                        response, 'message', 'Unknown error')
-
-                    # Check if it's a device not registered error
-                    if (isinstance(error_details, dict) and
-                            error_details.get('error') == 'DeviceNotRegistered'):
-                        tokens_to_remove.append(token_record.id)
-
-                    errors.append({
-                        "token": token_record.token[:10] + "...",
-                        "error": error_message
-                    })
-                else:
-                    # Successful response
-                    tickets.append(response)
-            else:
-                # Assume successful if we can't determine status
-                tickets.append(response)
-
-        return tickets, errors, tokens_to_remove
-
-    except DeviceNotRegisteredError:
-        raise ValueError("Device not registered")
-    except PushServerError as e:
-        raise ValueError(f"Push server error: {e}")
-    except Exception as e:
-        raise ValueError(f"Error sending batch push notifications: {e}")
 
 
 # {

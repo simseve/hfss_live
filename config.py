@@ -1,6 +1,7 @@
 from pydantic_settings import SettingsConfigDict, BaseSettings
-from typing import List
+from typing import List, Optional
 from pydantic import UUID4
+
 
 class Settings(BaseSettings):
     DATABASE_URI: str
@@ -15,7 +16,9 @@ class Settings(BaseSettings):
     HFSS_SERVER: str
     GOOGLE_MAPS_API_KEY: str
 
-
+    # Firebase configuration (optional)
+    FIREBASE_CREDENTIALS: Optional[str] = None
+    FIREBASE_KEY_PATH: Optional[str] = None
 
     def get_target_urls_list(self, target_urls: str) -> List[str]:
         target_urls_value = getattr(self, target_urls, "")
@@ -23,5 +26,6 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = '.env'
+
 
 settings = Settings()
