@@ -77,16 +77,29 @@ def initialize_firebase():
         import os
         from config import settings
         firebase_credentials = settings.FIREBASE_CREDENTIALS
+        project_id = None
+
         if firebase_credentials:
             # Parse JSON credentials from environment variable
             import json
             cred_dict = json.loads(firebase_credentials)
+            project_id = cred_dict.get("project_id")
             cred = credentials.Certificate(cred_dict)
             logger.info("Using Firebase credentials from environment variable")
         else:
             # Option 2: Use service account key file path from environment
             firebase_key_path = settings.FIREBASE_KEY_PATH
             if firebase_key_path and os.path.exists(firebase_key_path):
+                # Read the project_id from the service account file
+                import json
+                try:
+                    with open(firebase_key_path, 'r') as f:
+                        service_account_info = json.load(f)
+                        project_id = service_account_info.get("project_id")
+                except Exception as e:
+                    logger.warning(
+                        f"Could not read project_id from {firebase_key_path}: {e}")
+
                 cred = credentials.Certificate(firebase_key_path)
                 logger.info(
                     f"Using Firebase credentials from file: {firebase_key_path}")
@@ -103,7 +116,15 @@ def initialize_firebase():
                         "FCM notifications will not work. Set FIREBASE_CREDENTIALS or FIREBASE_KEY_PATH environment variable.")
                     return
 
-        firebase_admin.initialize_app(cred)
+        # Initialize Firebase with explicit project_id
+        options = {}
+        if project_id:
+            options['projectId'] = project_id
+            # Also set the environment variable as a fallback
+            os.environ['GOOGLE_CLOUD_PROJECT'] = project_id
+            logger.info(f"Initializing Firebase with project ID: {project_id}")
+
+        firebase_admin.initialize_app(cred, options)
         logger.info("Firebase Admin SDK initialized successfully")
 
     except Exception as e:

@@ -71,4 +71,5 @@ alembic/
 __pycache__/
 *.py[cod]
 *$py.class
-.pytest_cache/hfss-tracker-firebase-adminsdk-fbsvc-71311f0793.json
+.pytest_cache
+hfss-tracker-firebase-adminsdk-fbsvc-95aa431f83.json
