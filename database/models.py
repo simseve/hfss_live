@@ -219,3 +219,45 @@ class ScoringTracks(Base):
 
     def __repr__(self):
         return f"<ScoringTrack(datetime={self.date_time}, lat={self.lat}, lon={self.lon})>"
+
+
+class Flymaster(Base):
+    __tablename__ = 'flymaster'
+
+    date_time = Column(DateTime(timezone=True),
+                       primary_key=True, nullable=False)
+    device_id = Column(Integer, primary_key=True, nullable=False)
+    lat = Column(Float(precision=53), nullable=False)
+    lon = Column(Float(precision=53), nullable=False)
+    gps_alt = Column(Float(precision=53), nullable=False)
+    heading = Column(Float(precision=53), nullable=True)
+    speed = Column(Float(precision=53), nullable=True)
+    # First timestamp from file
+    uploaded_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False,
+                        default=lambda: datetime.now(timezone.utc))
+    # Add a geometry column for the point location (SRID 4326 = WGS84)
+    geom = Column(Geometry('POINT', srid=4326))
+
+    __table_args__ = (
+        # Time-based indices for hypertable performance
+        Index('idx_flymaster_datetime', 'date_time'),
+        Index('idx_flymaster_device_time', 'device_id', 'date_time'),
+
+        # Unique constraint to prevent duplicate points
+        UniqueConstraint('device_id', 'date_time', 'lat', 'lon',
+                         name='flymaster_unique_point'),
+
+        # Spatial indices
+        Index('idx_flymaster_geom', 'geom', postgresql_using='gist'),
+
+        # Add functional index on transformed geometry for Web Mercator (EPSG:3857)
+        Index('idx_flymaster_transformed_geom',
+              text('ST_Transform(geom, 3857)'), postgresql_using='gist'),
+
+        # Table comment for TimescaleDB hypertable
+        {'comment': 'hypertable:timescaledb:date_time'}
+    )
+
+    def __repr__(self):
+        return f"<Flymaster(device_id={self.device_id}, date_time={self.date_time})>"
