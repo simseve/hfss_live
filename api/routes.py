@@ -1,8 +1,8 @@
 from api.flight_state import determine_if_landed, detect_flight_state
-from fastapi import APIRouter, Depends, HTTPException, Query, Security, WebSocket, WebSocketDisconnect, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Security, WebSocket, WebSocketDisconnect, Response, UploadFile, File
 from sqlalchemy.orm import Session
-from database.schemas import LiveTrackingRequest, LiveTrackPointCreate, FlightResponse, TrackUploadRequest, NotificationCommand, SubscriptionRequest, UnsubscriptionRequest, NotificationRequest, NotificationAction
-from database.models import UploadedTrackPoint, Flight, LiveTrackPoint, Race, NotificationTokenDB
+from database.schemas import LiveTrackingRequest, LiveTrackPointCreate, FlightResponse, TrackUploadRequest, NotificationCommand, SubscriptionRequest, UnsubscriptionRequest, NotificationRequest, FlymasterBatchCreate, FlymasterBatchResponse, FlymasterPointCreate
+from database.models import UploadedTrackPoint, Flight, LiveTrackPoint, Race, NotificationTokenDB, Flymaster
 from typing import Dict, Optional
 from database.db_conf import get_db
 import logging
@@ -34,11 +34,11 @@ from exponent_server_sdk import (
 from zoneinfo import ZoneInfo
 
 from .send_notifications import (
-        send_push_message_unified,
-        send_push_messages_batch_unified,
-        detect_token_type,
-        TokenType
-        )
+    send_push_message_unified,
+    send_push_messages_batch_unified,
+    detect_token_type,
+    TokenType
+)
 
 
 logger = logging.getLogger(__name__)
@@ -1117,8 +1117,8 @@ async def get_uploaded_points(
                 "lastFixTime": track_points[-1].datetime.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 # Number of points in filtered result
                 "totalPoints": len(track_points),
+                "flightFirstFix": flight.first_fix['datetime'],
                 "flightTotalPoints": flight.total_points         # Total points in flight
-
             }
         }
 
@@ -1861,7 +1861,8 @@ async def unsubscribe_from_notifications(
     except Exception as e:
         logger.error(f"Error unsubscribing from notifications: {str(e)}")
         raise HTTPException(
-            status_code=500, detail=f"Failed to unsubscribe: {str(e)}")
+            status_code=500, detail=f"Failed to unsubscribe: {str(e)}"
+        )
 
 
 @router.get("/mvt/{z}/{x}/{y}")
@@ -2375,10 +2376,10 @@ async def get_daily_tracks_tile(
             AND (
                 1=1
                 -- Always include special points
-                OR EXISTS (
-                    SELECT 1 FROM special_points sp 
-                    WHERE sp.id = t.id
-                )
+                -- OR EXISTS (
+                --     SELECT 1 FROM special_points sp 
+                --     WHERE sp.id = t.id
+                -- )
             )
             ORDER BY t.pilot_id, t.datetime
         ),
@@ -2388,9 +2389,9 @@ async def get_daily_tracks_tile(
                 ST_AsMVTGeom(
                     ST_Transform(fp.geom, 3857), 
                     (SELECT geom FROM bounds),
-                    4096,            -- Resolution: standard is 4096 for MVT
+                    4096,    -- Resolution: standard is 4096 for MVT
                     {buffer_size},   -- Buffer: to avoid clipping at tile edges
-                    true             -- Clip geometries
+                    true     -- Clip geometries
                 ) AS geom,
                 fp.elevation::float as elevation,
                 fp.datetime::text as datetime,
@@ -2407,9 +2408,9 @@ async def get_daily_tracks_tile(
                 ST_AsMVTGeom(
                     ST_Transform(pft.full_track_geom, 3857),
                     (SELECT geom FROM bounds),
-                    4096,            -- Resolution
+                    4096,    -- Resolution
                     {buffer_size},   -- Buffer
-                    true             -- Clip geometries
+                    true     -- Clip geometries
                 ) AS geom,
                 pft.pilot_id,
                 pft.pilot_name,
@@ -2446,7 +2447,8 @@ async def get_daily_tracks_tile(
     except Exception as e:
         logger.error(f"Error generating daily tracks vector tile: {str(e)}")
         raise HTTPException(
-            status_code=500, detail=f"Failed to generate daily tracks tile: {str(e)}")
+            status_code=500, detail=f"Failed to generate daily tracks tile: {str(e)}"
+        )
 
 
 @router.get("/track-preview/{flight_uuid}")
@@ -2846,16 +2848,10 @@ async def get_track_preview_id(
         ).first()
 
         flight_uuid = str(flight.id) if flight else None
-        if not flight_uuid:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Flight not found with ID {flight_id}"
-            )
-
         if not flight:
             raise HTTPException(
                 status_code=404,
-                detail=f"Flight not found with UUID {flight_uuid}"
+                detail=f"Flight not found with ID {flight_id}"
             )
 
         # Get the encoded polyline for the flight with simplification
@@ -3197,186 +3193,6 @@ async def get_track_linestring(
         )
 
 
-@router.get("/track-line-uuid/{flight_uuid}")
-async def get_track_linestring_uuid(
-    flight_uuid: UUID,
-    simplify: bool = Query(
-        False, description="Whether to simplify the track geometry. If true, provides sampled coordinates for better performance."),
-    credentials: HTTPAuthorizationCredentials = Security(security),
-    db: Session = Depends(get_db)
-):
-    """
-    Return the complete flight track as a GeoJSON LineString.
-    Uses the PostGIS functions to generate the geometry.
-
-    Parameters:
-    - flight_uuid: UUID of the flight
-    - simplify: Optional parameter to simplify the line geometry (useful for large tracks)
-    """
-    try:
-        # Verify token
-        token = credentials.credentials
-        try:
-            token_data = jwt.decode(
-                token,
-                settings.SECRET_KEY,
-                algorithms=["HS256"],
-                audience="api.hikeandfly.app",
-                issuer="hikeandfly.app",
-                verify=True
-            )
-
-            if not token_data.get("sub", "").startswith("contest:"):
-                raise HTTPException(
-                    status_code=403,
-                    detail="Invalid token subject - must be contest-specific"
-                )
-
-        except jwt.ExpiredSignatureError:
-            raise HTTPException(status_code=401, detail="Token expired")
-        except PyJWTError as e:
-            raise HTTPException(
-                status_code=401, detail=f"Invalid token: {str(e)}")
-
-        # Check if flight exists
-        flight = db.query(Flight).filter(
-            Flight.id == flight_uuid
-        ).first()
-
-        if not flight:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Flight not found with UUID {flight_uuid}"
-            )
-
-        # Build query to get LineString
-        if flight.source == 'live':
-            func_name = 'generate_live_track_linestring'
-        else:  # source == 'upload'
-            func_name = 'generate_uploaded_track_linestring'
-
-        # Handle simplification
-        if simplify:
-            # Use a default moderate value for simplification
-            simplify_value = 0.0001
-
-            query = f"""
-            WITH original AS (
-                SELECT {func_name}('{flight_uuid}'::uuid) AS geom
-            )
-            SELECT 
-                CASE 
-                    -- Check if the simplified geometry has enough points to be useful
-                    WHEN ST_NPoints(ST_SimplifyPreserveTopology(geom, {simplify_value})) >= 10 
-                        THEN ST_AsGeoJSON(ST_SimplifyPreserveTopology(geom, {simplify_value}))
-                    -- Otherwise return the original geometry
-                    ELSE ST_AsGeoJSON(geom) 
-                END as geojson,
-                CASE 
-                    WHEN ST_NPoints(ST_SimplifyPreserveTopology(geom, {simplify_value})) >= 10 
-                        THEN ST_AsEncodedPolyline(ST_SimplifyPreserveTopology(geom, {simplify_value}))
-                    ELSE ST_AsEncodedPolyline(geom) 
-                END as encoded_polyline
-            FROM original;
-            """
-        else:
-            # No simplification, return all points
-            query = f"""
-            SELECT 
-                ST_AsGeoJSON({func_name}('{flight_uuid}'::uuid)) as geojson,
-                ST_AsEncodedPolyline({func_name}('{flight_uuid}'::uuid)) as encoded_polyline;
-            """
-
-        # Execute query
-        result = db.execute(text(query)).fetchone()
-
-        if not result or not result[0]:
-            # If no tracking points, return empty LineString
-            return {
-                "type": "Feature",
-                "geometry": {
-                    "type": "LineString",
-                    "coordinates": []
-                },
-                "properties": {
-                    "flight_id": flight.flight_id,
-                    "flight_uuid": str(flight.id),
-                    "pilot_name": flight.pilot_name,
-                    "source": flight.source,
-                    "total_points": flight.total_points,
-                    "empty": True,
-                    "encoded_polyline": ""
-                }
-            }
-
-        # Build GeoJSON response
-        linestring_geojson = result[0]
-        encoded_polyline = result[1] if result[1] else ""
-
-        # Parse the GeoJSON
-        geometry = json.loads(linestring_geojson)
-
-        # Handle sampling of coordinates for response when simplify=true
-        sampled_coords = []
-        if geometry and geometry.get('coordinates') and len(geometry['coordinates']) > 0:
-            coords = geometry['coordinates']
-
-            # Sample coordinates if needed for response
-            if len(coords) > 50 and simplify:
-                # Always include first and last points
-                first_point = coords[0]
-                last_point = coords[-1]
-
-                # Sample middle points - take about 48 points evenly distributed
-                sample_step = len(coords) // 48
-                sampled_coords = [coords[i]
-                                  for i in range(0, len(coords), sample_step)]
-
-                # Ensure we include the last point if it wasn't included in sampling
-                if sampled_coords[-1] != last_point:
-                    sampled_coords.append(last_point)
-            else:
-                sampled_coords = coords
-
-        # Use sampled coordinates for the response geometry if simplify=true
-        response_geometry = None
-        if simplify and len(sampled_coords) > 0:
-            response_geometry = {
-                "type": "LineString",
-                "coordinates": sampled_coords
-            }
-        else:
-            response_geometry = json.loads(linestring_geojson)
-
-        # Return formatted response
-        return {
-            "type": "Feature",
-            "geometry": response_geometry,
-            "properties": {
-                "flight_id": flight.flight_id,
-                "flight_uuid": str(flight.id),
-                "pilot_name": flight.pilot_name,
-                "pilot_id": flight.pilot_id,
-                "source": flight.source,
-                "total_points": flight.total_points,
-                "first_fix": flight.first_fix,
-                "last_fix": flight.last_fix,
-                "simplified": simplify,
-                "sampled": simplify and len(sampled_coords) > 0,
-                "encoded_polyline": encoded_polyline
-            }
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error generating track linestring: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to generate track linestring: {str(e)}"
-        )
-
-
 @router.get("/flight-state/{flight_uuid}", response_model=Dict)
 async def get_flight_state_endpoint(
     flight_uuid: str,
@@ -3410,6 +3226,8 @@ async def get_flight_state_endpoint(
                     status_code=403,
                     detail="Invalid token subject - must be contest-specific"
                 )
+
+            race_id = token_data["sub"].split(":")[1]
 
         except jwt.ExpiredSignatureError:
             raise HTTPException(
@@ -3564,7 +3382,8 @@ async def get_flight_bounds(
             raise HTTPException(status_code=401, detail="Token expired")
         except PyJWTError as e:
             raise HTTPException(
-                status_code=401, detail=f"Invalid token: {str(e)}")
+                status_code=401, detail=f"Invalid token: {str(e)}"
+            )
 
         # Check if flight exists
         flight = db.query(Flight).filter(
@@ -3748,8 +3567,6 @@ async def get_flight_bounds_by_id(
         )
 
 
-
-
 @router.post("/notifications/send")
 async def send_notification(
     request: NotificationRequest,
@@ -3773,7 +3590,8 @@ async def send_notification(
             raise HTTPException(status_code=401, detail="Token has expired")
         except PyJWTError as e:
             raise HTTPException(
-                status_code=401, detail=f"Invalid token: {str(e)}")
+                status_code=401, detail=f"Invalid token: {str(e)}"
+            )
 
         # Find all tokens for this race (existing logic)
         subscription_tokens = db.query(NotificationTokenDB).filter(
@@ -3791,11 +3609,12 @@ async def send_notification(
             }
 
         # Analyze token distribution for logging
-        expo_count = sum(1 for token in subscription_tokens 
-                        if detect_token_type(token.token) == TokenType.EXPO)
+        expo_count = sum(1 for token in subscription_tokens
+                         if detect_token_type(token.token) == TokenType.EXPO)
         fcm_count = len(subscription_tokens) - expo_count
-        
-        logger.info(f"Token distribution: {expo_count} Expo, {fcm_count} FCM tokens")
+
+        logger.info(
+            f"Token distribution: {expo_count} Expo, {fcm_count} FCM tokens")
 
         # Send notifications using unified batch processing
         tickets = []
@@ -3811,7 +3630,8 @@ async def send_notification(
         for i in range(0, len(subscription_tokens), batch_size):
             batch_tokens = subscription_tokens[i:i + batch_size]
             batch_num = (i // batch_size) + 1
-            total_batches = (len(subscription_tokens) + batch_size - 1) // batch_size
+            total_batches = (len(subscription_tokens) +
+                             batch_size - 1) // batch_size
 
             logger.debug(
                 f"Processing batch {batch_num}/{total_batches} with {len(batch_tokens)} tokens")
@@ -3841,7 +3661,7 @@ async def send_notification(
                 # If batch fails, fall back to individual sending for this batch
                 logger.warning(
                     f"Batch {batch_num} send failed, falling back to individual sends: {str(e)}")
-                
+
                 for token_record in batch_tokens:
                     try:
                         # Use unified individual sending
@@ -3856,7 +3676,7 @@ async def send_notification(
                         if "Device not registered" in str(e) or "not registered" in str(e).lower():
                             tokens_to_remove.append(token_record.id)
                         errors.append({
-                            "token": token_record.token[:10] + "...", 
+                            "token": token_record.token[:10] + "...",
                             "error": str(e)
                         })
 
@@ -3904,7 +3724,8 @@ async def send_notification(
     except Exception as e:
         logger.error(f"Error sending notifications: {str(e)}")
         raise HTTPException(
-            status_code=500, detail=f"Failed to send notifications: {str(e)}")
+            status_code=500, detail=f"Failed to send notifications: {str(e)}"
+        )
 
 
 # {
@@ -3923,3 +3744,409 @@ async def send_notification(
 #     ]
 #   }
 # }
+
+
+@router.post("/flymaster/upload/file", response_model=FlymasterBatchResponse)
+async def upload_flymaster_file(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Upload Flymaster tracking data from a file in the format:
+    device_serial, sha256key
+    list of points with uploaded_at, date_time (unix timestamp), lat, lon, gps_alt, speed, heading
+    EOF
+    """
+    try:
+        # Read file content
+        content = await file.read()
+        content_str = content.decode('utf-8')
+        lines = content_str.strip().split('\n')
+
+        if len(lines) < 3:
+            raise HTTPException(status_code=400, detail="Invalid file format")
+
+        # Parse header line (format: device_serial, sha256key)
+        header_parts = lines[0].split(',')
+        if len(header_parts) != 2:
+            raise HTTPException(
+                status_code=400, detail="Invalid header format: expected 'device_serial, sha256key'")
+
+        device_serial = header_parts[0].strip()
+        sha256key = header_parts[1].strip()
+
+        # Convert device_serial directly to integer (it's already a numeric device ID)
+        try:
+            device_id = int(device_serial)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid device_serial format: expected integer, got '{device_serial}'"
+            )
+
+        # Validate SHA256 key - it should be HMAC-SHA256(device_id, secret)
+        import hashlib
+        import hmac
+        expected_sha256 = hmac.new(
+            settings.FLYMASTER_SECRET.encode(),
+            str(device_id).encode(),
+            hashlib.sha256
+        ).hexdigest()
+
+        if sha256key != expected_sha256:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid SHA256 key - authentication failed"
+            )
+
+        # Find EOF
+        eof_index = -1
+        for i, line in enumerate(lines):
+            if line.strip() == "EOF":
+                eof_index = i
+                break
+
+        if eof_index == -1:
+            raise HTTPException(status_code=400, detail="EOF marker not found")
+
+        # Parse data points (between header and EOF)
+        data_lines = lines[1:eof_index]
+        points = []
+
+        for line in data_lines:
+            line = line.strip()
+            if not line:
+                continue
+
+            try:
+                # Expected format: uploaded_at, date_time (unix timestamp), lat, lon, gps_alt, speed, heading
+                parts = [part.strip() for part in line.split(',')]
+                if len(parts) != 7:
+                    logger.warning(f"Skipping malformed line: {line}")
+                    continue
+
+                # Convert unix timestamps to datetime
+                uploaded_at_unix = int(parts[0])
+                unix_timestamp = int(parts[1])
+                uploaded_at_dt = datetime.fromtimestamp(
+                    uploaded_at_unix, tz=timezone.utc)
+                date_time = datetime.fromtimestamp(
+                    unix_timestamp, tz=timezone.utc)
+
+                point = {
+                    "device_id": device_id,
+                    "date_time": date_time,
+                    "lat": float(parts[2]),
+                    "lon": float(parts[3]),
+                    "gps_alt": float(parts[4]),
+                    "heading": float(parts[6]),  # heading/bearing
+                    "speed": float(parts[5]),
+                    "uploaded_at": uploaded_at_dt
+                }
+                points.append(point)
+
+            except (ValueError, IndexError) as e:
+                logger.warning(
+                    f"Skipping invalid line: {line}, error: {str(e)}")
+                continue
+
+        # Create the batch request
+        flymaster_points = [FlymasterPointCreate(**point) for point in points]
+
+        batch_request = FlymasterBatchCreate(
+            device_serial=device_serial,
+            sha256key=sha256key,
+            points=flymaster_points
+        )
+
+        # Use fast batch insert without duplicate checking
+        points_added = 0
+        points_skipped = 0
+
+        logger.info(
+            f"Processing Flymaster file upload for device {device_id} with {len(flymaster_points)} points")
+
+        if flymaster_points:
+            try:
+                # Create Flymaster objects for batch insert
+                from geoalchemy2.functions import ST_SetSRID, ST_MakePoint
+                flymaster_objects = []
+
+                for point in flymaster_points:
+                    flymaster_point = Flymaster(
+                        device_id=point.device_id,
+                        date_time=point.date_time,
+                        lat=point.lat,
+                        lon=point.lon,
+                        gps_alt=point.gps_alt,
+                        heading=point.heading,
+                        speed=point.speed,
+                        uploaded_at=point.uploaded_at or datetime.now(
+                            timezone.utc),
+                        geom=ST_SetSRID(ST_MakePoint(
+                            point.lon, point.lat), 4326)
+                    )
+                    flymaster_objects.append(flymaster_point)
+
+                # Fast batch insert all objects
+                db.add_all(flymaster_objects)
+                db.commit()
+                points_added = len(flymaster_objects)
+
+                logger.info(
+                    f"Successfully inserted {points_added} Flymaster points via batch insert")
+
+            except Exception as e:
+                db.rollback()
+                logger.error(f"Error in batch insert: {str(e)}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to insert points: {str(e)}"
+                )
+
+        logger.info(
+            f"Flymaster file upload completed: {points_added} added, {points_skipped} skipped")
+
+        return FlymasterBatchResponse(
+            device_serial=device_serial,
+            points_added=points_added,
+            points_skipped=points_skipped,
+            message=f"Successfully processed {points_added} points from file, skipped {points_skipped} duplicates"
+        )
+
+    except HTTPException:
+        raise
+    except SQLAlchemyError as e:
+        db.rollback()
+        logger.error(f"Database error during Flymaster file upload: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Database error during file upload"
+        )
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error during Flymaster file upload: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to upload Flymaster file: {str(e)}"
+        )
+
+
+# @router.post("/flymaster/upload", response_model=FlymasterFileUploadResponse)
+# async def upload_flymaster_data(
+#     file: UploadFile = File(...),
+#     db: Session = Depends(get_db)
+# ):
+#     """
+#     Upload Flymaster tracking data in the specific format:
+#     First line: device_serial, sha256key
+#     Second line onwards: uploaded_at, date_time (unix timestamp), lat, lon, gps_alt, speed, bearing
+#     Last line: EOF
+
+#     Returns 200 even if SHA256 key is invalid but includes failure message.
+#     """
+#     try:
+#         # Read file content
+#         content = await file.read()
+#         content_str = content.decode('utf-8')
+#         lines = content_str.strip().split('\n')
+
+#         if len(lines) < 3:  # At least header + one data line + EOF
+#             return FlymasterFileUploadResponse(
+#                 device_serial="unknown",
+#                 sha256key=settings.FLYMASTER_SECRET,
+#                 uploaded_at=datetime.fromtimestamp(0, tz=timezone.utc),
+#                 points_added=0,
+#                 points_skipped=0,
+#                 message="Invalid file format: insufficient lines",
+#                 success=False
+#             )
+
+#         # Parse header line
+#         header_parts = lines[0].split(',')
+#         if len(header_parts) != 2:
+#             return FlymasterFileUploadResponse(
+#                 device_serial="unknown",
+#                 sha256key="",
+#                 uploaded_at=datetime.fromtimestamp(0, tz=timezone.utc),
+#                 points_added=0,
+#                 points_skipped=0,
+#                 message="Invalid header format: expected 'device_serial, sha256key'",
+#                 success=False
+#             )
+
+#         device_serial = header_parts[0].strip()
+#         sha256key = header_parts[1].strip()
+
+#         # Extract device_id from device_serial (assuming format like "device123")
+#         try:
+#             device_id = int(device_serial.replace('device', ''))
+#         except ValueError:
+#             # If device_serial doesn't follow expected pattern, use a hash or default
+#             device_id = abs(hash(device_serial)) % 1000000
+
+#         # Validate SHA256 key (simple check - you can implement proper validation)
+#         sha256_valid = len(sha256key) == 64 and all(
+#             c in '0123456789abcdefABCDEF' for c in sha256key)
+
+#         # Find EOF
+#         eof_index = -1
+#         for i, line in enumerate(lines):
+#             if line.strip() == "EOF":
+#                 eof_index = i
+#                 break
+
+#         if eof_index == -1:
+#             return FlymasterFileUploadResponse(
+#                 device_serial=device_serial,
+#                 sha256key=sha256key,
+#                 uploaded_at=datetime.fromtimestamp(0, tz=timezone.utc),
+#                 points_added=0,
+#                 points_skipped=0,
+#                 message="EOF marker not found",
+#                 success=False
+#             )
+
+#         # Parse data points (between header and EOF)
+#         data_lines = lines[1:eof_index]
+#         points = []
+#         uploaded_at = None
+
+#         for line in data_lines:
+#             line = line.strip()
+#             if not line:
+#                 continue
+
+#             try:
+#                 # Expected format: uploaded_at, date_time (unix timestamp), lat, lon, gps_alt, speed, bearing
+#                 parts = [part.strip() for part in line.split(',')]
+#                 if len(parts) != 7:
+#                     logger.warning(f"Skipping malformed line: {line}")
+#                     continue
+
+#                 # Convert unix timestamps to datetime objects
+#                 point_uploaded_at_unix = int(parts[0])
+#                 point_date_time_unix = int(parts[1])
+
+#                 # Convert to timezone-aware datetime objects
+#                 point_uploaded_at = datetime.fromtimestamp(
+#                     point_uploaded_at_unix, tz=timezone.utc)
+#                 point_date_time = datetime.fromtimestamp(
+#                     point_date_time_unix, tz=timezone.utc)
+
+#                 if uploaded_at is None:
+#                     uploaded_at = point_uploaded_at
+
+#                 point = {
+#                     "device_id": device_id,
+#                     "date_time": point_date_time,
+#                     "lat": float(parts[2]),
+#                     "lon": float(parts[3]),
+#                     "gps_alt": float(parts[4]),
+#                     "speed": float(parts[5]),
+#                     "heading": float(parts[6]),  # bearing/heading
+#                     "uploaded_at": point_uploaded_at
+#                 }
+#                 points.append(point)
+
+#             except (ValueError, IndexError) as e:
+#                 logger.warning(
+#                     f"Skipping invalid line: {line}, error: {str(e)}")
+#                 continue
+
+#         if uploaded_at is None:
+#             uploaded_at = datetime.fromtimestamp(0, tz=timezone.utc)
+
+#         # Process points even if SHA256 is invalid (return 200 as requested)
+#         points_added = 0
+#         points_skipped = 0
+
+#         logger.info(
+#             f"Processing Flymaster upload for device {device_serial} with {len(points)} points, SHA256 valid: {sha256_valid}")
+
+#         # Process each point
+#         for point_data in points:
+#             try:
+#                 # Check if point already exists (handle duplicates)
+#                 existing = db.query(Flymaster).filter(
+#                     Flymaster.device_id == point_data["device_id"],
+#                     Flymaster.date_time == point_data["date_time"],
+#                     Flymaster.lat == point_data["lat"],
+#                     Flymaster.lon == point_data["lon"]
+#                 ).first()
+
+#                 if existing:
+#                     points_skipped += 1
+#                     continue
+
+#                 # Create new Flymaster record with spatial geometry
+#                 from geoalchemy2 import func as geo_func
+#                 flymaster_point = Flymaster(
+#                     device_id=point_data["device_id"],
+#                     date_time=point_data["date_time"],
+#                     lat=point_data["lat"],
+#                     lon=point_data["lon"],
+#                     gps_alt=point_data["gps_alt"],
+#                     heading=point_data["heading"],
+#                     speed=point_data["speed"],
+#                     uploaded_at=point_data["uploaded_at"],
+#                     geom=geo_func.ST_SetSRID(geo_func.ST_MakePoint(
+#                         point_data["lon"], point_data["lat"]), 4326)
+#                 )
+
+#                 db.add(flymaster_point)
+#                 points_added += 1
+
+#             except Exception as e:
+#                 logger.error(f"Error processing point {point_data}: {str(e)}")
+#                 points_skipped += 1
+#                 continue
+
+#         # Commit all new points
+#         try:
+#             db.commit()
+#         except SQLAlchemyError as e:
+#             db.rollback()
+#             logger.error(f"Database error: {str(e)}")
+#             return FlymasterFileUploadResponse(
+#                 device_serial=device_serial,
+#                 sha256key=sha256key,
+#                 uploaded_at=uploaded_at,
+#                 points_added=0,
+#                 points_skipped=len(points),
+#                 message=f"Database error: {str(e)}",
+#                 success=False
+#             )
+
+#         # Prepare success/warning message
+#         if not sha256_valid:
+#             message = f"SHA256 key invalid but data processed: {points_added} points added, {points_skipped} skipped"
+#             success = False
+#         else:
+#             message = f"Successfully processed {points_added} points, skipped {points_skipped} duplicates"
+#             success = True
+
+#         logger.info(
+#             f"Flymaster upload completed: {points_added} added, {points_skipped} skipped, SHA256 valid: {sha256_valid}")
+
+#         return FlymasterFileUploadResponse(
+#             device_serial=device_serial,
+#             sha256key=sha256key,
+#             uploaded_at=uploaded_at,
+#             points_added=points_added,
+#             points_skipped=points_skipped,
+#             message=message,
+#             success=success
+#         )
+
+#     except Exception as e:
+#         logger.error(f"Error during Flymaster upload: {str(e)}")
+#         return FlymasterFileUploadResponse(
+#             device_serial="unknown",
+#             sha256key="",
+#             uploaded_at=datetime.fromtimestamp(0, tz=timezone.utc),
+#             points_added=0,
+#             points_skipped=0,
+#             message=f"Upload failed: {str(e)}",
+#             success=False
+#         )

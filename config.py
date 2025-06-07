@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     BUCKET_NAME: str
     HFSS_SERVER: str
     GOOGLE_MAPS_API_KEY: str
+    FLYMASTER_SECRET: str
 
     # Firebase configuration (optional)
     FIREBASE_CREDENTIALS: Optional[str] = None

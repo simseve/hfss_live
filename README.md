@@ -87,6 +87,13 @@ SELECT create_hypertable('scoring_tracks', 'date_time',
                         chunk_time_interval => INTERVAL '1 day',
                         if_not_exists => TRUE);
 
+SELECT create_hypertable(
+    'flymaster', 
+    'date_time',
+    chunk_time_interval => INTERVAL '1 day',
+    if_not_exists => TRUE
+);
+
 -- Grant privileges
 GRANT ALL PRIVILEGES ON TABLE live_track_points TO py_ll_user;
 GRANT ALL PRIVILEGES ON TABLE uploaded_track_points TO py_ll_user;
@@ -94,6 +101,7 @@ GRANT ALL PRIVILEGES ON TABLE flights TO py_ll_user;
 GRANT ALL PRIVILEGES ON TABLE races TO py_ll_user;
 GRANT ALL PRIVILEGES ON TABLE notification_tokens TO py_ll_user;
 GRANT ALL PRIVILEGES ON TABLE scoring_tracks TO py_ll_user;
+GRANT ALL PRIVILEGES ON TABLE flymaster TO py_ll_user;
 
 -- Common privileges needed for both tables
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO py_ll_user;
