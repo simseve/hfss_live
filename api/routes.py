@@ -40,6 +40,10 @@ from .send_notifications import (
     TokenType
 )
 
+# Import queue system
+from redis_queue_system.redis_queue import redis_queue, QUEUE_NAMES
+from redis_queue_system.point_processor import point_processor
+
 
 logger = logging.getLogger(__name__)
 
@@ -179,23 +183,48 @@ async def live_tracking(
             f"Saving {len(track_points)} track points for flight {data.flight_id}")
 
         try:
-            # Use insert().on_conflict_do_nothing() instead of bulk_save_objects
-            stmt = insert(LiveTrackPoint).on_conflict_do_nothing(
-                index_elements=['flight_id', 'lat', 'lon', 'datetime']
+            # Queue points for background processing instead of immediate DB insert
+            points_data = [vars(point) for point in track_points]
+            queued = await redis_queue.queue_points(
+                QUEUE_NAMES['live'],
+                points_data,
+                priority=1  # High priority for live tracking
             )
-            db.execute(stmt, [vars(point) for point in track_points])
-            db.commit()
-            asyncio.create_task(update_flight_state(flight.id, db))
-            logger.info(
-                f"Successfully saved track points for flight {data.flight_id}")
 
-            return {
-                'success': True,
-                'message': f'Live tracking data processed ({len(track_points)} points)',
-                'flight_id': data.flight_id,
-                'pilot_name': pilot_name,
-                'total_points': flight.total_points
-            }
+            if queued:
+                # Commit flight updates immediately
+                db.commit()
+                asyncio.create_task(update_flight_state(flight.id, db))
+                logger.info(
+                    f"Successfully queued {len(track_points)} track points for flight {data.flight_id}")
+
+                return {
+                    'success': True,
+                    'message': f'Live tracking data queued for processing ({len(track_points)} points)',
+                    'flight_id': data.flight_id,
+                    'pilot_name': pilot_name,
+                    'total_points': flight.total_points,
+                    'queued': True
+                }
+            else:
+                # Fallback to direct insertion if queueing fails
+                stmt = insert(LiveTrackPoint).on_conflict_do_nothing(
+                    index_elements=['flight_id', 'lat', 'lon', 'datetime']
+                )
+                db.execute(stmt, points_data)
+                db.commit()
+                asyncio.create_task(update_flight_state(flight.id, db))
+                logger.info(
+                    f"Successfully saved track points for flight {data.flight_id} (fallback)")
+
+                return {
+                    'success': True,
+                    'message': f'Live tracking data processed ({len(track_points)} points)',
+                    'flight_id': data.flight_id,
+                    'pilot_name': pilot_name,
+                    'total_points': flight.total_points,
+                    'queued': False
+                }
         except SQLAlchemyError as e:
             db.rollback()
             logger.error(f"Failed to save track points: {str(e)}")
@@ -338,18 +367,42 @@ async def upload_track(
             ]
 
             try:
-                stmt = insert(UploadedTrackPoint).on_conflict_do_nothing(
-                    index_elements=['flight_id', 'lat', 'lon', 'datetime']
+                # Queue points for background processing instead of immediate DB insert
+                points_data = [vars(point) for point in track_points_db]
+                queued = await redis_queue.queue_points(
+                    QUEUE_NAMES['upload'],
+                    points_data,
+                    priority=2  # Medium priority for uploads
                 )
-                db.execute(stmt, [vars(point) for point in track_points_db])
-                db.commit()
 
-                # Asynchronously update the flight state with 'upload' source (don't wait for it to complete)
-                asyncio.create_task(update_flight_state(
-                    flight.id, db, source='upload'))
-                logger.info(
-                    f"Successfully processed upload for flight {upload_data.flight_id}")
-                return flight
+                if queued:
+                    # Commit flight record immediately
+                    db.commit()
+                    # Asynchronously update the flight state with 'upload' source
+                    asyncio.create_task(update_flight_state(
+                        flight.id, db, source='upload'))
+                    logger.info(
+                        f"Successfully queued upload for flight {upload_data.flight_id}")
+
+                    # Add queue info to response
+                    flight_dict = flight.__dict__.copy()
+                    flight_dict['queued'] = True
+                    flight_dict['queue_size'] = await redis_queue.get_queue_size(QUEUE_NAMES['upload'])
+                    return flight
+                else:
+                    # Fallback to direct insertion if queueing fails
+                    stmt = insert(UploadedTrackPoint).on_conflict_do_nothing(
+                        index_elements=['flight_id', 'lat', 'lon', 'datetime']
+                    )
+                    db.execute(stmt, points_data)
+                    db.commit()
+
+                    # Asynchronously update the flight state with 'upload' source
+                    asyncio.create_task(update_flight_state(
+                        flight.id, db, source='upload'))
+                    logger.info(
+                        f"Successfully processed upload for flight {upload_data.flight_id} (fallback)")
+                    return flight
             except SQLAlchemyError as e:
                 db.rollback()
                 logger.error(f"Failed to save track points: {str(e)}")
@@ -924,6 +977,8 @@ async def get_live_points_raw(
                     status_code=403,
                     detail="Invalid token subject - must be contest-specific"
                 )
+
+            race_id = token_data["sub"].split(":")[1]
 
         except jwt.ExpiredSignatureError:
             raise HTTPException(
@@ -3048,7 +3103,8 @@ async def get_track_linestring(
             raise HTTPException(status_code=401, detail="Token expired")
         except PyJWTError as e:
             raise HTTPException(
-                status_code=401, detail=f"Invalid token: {str(e)}")
+                status_code=401, detail=f"Invalid token: {str(e)}"
+            )
 
         # Check if flight exists
         flight = db.query(Flight).filter(
@@ -3868,40 +3924,67 @@ async def upload_flymaster_file(
 
         if flymaster_points:
             try:
-                # Create Flymaster objects for batch insert
-                from geoalchemy2.functions import ST_SetSRID, ST_MakePoint
-                flymaster_objects = []
-
+                # Prepare points for queueing
+                points_for_queue = []
                 for point in flymaster_points:
-                    flymaster_point = Flymaster(
-                        device_id=point.device_id,
-                        date_time=point.date_time,
-                        lat=point.lat,
-                        lon=point.lon,
-                        gps_alt=point.gps_alt,
-                        heading=point.heading,
-                        speed=point.speed,
-                        uploaded_at=point.uploaded_at or datetime.now(
-                            timezone.utc),
-                        geom=ST_SetSRID(ST_MakePoint(
-                            point.lon, point.lat), 4326)
-                    )
-                    flymaster_objects.append(flymaster_point)
+                    point_dict = {
+                        "device_id": point.device_id,
+                        "date_time": point.date_time,
+                        "lat": point.lat,
+                        "lon": point.lon,
+                        "gps_alt": point.gps_alt,
+                        "heading": point.heading,
+                        "speed": point.speed,
+                        "uploaded_at": point.uploaded_at or datetime.now(timezone.utc)
+                    }
+                    points_for_queue.append(point_dict)
 
-                # Fast batch insert all objects
-                db.add_all(flymaster_objects)
-                db.commit()
-                points_added = len(flymaster_objects)
+                # Queue for background processing
+                queued = await redis_queue.queue_points(
+                    QUEUE_NAMES['flymaster'],
+                    points_for_queue,
+                    priority=3  # Lower priority for bulk uploads
+                )
 
-                logger.info(
-                    f"Successfully inserted {points_added} Flymaster points via batch insert")
+                if queued:
+                    points_added = len(flymaster_points)
+                    logger.info(
+                        f"Successfully queued {points_added} Flymaster points for background processing")
+                else:
+                    # Fallback to direct insertion if queueing fails
+                    from geoalchemy2.functions import ST_SetSRID, ST_MakePoint
+                    flymaster_objects = []
+
+                    for point in flymaster_points:
+                        flymaster_point = Flymaster(
+                            device_id=point.device_id,
+                            date_time=point.date_time,
+                            lat=point.lat,
+                            lon=point.lon,
+                            gps_alt=point.gps_alt,
+                            heading=point.heading,
+                            speed=point.speed,
+                            uploaded_at=point.uploaded_at or datetime.now(
+                                timezone.utc),
+                            geom=ST_SetSRID(ST_MakePoint(
+                                point.lon, point.lat), 4326)
+                        )
+                        flymaster_objects.append(flymaster_point)
+
+                    # Fast batch insert all objects
+                    db.add_all(flymaster_objects)
+                    db.commit()
+                    points_added = len(flymaster_objects)
+
+                    logger.info(
+                        f"Successfully inserted {points_added} Flymaster points via batch insert (fallback)")
 
             except Exception as e:
                 db.rollback()
-                logger.error(f"Error in batch insert: {str(e)}")
+                logger.error(f"Error processing Flymaster points: {str(e)}")
                 raise HTTPException(
                     status_code=500,
-                    detail=f"Failed to insert points: {str(e)}"
+                    detail=f"Failed to process points: {str(e)}"
                 )
 
         logger.info(
@@ -3930,223 +4013,3 @@ async def upload_flymaster_file(
             status_code=500,
             detail=f"Failed to upload Flymaster file: {str(e)}"
         )
-
-
-# @router.post("/flymaster/upload", response_model=FlymasterFileUploadResponse)
-# async def upload_flymaster_data(
-#     file: UploadFile = File(...),
-#     db: Session = Depends(get_db)
-# ):
-#     """
-#     Upload Flymaster tracking data in the specific format:
-#     First line: device_serial, sha256key
-#     Second line onwards: uploaded_at, date_time (unix timestamp), lat, lon, gps_alt, speed, bearing
-#     Last line: EOF
-
-#     Returns 200 even if SHA256 key is invalid but includes failure message.
-#     """
-#     try:
-#         # Read file content
-#         content = await file.read()
-#         content_str = content.decode('utf-8')
-#         lines = content_str.strip().split('\n')
-
-#         if len(lines) < 3:  # At least header + one data line + EOF
-#             return FlymasterFileUploadResponse(
-#                 device_serial="unknown",
-#                 sha256key=settings.FLYMASTER_SECRET,
-#                 uploaded_at=datetime.fromtimestamp(0, tz=timezone.utc),
-#                 points_added=0,
-#                 points_skipped=0,
-#                 message="Invalid file format: insufficient lines",
-#                 success=False
-#             )
-
-#         # Parse header line
-#         header_parts = lines[0].split(',')
-#         if len(header_parts) != 2:
-#             return FlymasterFileUploadResponse(
-#                 device_serial="unknown",
-#                 sha256key="",
-#                 uploaded_at=datetime.fromtimestamp(0, tz=timezone.utc),
-#                 points_added=0,
-#                 points_skipped=0,
-#                 message="Invalid header format: expected 'device_serial, sha256key'",
-#                 success=False
-#             )
-
-#         device_serial = header_parts[0].strip()
-#         sha256key = header_parts[1].strip()
-
-#         # Extract device_id from device_serial (assuming format like "device123")
-#         try:
-#             device_id = int(device_serial.replace('device', ''))
-#         except ValueError:
-#             # If device_serial doesn't follow expected pattern, use a hash or default
-#             device_id = abs(hash(device_serial)) % 1000000
-
-#         # Validate SHA256 key (simple check - you can implement proper validation)
-#         sha256_valid = len(sha256key) == 64 and all(
-#             c in '0123456789abcdefABCDEF' for c in sha256key)
-
-#         # Find EOF
-#         eof_index = -1
-#         for i, line in enumerate(lines):
-#             if line.strip() == "EOF":
-#                 eof_index = i
-#                 break
-
-#         if eof_index == -1:
-#             return FlymasterFileUploadResponse(
-#                 device_serial=device_serial,
-#                 sha256key=sha256key,
-#                 uploaded_at=datetime.fromtimestamp(0, tz=timezone.utc),
-#                 points_added=0,
-#                 points_skipped=0,
-#                 message="EOF marker not found",
-#                 success=False
-#             )
-
-#         # Parse data points (between header and EOF)
-#         data_lines = lines[1:eof_index]
-#         points = []
-#         uploaded_at = None
-
-#         for line in data_lines:
-#             line = line.strip()
-#             if not line:
-#                 continue
-
-#             try:
-#                 # Expected format: uploaded_at, date_time (unix timestamp), lat, lon, gps_alt, speed, bearing
-#                 parts = [part.strip() for part in line.split(',')]
-#                 if len(parts) != 7:
-#                     logger.warning(f"Skipping malformed line: {line}")
-#                     continue
-
-#                 # Convert unix timestamps to datetime objects
-#                 point_uploaded_at_unix = int(parts[0])
-#                 point_date_time_unix = int(parts[1])
-
-#                 # Convert to timezone-aware datetime objects
-#                 point_uploaded_at = datetime.fromtimestamp(
-#                     point_uploaded_at_unix, tz=timezone.utc)
-#                 point_date_time = datetime.fromtimestamp(
-#                     point_date_time_unix, tz=timezone.utc)
-
-#                 if uploaded_at is None:
-#                     uploaded_at = point_uploaded_at
-
-#                 point = {
-#                     "device_id": device_id,
-#                     "date_time": point_date_time,
-#                     "lat": float(parts[2]),
-#                     "lon": float(parts[3]),
-#                     "gps_alt": float(parts[4]),
-#                     "speed": float(parts[5]),
-#                     "heading": float(parts[6]),  # bearing/heading
-#                     "uploaded_at": point_uploaded_at
-#                 }
-#                 points.append(point)
-
-#             except (ValueError, IndexError) as e:
-#                 logger.warning(
-#                     f"Skipping invalid line: {line}, error: {str(e)}")
-#                 continue
-
-#         if uploaded_at is None:
-#             uploaded_at = datetime.fromtimestamp(0, tz=timezone.utc)
-
-#         # Process points even if SHA256 is invalid (return 200 as requested)
-#         points_added = 0
-#         points_skipped = 0
-
-#         logger.info(
-#             f"Processing Flymaster upload for device {device_serial} with {len(points)} points, SHA256 valid: {sha256_valid}")
-
-#         # Process each point
-#         for point_data in points:
-#             try:
-#                 # Check if point already exists (handle duplicates)
-#                 existing = db.query(Flymaster).filter(
-#                     Flymaster.device_id == point_data["device_id"],
-#                     Flymaster.date_time == point_data["date_time"],
-#                     Flymaster.lat == point_data["lat"],
-#                     Flymaster.lon == point_data["lon"]
-#                 ).first()
-
-#                 if existing:
-#                     points_skipped += 1
-#                     continue
-
-#                 # Create new Flymaster record with spatial geometry
-#                 from geoalchemy2 import func as geo_func
-#                 flymaster_point = Flymaster(
-#                     device_id=point_data["device_id"],
-#                     date_time=point_data["date_time"],
-#                     lat=point_data["lat"],
-#                     lon=point_data["lon"],
-#                     gps_alt=point_data["gps_alt"],
-#                     heading=point_data["heading"],
-#                     speed=point_data["speed"],
-#                     uploaded_at=point_data["uploaded_at"],
-#                     geom=geo_func.ST_SetSRID(geo_func.ST_MakePoint(
-#                         point_data["lon"], point_data["lat"]), 4326)
-#                 )
-
-#                 db.add(flymaster_point)
-#                 points_added += 1
-
-#             except Exception as e:
-#                 logger.error(f"Error processing point {point_data}: {str(e)}")
-#                 points_skipped += 1
-#                 continue
-
-#         # Commit all new points
-#         try:
-#             db.commit()
-#         except SQLAlchemyError as e:
-#             db.rollback()
-#             logger.error(f"Database error: {str(e)}")
-#             return FlymasterFileUploadResponse(
-#                 device_serial=device_serial,
-#                 sha256key=sha256key,
-#                 uploaded_at=uploaded_at,
-#                 points_added=0,
-#                 points_skipped=len(points),
-#                 message=f"Database error: {str(e)}",
-#                 success=False
-#             )
-
-#         # Prepare success/warning message
-#         if not sha256_valid:
-#             message = f"SHA256 key invalid but data processed: {points_added} points added, {points_skipped} skipped"
-#             success = False
-#         else:
-#             message = f"Successfully processed {points_added} points, skipped {points_skipped} duplicates"
-#             success = True
-
-#         logger.info(
-#             f"Flymaster upload completed: {points_added} added, {points_skipped} skipped, SHA256 valid: {sha256_valid}")
-
-#         return FlymasterFileUploadResponse(
-#             device_serial=device_serial,
-#             sha256key=sha256key,
-#             uploaded_at=uploaded_at,
-#             points_added=points_added,
-#             points_skipped=points_skipped,
-#             message=message,
-#             success=success
-#         )
-
-#     except Exception as e:
-#         logger.error(f"Error during Flymaster upload: {str(e)}")
-#         return FlymasterFileUploadResponse(
-#             device_serial="unknown",
-#             sha256key="",
-#             uploaded_at=datetime.fromtimestamp(0, tz=timezone.utc),
-#             points_added=0,
-#             points_skipped=0,
-#             message=f"Upload failed: {str(e)}",
-#             success=False
-#         )
