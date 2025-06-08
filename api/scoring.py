@@ -21,6 +21,9 @@ from typing import Optional, List
 
 from datetime import datetime, time, timezone
 
+# Import queue system
+from redis_queue_system.redis_queue import redis_queue, QUEUE_NAMES
+
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
@@ -62,19 +65,37 @@ async def create_scoring_track_batch(
 
         # Bulk insert all track objects if we have any, ignoring conflicts
         if track_objects:
-            # Use insert().on_conflict_do_nothing() for more efficient handling of duplicates
-            stmt = insert(ScoringTracks).on_conflict_do_nothing(
-                index_elements=['flight_uuid', 'date_time', 'lat', 'lon']
+            # Try queueing first for better performance
+            queued = await redis_queue.queue_points(
+                QUEUE_NAMES['scoring'],
+                track_objects,
+                priority=2  # Medium priority
             )
-            db.execute(stmt, track_objects)
 
-            # Commit once after all operations
-            db.commit()
+            if queued:
+                # Just commit the flight UUID generation, points will be processed in background
+                db.commit()
+                logger.info(
+                    f"Queued {points_to_add} scoring points for background processing")
 
-            return ScoringTrackBatchResponse(
-                flight_uuid=flight_uuid,
-                points_added=points_to_add
-            )
+                return ScoringTrackBatchResponse(
+                    flight_uuid=flight_uuid,
+                    points_added=points_to_add
+                )
+            else:
+                # Fallback to direct insertion if queueing fails
+                stmt = insert(ScoringTracks).on_conflict_do_nothing(
+                    index_elements=['flight_uuid', 'date_time', 'lat', 'lon']
+                )
+                db.execute(stmt, track_objects)
+
+                # Commit once after all operations
+                db.commit()
+
+                return ScoringTrackBatchResponse(
+                    flight_uuid=flight_uuid,
+                    points_added=points_to_add
+                )
         else:
             # Still commit the flight even if no track points
             db.commit()
@@ -203,7 +224,8 @@ async def update_flight_tracks(
     """
     try:
         # Log the update attempt
-        logger.info(f"Attempting to update tracks for flight UUID: {flight_uuid}")
+        logger.info(
+            f"Attempting to update tracks for flight UUID: {flight_uuid}")
 
         # Validate that we have track points to process
         if not track_batch.tracks:
@@ -223,10 +245,12 @@ async def update_flight_tracks(
                 result = db.query(ScoringTracks).filter(
                     ScoringTracks.flight_uuid == flight_uuid
                 ).delete(synchronize_session=False)
-                
-                logger.info(f"Deleted {result} existing track points for flight UUID: {flight_uuid}")
+
+                logger.info(
+                    f"Deleted {result} existing track points for flight UUID: {flight_uuid}")
             else:
-                logger.info(f"No existing tracks found for flight UUID: {flight_uuid}. Creating new tracks.")
+                logger.info(
+                    f"No existing tracks found for flight UUID: {flight_uuid}. Creating new tracks.")
 
             # Step 3: Insert new track points while preserving the flight UUID
             track_objects = []
@@ -254,7 +278,7 @@ async def update_flight_tracks(
 
             # Log successful update
             logger.info(
-                f"Successfully {'updated' if count > 0 else 'created'} tracks for flight {flight_uuid}: " 
+                f"Successfully {'updated' if count > 0 else 'created'} tracks for flight {flight_uuid}: "
                 f"{'deleted ' + str(count) + ' old points, ' if count > 0 else ''}added {points_to_add} new points"
             )
 
@@ -295,11 +319,13 @@ async def update_flight_tracks(
 
     except Exception as e:
         # Handle any other exceptions
-        logger.error(f"Unexpected error updating flight tracks: {str(e)}", exc_info=True)
+        logger.error(
+            f"Unexpected error updating flight tracks: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=500,
             detail="An unexpected error occurred while updating flight tracks"
         )
+
 
 @router.get("/track-line/{flight_uuid}")
 async def get_track_linestring_uuid(
@@ -585,7 +611,8 @@ async def get_track_preview(
                 )) as simplified_points
             FROM original;
             """
-            simplified_result = db.execute(text(simplify_tolerance_query)).fetchone()
+            simplified_result = db.execute(
+                text(simplify_tolerance_query)).fetchone()
             if simplified_result and simplified_result[0]:
                 encoded_polyline = simplified_result[0]
                 simplified_points = simplified_result[1]
@@ -623,7 +650,7 @@ async def get_track_preview(
                         "flight_uuid": str(flight_uuid),
                         "preview_url": google_maps_preview_url,
                         "original_points": original_points,
-                        "simplified_points": 1, # Representing the marker
+                        "simplified_points": 1,  # Representing the marker
                         "url_length": len(google_maps_preview_url),
                         "note": "Track was too complex for detailed preview, showing center point only",
                         "stats": {} if not stats_result else {
@@ -724,6 +751,7 @@ async def get_track_preview(
             status_code=500,
             detail=f"Failed to generate track preview: {str(e)}"
         )
+
 
 @router.get("/flight/{flight_uuid}/points", status_code=200)
 async def get_flight_points(

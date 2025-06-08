@@ -23,6 +23,8 @@ from db_cleanup import setup_scheduler
 from contextlib import asynccontextmanager
 from database.db_conf import engine, test_db_connection
 import sqlalchemy
+from redis_queue_system.redis_queue import redis_queue
+from redis_queue_system.point_processor import point_processor
 
 
 def check_database_connection():
@@ -44,6 +46,21 @@ async def lifespan(app):
     else:
         logger.info(f"Database connection check: {message}")
 
+    # Initialize Redis connection
+    try:
+        await redis_queue.initialize()
+        logger.info("Redis connection initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize Redis connection: {e}")
+        logger.warning("Queue functionality will not be available")
+
+    # Start background point processors
+    try:
+        await point_processor.start()
+        logger.info("Background point processors started successfully")
+    except Exception as e:
+        logger.error(f"Failed to start background processors: {e}")
+
     # Initialize Firebase for FCM notifications
     try:
         from api.send_notifications import initialize_firebase
@@ -64,6 +81,23 @@ async def lifespan(app):
     yield
 
     # Cleanup when the application shuts down
+    logger.info("Starting application shutdown...")
+
+    # Stop background processors
+    try:
+        await point_processor.stop()
+        logger.info("Background processors stopped")
+    except Exception as e:
+        logger.error(f"Error stopping background processors: {e}")
+
+    # Close Redis connections
+    try:
+        await redis_queue.close()
+        logger.info("Redis connections closed")
+    except Exception as e:
+        logger.error(f"Error closing Redis connections: {e}")
+
+    # Cancel tracking task
     track_task.cancel()
     try:
         await track_task
@@ -73,6 +107,7 @@ async def lifespan(app):
 
     # Shut down the scheduler
     scheduler.shutdown()
+    logger.info("Application shutdown completed")
 
 
 app = FastAPI(lifespan=lifespan)
@@ -147,7 +182,15 @@ async def root():
 
     # Check database connection
     is_db_connected, db_message = check_database_connection()
-    status = 'healthy' if is_db_connected else 'unhealthy'
+
+    # Check Redis connection
+    is_redis_connected = await redis_queue.is_connected()
+
+    # Check queue statistics
+    queue_stats = await redis_queue.get_queue_stats()
+
+    status = 'healthy' if (
+        is_db_connected and is_redis_connected) else 'unhealthy'
 
     response = {
         'status': status,
@@ -159,18 +202,49 @@ async def root():
         'database': {
             'status': 'connected' if is_db_connected else 'disconnected',
             'message': db_message
+        },
+        'redis': {
+            'status': 'connected' if is_redis_connected else 'disconnected',
+            'queue_stats': queue_stats
         }
     }
 
     logger.info(
-        f"Healthcheck requested on {now}. Database status: {response['database']['status']}")
+        f"Healthcheck requested on {now}. Database status: {response['database']['status']}, Redis status: {response['redis']['status']}")
 
     # Return an appropriate status code based on health
-    # 503 Service Unavailable if DB is down
-    status_code = 200 if is_db_connected else 503
+    # 503 Service Unavailable if DB or Redis is down
+    status_code = 200 if (is_db_connected and is_redis_connected) else 503
 
     # Return the response with pre-serialized datetime values
     return JSONResponse(content=response, status_code=status_code)
+
+
+@app.get('/queue/status')
+async def queue_status():
+    """Get detailed queue status and statistics"""
+    try:
+        if not await redis_queue.is_connected():
+            return JSONResponse(
+                content={"error": "Redis not connected"},
+                status_code=503
+            )
+
+        stats = await redis_queue.get_queue_stats()
+        processor_stats = point_processor.get_stats()
+
+        return {
+            "redis_connected": True,
+            "queue_stats": stats,
+            "processor_stats": processor_stats,
+            "timestamp": datetime.datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting queue status: {e}")
+        return JSONResponse(
+            content={"error": str(e)},
+            status_code=500
+        )
 
 
 if __name__ == "__main__":
