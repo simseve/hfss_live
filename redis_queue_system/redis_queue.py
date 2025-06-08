@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 class DateTimeEncoder(json.JSONEncoder):
     """Custom JSON encoder that handles datetime objects."""
-    
+
     def default(self, obj):
         if isinstance(obj, datetime):
             return obj.isoformat()
@@ -24,13 +24,15 @@ class DateTimeEncoder(json.JSONEncoder):
 class RedisPointQueue:
     def __init__(self):
         self.redis_client = None
-        self.batch_size = 1000  # Process points in batches of 1000    async def connect(self):
+        # Process points in batches of 1000    async def connect(self):
+        self.batch_size = 1000
+
     async def connect(self):
         """Initialize Redis connection"""
         try:
             # Use the new get_redis_url method from settings
             redis_url = settings.get_redis_url()
-            
+
             self.redis_client = redis.from_url(
                 redis_url,
                 decode_responses=True,
