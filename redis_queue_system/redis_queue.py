@@ -12,6 +12,15 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 
+class DateTimeEncoder(json.JSONEncoder):
+    """Custom JSON encoder that handles datetime objects."""
+    
+    def default(self, obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        return super().default(obj)
+
+
 class RedisPointQueue:
     def __init__(self):
         self.redis_client = None
@@ -59,11 +68,11 @@ class RedisPointQueue:
             # Add to priority queue
             await self.redis_client.zadd(
                 f"queue:{queue_name}",
-                {json.dumps(queue_item): priority}
+                {json.dumps(queue_item, cls=DateTimeEncoder): priority}
             )
 
             # Also add to a simple list for FIFO processing if needed
-            await self.redis_client.lpush(f"list:{queue_name}", json.dumps(queue_item))
+            await self.redis_client.lpush(f"list:{queue_name}", json.dumps(queue_item, cls=DateTimeEncoder))
 
             logger.info(f"Queued {len(points)} points to {queue_name}")
             return True
