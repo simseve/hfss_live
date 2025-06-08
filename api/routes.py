@@ -3837,14 +3837,10 @@ async def upload_flymaster_file(
                 detail=f"Invalid device_serial format: expected integer, got '{device_serial}'"
             )
 
-        # Validate SHA256 key - it should be HMAC-SHA256(device_id, secret)
+        # Validate SHA256 key - it should be SHA256(device_id + secret)
         import hashlib
-        import hmac
-        expected_sha256 = hmac.new(
-            settings.FLYMASTER_SECRET.encode(),
-            str(device_id).encode(),
-            hashlib.sha256
-        ).hexdigest()
+        combined = str(device_id) + settings.FLYMASTER_SECRET
+        expected_sha256 = hashlib.sha256(combined.encode()).hexdigest()
 
         if sha256key != expected_sha256:
             raise HTTPException(
