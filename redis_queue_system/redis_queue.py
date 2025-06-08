@@ -6,6 +6,7 @@ import logging
 import asyncio
 from typing import List, Dict, Any
 from datetime import datetime, timezone
+from uuid import UUID
 import redis.asyncio as redis
 from config import settings
 
@@ -13,11 +14,13 @@ logger = logging.getLogger(__name__)
 
 
 class DateTimeEncoder(json.JSONEncoder):
-    """Custom JSON encoder that handles datetime objects."""
+    """Custom JSON encoder that handles datetime and UUID objects."""
 
     def default(self, obj):
         if isinstance(obj, datetime):
             return obj.isoformat()
+        elif isinstance(obj, UUID):
+            return str(obj)
         return super().default(obj)
 
 
