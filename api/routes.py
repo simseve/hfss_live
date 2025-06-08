@@ -3943,7 +3943,7 @@ async def upload_flymaster_file(
                 queued = await redis_queue.queue_points(
                     QUEUE_NAMES['flymaster'],
                     points_for_queue,
-                    priority=3  # Lower priority for bulk uploads
+                    priority=1
                 )
 
                 if queued:
@@ -3952,27 +3952,26 @@ async def upload_flymaster_file(
                         f"Successfully queued {points_added} Flymaster points for background processing")
                 else:
                     # Fallback to direct insertion if queueing fails
-                    from geoalchemy2.functions import ST_SetSRID, ST_MakePoint
                     flymaster_objects = []
 
                     for point in flymaster_points:
-                        flymaster_point = Flymaster(
-                            device_id=point.device_id,
-                            date_time=point.date_time,
-                            lat=point.lat,
-                            lon=point.lon,
-                            gps_alt=point.gps_alt,
-                            heading=point.heading,
-                            speed=point.speed,
-                            uploaded_at=point.uploaded_at or datetime.now(
-                                timezone.utc),
-                            geom=ST_SetSRID(ST_MakePoint(
-                                point.lon, point.lat), 4326)
-                        )
-                        flymaster_objects.append(flymaster_point)
+                        point_data = {
+                            "device_id": point.device_id,
+                            "date_time": point.date_time,
+                            "lat": point.lat,
+                            "lon": point.lon,
+                            "gps_alt": point.gps_alt,
+                            "heading": point.heading,
+                            "speed": point.speed,
+                            "uploaded_at": point.uploaded_at or datetime.now(timezone.utc),
+                        }
+                        flymaster_objects.append(point_data)
 
-                    # Fast batch insert all objects
-                    db.add_all(flymaster_objects)
+                    # Use insert().on_conflict_do_nothing() for handling duplicates gracefully
+                    stmt = insert(Flymaster).on_conflict_do_nothing(
+                        index_elements=['device_id', 'date_time', 'lat', 'lon']
+                    )
+                    db.execute(stmt, flymaster_objects)
                     db.commit()
                     points_added = len(flymaster_objects)
 

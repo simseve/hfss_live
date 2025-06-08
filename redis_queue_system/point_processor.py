@@ -180,7 +180,7 @@ class PointProcessor:
 
                 # Batch insert with conflict handling
                 stmt = insert(Flymaster).on_conflict_do_nothing(
-                    index_elements=['device_id', 'date_time']
+                    index_elements=['device_id', 'date_time', 'lat', 'lon']
                 )
                 db.execute(stmt, flymaster_data)
                 db.commit()
