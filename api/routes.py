@@ -160,34 +160,32 @@ async def live_tracking(
                 detail="Failed to update flight record"
             )
 
-        # Convert track points using Pydantic model
-        track_points = [
-            LiveTrackPoint(
-                **LiveTrackPointCreate(
-                    flight_id=data.flight_id,
-                    flight_uuid=flight.id,
-                    datetime=datetime.fromisoformat(
-                        point['datetime'].replace('Z', '+00:00'))
-                    .astimezone(timezone.utc)
-                    # Format as ISO 8601 with Z suffix
-                    .strftime('%Y-%m-%dT%H:%M:%SZ'),
-                    lat=point['lat'],
-                    lon=point['lon'],
-                    elevation=point.get('elevation')
-                ).model_dump()
-            ) for point in data.track_points
-        ]
+        # Prepare track points data for queueing (as dictionaries, not SQLAlchemy models)
+        track_points_data = []
+        for point in data.track_points:
+            point_data = {
+                "flight_id": data.flight_id,
+                "flight_uuid": flight.id,
+                "datetime": datetime.fromisoformat(
+                    point['datetime'].replace('Z', '+00:00'))
+                .astimezone(timezone.utc)
+                .strftime('%Y-%m-%dT%H:%M:%SZ'),
+                "lat": point['lat'],
+                "lon": point['lon'],
+                "elevation": point.get('elevation')
+            }
+            track_points_data.append(point_data)
+
         logger.info(data)
-        logger.info(track_points)
+        logger.info(track_points_data)
         logger.info(
-            f"Saving {len(track_points)} track points for flight {data.flight_id}")
+            f"Saving {len(track_points_data)} track points for flight {data.flight_id}")
 
         try:
             # Queue points for background processing instead of immediate DB insert
-            points_data = [vars(point) for point in track_points]
             queued = await redis_queue.queue_points(
                 QUEUE_NAMES['live'],
-                points_data,
+                track_points_data,
                 priority=1  # High priority for live tracking
             )
 
@@ -196,11 +194,11 @@ async def live_tracking(
                 db.commit()
                 asyncio.create_task(update_flight_state(flight.id, db))
                 logger.info(
-                    f"Successfully queued {len(track_points)} track points for flight {data.flight_id}")
+                    f"Successfully queued {len(track_points_data)} track points for flight {data.flight_id}")
 
                 return {
                     'success': True,
-                    'message': f'Live tracking data queued for processing ({len(track_points)} points)',
+                    'message': f'Live tracking data queued for processing ({len(track_points_data)} points)',
                     'flight_id': data.flight_id,
                     'pilot_name': pilot_name,
                     'total_points': flight.total_points,
@@ -211,7 +209,7 @@ async def live_tracking(
                 stmt = insert(LiveTrackPoint).on_conflict_do_nothing(
                     index_elements=['flight_id', 'lat', 'lon', 'datetime']
                 )
-                db.execute(stmt, points_data)
+                db.execute(stmt, track_points_data)
                 db.commit()
                 asyncio.create_task(update_flight_state(flight.id, db))
                 logger.info(
@@ -219,7 +217,7 @@ async def live_tracking(
 
                 return {
                     'success': True,
-                    'message': f'Live tracking data processed ({len(track_points)} points)',
+                    'message': f'Live tracking data processed ({len(track_points_data)} points)',
                     'flight_id': data.flight_id,
                     'pilot_name': pilot_name,
                     'total_points': flight.total_points,
@@ -352,23 +350,22 @@ async def upload_track(
                 raise HTTPException(
                     status_code=500, detail="Failed to create flight record")
 
-            # Convert and store track points
-            track_points_db = [
-                UploadedTrackPoint(
-                    flight_id=upload_data.flight_id,
-                    flight_uuid=flight.id,
-                    datetime=datetime.fromisoformat(point['datetime'].replace(
+            # Prepare track points data for queueing (as dictionaries, not SQLAlchemy models)
+            points_data = []
+            for point in upload_data.track_points:
+                point_data = {
+                    "flight_id": upload_data.flight_id,
+                    "flight_uuid": flight.id,
+                    "datetime": datetime.fromisoformat(point['datetime'].replace(
                         'Z', '+00:00')).astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
-                    lat=point['lat'],
-                    lon=point['lon'],
-                    elevation=point.get('elevation')
-                )
-                for point in upload_data.track_points
-            ]
+                    "lat": point['lat'],
+                    "lon": point['lon'],
+                    "elevation": point.get('elevation')
+                }
+                points_data.append(point_data)
 
             try:
                 # Queue points for background processing instead of immediate DB insert
-                points_data = [vars(point) for point in track_points_db]
                 queued = await redis_queue.queue_points(
                     QUEUE_NAMES['upload'],
                     points_data,

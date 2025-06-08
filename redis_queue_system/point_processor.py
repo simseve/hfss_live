@@ -106,17 +106,12 @@ class PointProcessor:
         """Process live tracking points"""
         try:
             with Session() as db:
-                # Convert to LiveTrackPoint objects
-                track_objects = []
-                for point_data in points:
-                    track_obj = LiveTrackPoint(**point_data)
-                    track_objects.append(track_obj.model_dump())
-
+                # Use the dictionaries directly for batch insert
                 # Batch insert with conflict handling
                 stmt = insert(LiveTrackPoint).on_conflict_do_nothing(
                     index_elements=['flight_id', 'lat', 'lon', 'datetime']
                 )
-                db.execute(stmt, track_objects)
+                db.execute(stmt, points)
                 db.commit()
 
                 logger.info(
@@ -134,17 +129,12 @@ class PointProcessor:
         """Process uploaded track points"""
         try:
             with Session() as db:
-                # Convert to UploadedTrackPoint objects
-                track_objects = []
-                for point_data in points:
-                    track_obj = UploadedTrackPoint(**point_data)
-                    track_objects.append(track_obj.model_dump())
-
+                # Use the dictionaries directly for batch insert
                 # Batch insert with conflict handling
                 stmt = insert(UploadedTrackPoint).on_conflict_do_nothing(
                     index_elements=['flight_id', 'lat', 'lon', 'datetime']
                 )
-                db.execute(stmt, track_objects)
+                db.execute(stmt, points)
                 db.commit()
 
                 logger.info(
