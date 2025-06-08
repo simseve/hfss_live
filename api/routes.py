@@ -1,5 +1,6 @@
 from api.flight_state import determine_if_landed, detect_flight_state
-from fastapi import APIRouter, Depends, HTTPException, Query, Security, WebSocket, WebSocketDisconnect, Response, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, Query, Security, WebSocket, WebSocketDisconnect, Response, UploadFile, File, Form, Request
+from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
 from database.schemas import LiveTrackingRequest, LiveTrackPointCreate, FlightResponse, TrackUploadRequest, NotificationCommand, SubscriptionRequest, UnsubscriptionRequest, NotificationRequest, FlymasterBatchCreate, FlymasterBatchResponse, FlymasterPointCreate
 from database.models import UploadedTrackPoint, Flight, LiveTrackPoint, Race, NotificationTokenDB, Flymaster
@@ -3801,19 +3802,52 @@ async def send_notification(
 
 @router.post("/flymaster/upload/file")
 async def upload_flymaster_file(
-    file: UploadFile = File(...),
+    request: Request,
+    file: UploadFile = File(None),
     db: Session = Depends(get_db)
 ):
     """
-    Upload Flymaster tracking data from a file in the format:
+    Upload Flymaster tracking data supporting multiple formats:
+    1. File upload (multipart/form-data)
+    2. Raw data (text/plain content from PHP curl with post_as_file=1)
+
+    Format:
     device_serial, sha256key
     list of points with uploaded_at, date_time (unix timestamp), lat, lon, gps_alt, speed, heading
     EOF
     """
     try:
-        # Read file content
-        content = await file.read()
-        content_str = content.decode('utf-8')
+        # Determine content source
+        content_str = None
+        source_type = "unknown"
+
+        # Priority 1: File upload (multipart/form-data)
+        if file and hasattr(file, 'read'):
+            try:
+                content = await file.read()
+                content_str = content.decode('utf-8')
+                source_type = "file_upload"
+            except Exception as e:
+                logger.warning(f"Failed to read uploaded file: {e}")
+
+        # Priority 2: Raw body (text/plain from PHP curl)
+        if not content_str:
+            try:
+                body = await request.body()
+                if body:
+                    content_str = body.decode('utf-8')
+                    source_type = "raw_body"
+            except Exception as e:
+                logger.warning(f"Failed to read request body: {e}")
+
+        # Validate we got some content
+        if not content_str or not content_str.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="No data received. Send as file upload or text/plain body"
+            )
+
+        logger.info(f"Flymaster upload received via: {source_type}")
         lines = content_str.strip().split('\n')
 
         if len(lines) < 3:
@@ -3988,7 +4022,7 @@ async def upload_flymaster_file(
         #     points_skipped=points_skipped,
         #     message=f"Successfully processed {points_added} points from file, skipped {points_skipped} duplicates"
         # )
-        return "OK"
+        return PlainTextResponse("OK", status_code=200)
 
     except HTTPException:
         raise
@@ -4008,7 +4042,6 @@ async def upload_flymaster_file(
         )
 
 
-
 # @router.post("/flymaster/upload/file", response_model=FlymasterBatchResponse)
 # async def upload_flymaster_file(
 #     file: Optional[UploadFile] = File(None),
@@ -4018,7 +4051,7 @@ async def upload_flymaster_file(
 #     Upload Flymaster tracking data from either:
 #     1. File upload (original format)
 #     2. Form data with 'data' field containing the content
-    
+
 #     Format:
 #     device_serial, sha256key
 #     list of points with uploaded_at, date_time (unix timestamp), lat, lon, gps_alt, speed, heading
@@ -4032,7 +4065,7 @@ async def upload_flymaster_file(
 #             content_str = content.decode('utf-8')
 #         else:
 #             raise HTTPException(
-#                 status_code=400, 
+#                 status_code=400,
 #                 detail="Either 'file' or 'data' parameter must be provided"
 #             )
 
