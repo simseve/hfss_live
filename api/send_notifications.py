@@ -122,10 +122,26 @@ def initialize_firebase():
             options['projectId'] = project_id
             # Also set the environment variable as a fallback
             os.environ['GOOGLE_CLOUD_PROJECT'] = project_id
+            os.environ['GCLOUD_PROJECT'] = project_id  # Alternative env var
             logger.info(f"Initializing Firebase with project ID: {project_id}")
+        else:
+            logger.error("No Firebase project ID found! FCM batch sending will fail.")
+            logger.error("Please ensure your Firebase credentials include a 'project_id' field.")
+            # Try to extract from environment as last resort
+            env_project_id = os.environ.get('GOOGLE_CLOUD_PROJECT') or os.environ.get('GCLOUD_PROJECT')
+            if env_project_id:
+                options['projectId'] = env_project_id
+                logger.info(f"Using project ID from environment: {env_project_id}")
 
         firebase_admin.initialize_app(cred, options)
         logger.info("Firebase Admin SDK initialized successfully")
+        
+        # Verify the app has project_id set
+        app = firebase_admin.get_app()
+        if hasattr(app, 'project_id') and app.project_id:
+            logger.info(f"Firebase app initialized with project_id: {app.project_id}")
+        else:
+            logger.warning("Firebase app initialized but project_id not accessible - batch sending may fail")
 
     except Exception as e:
         logger.error(f"Failed to initialize Firebase Admin SDK: {e}")
@@ -194,7 +210,10 @@ async def send_fcm_messages_batch(tokens: List[str], title: str, body: str, extr
     try:
         # Check if Firebase is initialized
         try:
-            firebase_admin.get_app()
+            app = firebase_admin.get_app()
+            # Log project info for debugging
+            if hasattr(app, 'project_id'):
+                logger.debug(f"FCM batch send using project_id: {app.project_id}")
         except ValueError:
             raise ValueError(
                 "Firebase not initialized. FCM notifications unavailable.")
@@ -232,6 +251,7 @@ async def send_fcm_messages_batch(tokens: List[str], title: str, body: str, extr
             messages.append(message)
 
         # Send batch (FCM supports up to 500 messages per batch)
+        logger.debug(f"Sending FCM batch of {len(messages)} messages")
         batch_response = messaging.send_all(messages)
 
         # Process responses
@@ -348,23 +368,39 @@ async def send_push_messages_batch_unified(tokens: list, token_records: list, ti
 
     # Send FCM notifications if any
     if fcm_tokens:
+        # Check if we should use batch or individual sending
+        use_batch = True
+        
+        # Check if project ID is properly configured
         try:
-            fcm_tickets, fcm_errors, fcm_token_indices_to_remove = await send_fcm_messages_batch(
-                fcm_tokens, title, message, extra_data
-            )
-            all_tickets.extend(fcm_tickets)
-            all_errors.extend(fcm_errors)
+            app = firebase_admin.get_app()
+            if not hasattr(app, 'project_id') or not app.project_id:
+                logger.warning("Firebase project_id not accessible - using individual FCM sending")
+                use_batch = False
+        except:
+            use_batch = False
+        
+        if use_batch and len(fcm_tokens) > 1:
+            try:
+                fcm_tickets, fcm_errors, fcm_token_indices_to_remove = await send_fcm_messages_batch(
+                    fcm_tokens, title, message, extra_data
+                )
+                all_tickets.extend(fcm_tickets)
+                all_errors.extend(fcm_errors)
 
-            # Convert FCM token indices to record IDs
-            for index in fcm_token_indices_to_remove:
-                if index < len(fcm_records):
-                    all_tokens_to_remove.append(fcm_records[index].id)
+                # Convert FCM token indices to record IDs
+                for index in fcm_token_indices_to_remove:
+                    if index < len(fcm_records):
+                        all_tokens_to_remove.append(fcm_records[index].id)
 
-        except Exception as e:
-            logger.error(f"Error sending FCM batch: {e}")
-            logger.warning("Falling back to individual FCM sending...")
-
-            # Fall back to individual FCM sending
+            except Exception as e:
+                logger.error(f"Error sending FCM batch: {e}")
+                logger.warning("Falling back to individual FCM sending...")
+                use_batch = False
+        
+        # Use individual sending if batch failed or wasn't attempted
+        if not use_batch or len(fcm_tokens) == 1:
+            # Use individual FCM sending
             for record in fcm_records:
                 try:
                     ticket = await send_fcm_message(

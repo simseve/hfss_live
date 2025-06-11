@@ -3691,20 +3691,14 @@ async def send_notification(
                 f"Processing batch {batch_num}/{total_batches} with {len(batch_tokens)} tokens")
 
             try:
-                # Prepare notification data with title and body included
-                notification_data = {
-                    "title": request.title,
-                    "body": request.body,
-                    **(request.data or {})  # Merge with existing data
-                }
-
                 # Use unified batch sending that handles both Expo and FCM
+                # Don't include title/body in extra_data - they're passed separately
                 batch_tickets, batch_errors, batch_tokens_to_remove = await send_push_messages_batch_unified(
                     tokens=[token_record.token for token_record in batch_tokens],
                     token_records=batch_tokens,
                     title=request.title,
                     message=request.body,
-                    extra_data=notification_data
+                    extra_data=request.data  # Only pass custom data, not title/body
                 )
 
                 tickets.extend(batch_tickets)
