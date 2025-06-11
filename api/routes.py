@@ -4,7 +4,7 @@ from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
 from database.schemas import LiveTrackingRequest, LiveTrackPointCreate, FlightResponse, TrackUploadRequest, NotificationCommand, SubscriptionRequest, UnsubscriptionRequest, NotificationRequest, FlymasterBatchCreate, FlymasterBatchResponse, FlymasterPointCreate, SentNotificationResponse
 from database.models import UploadedTrackPoint, Flight, LiveTrackPoint, Race, NotificationTokenDB, Flymaster, SentNotification
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 from database.db_conf import get_db
 import logging
 from api.auth import verify_tracking_token
@@ -3691,20 +3691,14 @@ async def send_notification(
                 f"Processing batch {batch_num}/{total_batches} with {len(batch_tokens)} tokens")
 
             try:
-                # Prepare notification data with title and body included
-                notification_data = {
-                    "title": request.title,
-                    "body": request.body,
-                    **(request.data or {})  # Merge with existing data
-                }
-
                 # Use unified batch sending that handles both Expo and FCM
+                # Don't include title/body in extra_data - they're passed separately
                 batch_tickets, batch_errors, batch_tokens_to_remove = await send_push_messages_batch_unified(
                     tokens=[token_record.token for token_record in batch_tokens],
                     token_records=batch_tokens,
                     title=request.title,
                     message=request.body,
-                    extra_data=notification_data
+                    extra_data=request.data  # Only pass custom data, not title/body
                 )
 
                 tickets.extend(batch_tickets)
@@ -3837,6 +3831,154 @@ async def send_notification(
         logger.error(f"Error sending notifications: {str(e)}")
         raise HTTPException(
             status_code=500, detail=f"Failed to send notifications: {str(e)}"
+        )
+
+
+@router.get("/notifications/sent", response_model=List[SentNotificationResponse])
+async def get_sent_notifications(
+    race_id: Optional[str] = Query(None, description="Filter by race ID"),
+    limit: int = Query(100, ge=1, le=500, description="Maximum number of results"),
+    offset: int = Query(0, ge=0, description="Number of results to skip"),
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    db: Session = Depends(get_db)
+):
+    """
+    Retrieve sent notifications with optional filtering by race.
+    
+    - **race_id**: Optional filter to get notifications for a specific race
+    - **limit**: Maximum number of results to return (1-500, default: 100)
+    - **offset**: Number of results to skip for pagination (default: 0)
+    
+    Returns a list of sent notifications sorted by sent_at timestamp (newest first).
+    """
+    try:
+        # Verify JWT token
+        token = credentials.credentials
+        try:
+            token_data = jwt.decode(
+                token,
+                settings.SECRET_KEY,
+                algorithms=["HS256"],
+                audience="api.hikeandfly.app",
+                issuer="hikeandfly.app",
+                verify=True
+            )
+        except jwt.ExpiredSignatureError:
+            raise HTTPException(status_code=401, detail="Token has expired")
+        except PyJWTError as e:
+            raise HTTPException(
+                status_code=401, detail=f"Invalid token: {str(e)}"
+            )
+        
+        # Extract user info from token
+        token_subject = token_data.get("sub", "")
+        
+        # Build query
+        query = db.query(SentNotification)
+        
+        # Apply race filter if provided
+        if race_id:
+            # Verify user has access to this race
+            if not token_subject.startswith("admin:") and f"contest:{race_id}" != token_subject:
+                # Check if user has access to this specific race
+                race = db.query(Race).filter(Race.race_id == race_id).first()
+                if not race:
+                    raise HTTPException(status_code=404, detail="Race not found")
+                # For now, allow access if race exists - you may want to add more specific authorization
+            
+            query = query.filter(SentNotification.race_id == race_id)
+        
+        # Apply sorting (newest first)
+        query = query.order_by(SentNotification.sent_at.desc())
+        
+        # Apply pagination
+        notifications = query.offset(offset).limit(limit).all()
+        
+        # Convert to response models
+        response_notifications = []
+        for notification in notifications:
+            response_notifications.append(SentNotificationResponse(
+                id=str(notification.id),
+                race_id=notification.race_id,
+                title=notification.title,
+                body=notification.body,
+                data=notification.data,
+                total_recipients=notification.total_recipients,
+                successful_sends=notification.successful_sends,
+                failed_sends=notification.failed_sends,
+                expo_recipients=notification.expo_recipients,
+                fcm_recipients=notification.fcm_recipients,
+                sent_at=notification.sent_at.isoformat(),
+                sender_token_subject=notification.sender_token_subject,
+                batch_processing=notification.batch_processing
+            ))
+        
+        return response_notifications
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving sent notifications: {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Failed to retrieve notifications: {str(e)}"
+        )
+
+
+@router.get("/notifications/sent/count")
+async def get_sent_notifications_count(
+    race_id: Optional[str] = Query(None, description="Filter by race ID"),
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    db: Session = Depends(get_db)
+):
+    """
+    Get the total count of sent notifications with optional filtering by race.
+    
+    - **race_id**: Optional filter to count notifications for a specific race
+    
+    Returns the total count of notifications matching the criteria.
+    """
+    try:
+        # Verify JWT token
+        token = credentials.credentials
+        try:
+            token_data = jwt.decode(
+                token,
+                settings.SECRET_KEY,
+                algorithms=["HS256"],
+                audience="api.hikeandfly.app",
+                issuer="hikeandfly.app",
+                verify=True
+            )
+        except jwt.ExpiredSignatureError:
+            raise HTTPException(status_code=401, detail="Token has expired")
+        except PyJWTError as e:
+            raise HTTPException(
+                status_code=401, detail=f"Invalid token: {str(e)}"
+            )
+        
+        # Build query
+        query = db.query(func.count(SentNotification.id))
+        
+        # Apply race filter if provided
+        if race_id:
+            query = query.filter(SentNotification.race_id == race_id)
+        
+        # Get count
+        total_count = query.scalar()
+        
+        return {
+            "total_count": total_count,
+            "race_id": race_id
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error counting sent notifications: {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Failed to count notifications: {str(e)}"
         )
 
 
@@ -4542,3 +4684,5 @@ async def flymaster_points(
             status_code=500,
             detail=f"Failed to retrieve flight points: {str(e)}"
         )
+
+

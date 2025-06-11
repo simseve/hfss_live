@@ -6,6 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Local Development
 ```bash
+# Create and activate virtual environment
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+
 # Install dependencies
 pip install -r requirements.txt
 
@@ -21,11 +25,14 @@ uvicorn app:app --host 0.0.0.0 --port 8000 --reload
 # Build and start containers
 docker-compose up -d
 
-# Development environment
+# Development environment (host networking)
 docker-compose -f docker-compose-dev.yml up -d
 
-# Debug environment
+# Debug environment (with debugpy on port 5678)
 docker-compose -f docker-compose.debug.yml up -d
+
+# View logs
+docker-compose logs -f
 ```
 
 ### Database Management
@@ -36,73 +43,125 @@ alembic revision -m "description" --autogenerate
 # Apply migrations
 alembic upgrade head
 
-# Database backup/restore (scripts available)
+# Database backup/restore
 ./scripts/pg_backup.sh
 ./scripts/pg_restore.sh
 ```
 
 ### Testing
-Tests are integration-focused and run as standalone scripts:
 ```bash
-# Individual test files
+# Run individual test files
 python test_api_endpoint.py
-python test_firebase_setup.py
-python test_notifications.py
-
-# Tests directory
 python tests/test_mvt.py
 python tests/test_scoring_batch.py
 
-# Or with pytest
+# Run all tests with pytest
 pytest tests/
 pytest test_*.py
 ```
 
 ## Architecture Overview
 
-### Core Application Structure
-- **FastAPI application** (`app.py`) with lifespan management for background tasks
-- **Database layer** (`database/`) using SQLAlchemy with TimescaleDB for time-series data
-- **API routes** (`api/`) organized by functionality (tracking, scoring, authentication)
-- **Background services** for tracking updates and cleanup tasks
+### Core Stack
+- **FastAPI** async web framework with WebSocket support
+- **PostgreSQL** with **PostGIS** and **TimescaleDB** extensions for geospatial time-series data
+- **Redis** for caching, rate limiting, and queue management
+- **MinIO** for object storage
+- **SQLAlchemy** with GeoAlchemy2 for ORM
 
 ### Key Components
 
 **Time-Series Data**:
-- Uses PostgreSQL with TimescaleDB extension
-- Hypertables for `live_track_points`, `uploaded_track_points`, and `scoring_tracks`
-- Automatic data cleanup for live flights (48-hour retention)
+- TimescaleDB hypertables for `live_track_points`, `uploaded_track_points`, and `scoring_tracks`
+- Automatic 48-hour retention for live flight data
+- Batch insertion via Redis queue system
 
-**Authentication**:
+**Authentication & Security**:
 - JWT-based authentication (`api/auth.py`)
 - Tracking tokens for live tracking endpoints
-- Rate limiting with Redis backend
+- Rate limiting: 100 requests per 5 seconds (configurable)
+- bcrypt password hashing
 
 **Real-time Features**:
-- WebSocket connections for live tracking (`ws_conn.py`)
-- Background periodic updates (`background_tracking.py`)
-- Push notifications via Firebase and Expo
+- WebSocket connections (`ws_conn.py`) with ConnectionManager
+- Background tracking updates every 10 seconds
+- Push notifications via Firebase FCM and Expo
 
-**Data Storage**:
-- PostgreSQL with PostGIS for geospatial data
-- MinIO for object storage
-- TimescaleDB for time-series optimization
+**Background Services**:
+- APScheduler for scheduled tasks (cleanup at midnight)
+- Redis queue processors for batch point insertions
+- Automatic database cleanup of old data
 
-### Critical Services
-- Database connection is checked at startup and in health endpoint
-- Firebase initialization for FCM notifications (optional)
-- Background scheduler for cleanup tasks
-- Rate limiting middleware for API protection
+**Geospatial Features**:
+- MVT (Mapbox Vector Tile) endpoint for map visualization
+- PostGIS for spatial queries and indexing
+- Track simplification and analysis
+
+### API Endpoints
+
+**Health & Monitoring**:
+- `/health`: Comprehensive health check (DB, Redis, queues)
+- `/queue/status`: Redis queue statistics
+
+**Authentication**:
+- `/auth/login`, `/auth/refresh`, `/auth/logout`
+- JWT tokens with refresh capability
+
+**Live Tracking**:
+- `/api/v2/live/add_live_track_points`: Batch point insertion
+- WebSocket: `/ws/{race_id}`: Real-time updates
+
+**Data Management**:
+- MVT tiles: `/mvt/{race_id}/{z}/{x}/{y}`
+- Flight scoring and analysis endpoints
 
 ### Configuration
-- Environment-based configuration via `config.py` and `.env`
-- Pydantic settings for type validation
-- CORS configured for web clients
+
+**Environment Variables**:
+- `DATABASE_URL`: PostgreSQL connection string
+- `REDIS_URL`: Redis connection (defaults to localhost:6379)
+- `FIREBASE_SERVICE_ACCOUNT_PATH`: Path to Firebase credentials
+- `SECRET_KEY`: JWT signing key
+- `PROD`: Production mode flag (affects Redis hostname)
+- `MINIO_*`: MinIO configuration
+
+**Key Settings** (`config.py`):
+- Pydantic settings with validation
+- Environment-based configuration
+- CORS configuration for web clients
 
 ### Data Models
-- **Race**: Competition management with timezone support
-- **Flight**: Live and uploaded track data with geospatial points
-- **LiveTrackPoint/UploadedTrackPoint**: Time-series location data
-- **NotificationTokenDB**: Push notification token management
 
-The application serves as the backend for a flight tracking system with real-time capabilities, supporting both live tracking during flights and uploaded track analysis for competitions.
+**Core Models**:
+- **Race**: Competition management with timezone support
+- **Flight**: Live and uploaded track data
+- **LiveTrackPoint/UploadedTrackPoint**: Time-series location data with altitude
+- **NotificationTokenDB**: Push notification management
+- **User**: Authentication and profile data
+
+**TimescaleDB Optimizations**:
+- Hypertables with time-based partitioning
+- Automatic compression policies
+- Efficient time-range queries
+
+### Development Notes
+
+**Redis Queue System**:
+- Located in `redis_queue_system/`
+- Handles batch processing of track points
+- Monitors queue health and processing times
+
+**WebSocket Management**:
+- ConnectionManager handles client connections per race
+- Automatic broadcast of flight updates
+- Connection cleanup on disconnect
+
+**Firebase Integration**:
+- Optional FCM support (graceful fallback if not configured)
+- Notification token management
+- Both Firebase and Expo push notification support
+
+**Security Considerations**:
+- Never commit `.env` files
+- Secure `alembic.ini` database credentials in production
+- Use environment variables for all sensitive configuration
