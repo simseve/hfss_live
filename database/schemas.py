@@ -271,6 +271,25 @@ class NotificationRequest(BaseModel):
     data: Optional[Dict[str, Any]] = {}
 
 
+class SentNotificationResponse(BaseModel):
+    id: str
+    race_id: str
+    title: str
+    body: str
+    data: Optional[Dict[str, Any]] = None
+    total_recipients: int
+    successful_sends: int
+    failed_sends: int
+    expo_recipients: int
+    fcm_recipients: int
+    sent_at: str
+    sender_token_subject: Optional[str] = None
+    batch_processing: bool
+
+    class Config:
+        from_attributes = True
+
+
 # ScoringTracks schemas
 class ScoringTrackBase(BaseModel):
     date_time: datetime = Field(
@@ -452,7 +471,7 @@ class FlymasterPointCreate(BaseModel):
     gps_alt: float
     heading: float
     speed: float
-    uploaded_at: Optional[datetime] = None  
+    uploaded_at: Optional[datetime] = None
 
 
 class FlymasterBatchCreate(BaseModel):

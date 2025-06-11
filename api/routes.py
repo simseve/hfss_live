@@ -2,8 +2,8 @@ from api.flight_state import determine_if_landed, detect_flight_state
 from fastapi import APIRouter, Depends, HTTPException, Query, Security, WebSocket, WebSocketDisconnect, Response, UploadFile, File, Form, Request
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
-from database.schemas import LiveTrackingRequest, LiveTrackPointCreate, FlightResponse, TrackUploadRequest, NotificationCommand, SubscriptionRequest, UnsubscriptionRequest, NotificationRequest, FlymasterBatchCreate, FlymasterBatchResponse, FlymasterPointCreate
-from database.models import UploadedTrackPoint, Flight, LiveTrackPoint, Race, NotificationTokenDB, Flymaster
+from database.schemas import LiveTrackingRequest, LiveTrackPointCreate, FlightResponse, TrackUploadRequest, NotificationCommand, SubscriptionRequest, UnsubscriptionRequest, NotificationRequest, FlymasterBatchCreate, FlymasterBatchResponse, FlymasterPointCreate, SentNotificationResponse
+from database.models import UploadedTrackPoint, Flight, LiveTrackPoint, Race, NotificationTokenDB, Flymaster, SentNotification
 from typing import Dict, Optional
 from database.db_conf import get_db
 import logging
@@ -3691,13 +3691,20 @@ async def send_notification(
                 f"Processing batch {batch_num}/{total_batches} with {len(batch_tokens)} tokens")
 
             try:
+                # Prepare notification data with title and body included
+                notification_data = {
+                    "title": request.title,
+                    "body": request.body,
+                    **(request.data or {})  # Merge with existing data
+                }
+
                 # Use unified batch sending that handles both Expo and FCM
                 batch_tickets, batch_errors, batch_tokens_to_remove = await send_push_messages_batch_unified(
                     tokens=[token_record.token for token_record in batch_tokens],
                     token_records=batch_tokens,
                     title=request.title,
                     message=request.body,
-                    extra_data=request.data
+                    extra_data=notification_data
                 )
 
                 tickets.extend(batch_tickets)
@@ -3718,12 +3725,19 @@ async def send_notification(
 
                 for token_record in batch_tokens:
                     try:
+                        # Prepare notification data with title and body included
+                        notification_data = {
+                            "title": request.title,
+                            "body": request.body,
+                            **(request.data or {})  # Merge with existing data
+                        }
+
                         # Use unified individual sending
                         ticket = await send_push_message_unified(
                             token=token_record.token,
                             title=request.title,
                             message=request.body,
-                            extra_data=request.data
+                            extra_data=notification_data
                         )
                         tickets.append(ticket)
                     except ValueError as e:
@@ -3747,6 +3761,50 @@ async def send_notification(
         successful_sends = len(tickets)
         total_errors = len(errors)
         is_successful = successful_sends > 0
+
+        # Save notification record to database
+        try:
+            # Extract the sender's token subject for audit trail
+            sender_subject = token_data.get("sub", "unknown")
+
+            sent_notification = SentNotification(
+                race_id=request.raceId,
+                title=request.title,
+                body=request.body,
+                data=request.data,
+                total_recipients=total_tokens,
+                successful_sends=successful_sends,
+                failed_sends=total_errors,
+                expo_recipients=expo_count,
+                fcm_recipients=fcm_count,
+                sender_token_subject=sender_subject,
+                error_details=errors if errors else None,
+                batch_processing=True
+            )
+
+            db.add(sent_notification)
+            db.commit()
+
+            logger.info(
+                f"Saved notification record to database with ID: {sent_notification.id}")
+
+        except Exception as e:
+            # Log the error but don't fail the entire request
+            logger.error(
+                f"Failed to save notification record to database: {str(e)}")
+            # Rollback only the notification record, not the token cleanup
+            db.rollback()
+            try:
+                # Re-apply token cleanup if it was successful
+                if tokens_to_remove:
+                    for token_id in tokens_to_remove:
+                        db.query(NotificationTokenDB).filter(
+                            NotificationTokenDB.id == token_id
+                        ).delete()
+                    db.commit()
+            except Exception as cleanup_error:
+                logger.error(
+                    f"Failed to re-apply token cleanup: {str(cleanup_error)}")
 
         # Enhanced logging with token type breakdown
         logger.info(
@@ -3782,275 +3840,18 @@ async def send_notification(
         )
 
 
-# {
-#   "title": "🚨 EMERGENCY ALERT",
-#   "body": "Severe weather approaching. Land immediately.",
-#   "data": {
-#     "priority": "critical",
-#     "category": "safety",
-#     "urgent": true,
-#     "actions": [
-#       {
-#         "label": "Emergency Contact",
-#         "type": "call_phone",
-#         "phone": "+41791234567"
-#       }
-#     ]
-#   }
-# }
 
 
-@router.post("/flymaster/upload/file")
-async def upload_flymaster_file(
-    request: Request,
-    file: UploadFile = File(None),
-    db: Session = Depends(get_db)
-):
-    """
-    Upload Flymaster tracking data supporting multiple formats:
-    1. File upload (multipart/form-data)
-    2. Raw data (text/plain content from PHP curl with post_as_file=1)
-
-    Format:
-    device_serial, sha256key
-    list of points with uploaded_at, date_time (unix timestamp), lat, lon, gps_alt, speed, heading
-    EOF
-    """
-    try:
-        # Determine content source
-        content_str = None
-        source_type = "unknown"
-
-        # Priority 1: File upload (multipart/form-data)
-        if file and hasattr(file, 'read'):
-            try:
-                content = await file.read()
-                content_str = content.decode('utf-8')
-                source_type = "file_upload"
-            except Exception as e:
-                logger.warning(f"Failed to read uploaded file: {e}")
-
-        # Priority 2: Raw body (text/plain from PHP curl)
-        if not content_str:
-            try:
-                body = await request.body()
-                if body:
-                    content_str = body.decode('utf-8')
-                    source_type = "raw_body"
-            except Exception as e:
-                logger.warning(f"Failed to read request body: {e}")
-
-        # Validate we got some content
-        if not content_str or not content_str.strip():
-            raise HTTPException(
-                status_code=400,
-                detail="No data received. Send as file upload or text/plain body"
-            )
-
-        logger.info(f"Flymaster upload received via: {source_type}")
-        lines = content_str.strip().split('\n')
-
-        if len(lines) < 3:
-            raise HTTPException(status_code=400, detail="Invalid file format")
-
-        # Parse header line (format: device_serial, sha256key)
-        header_parts = lines[0].split(',')
-        if len(header_parts) != 2:
-            raise HTTPException(
-                status_code=400, detail="Invalid header format: expected 'device_serial, sha256key'")
-
-        device_serial = header_parts[0].strip()
-        sha256key = header_parts[1].strip()
-
-        # Convert device_serial directly to integer (it's already a numeric device ID)
-        try:
-            device_id = int(device_serial)
-        except ValueError:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid device_serial format: expected integer, got '{device_serial}'"
-            )
-
-        # Validate SHA256 key - it should be SHA256(device_id + secret)
-        import hashlib
-        combined = str(device_id) + settings.FLYMASTER_SECRET
-        expected_sha256 = hashlib.sha256(combined.encode()).hexdigest()
-
-        if sha256key != expected_sha256:
-            raise HTTPException(
-                status_code=401,
-                detail="Invalid SHA256 key - authentication failed"
-            )
-
-        # Find EOF
-        eof_index = -1
-        for i, line in enumerate(lines):
-            if line.strip() == "EOF":
-                eof_index = i
-                break
-
-        if eof_index == -1:
-            raise HTTPException(status_code=400, detail="EOF marker not found")
-
-        # Parse data points (between header and EOF)
-        data_lines = lines[1:eof_index]
-        points = []
-
-        for line in data_lines:
-            line = line.strip()
-            if not line:
-                continue
-
-            try:
-                # Expected format: uploaded_at, date_time (unix timestamp), lat, lon, gps_alt, speed, heading
-                parts = [part.strip() for part in line.split(',')]
-                if len(parts) != 7:
-                    logger.warning(f"Skipping malformed line: {line}")
-                    continue
-
-                # Convert unix timestamps to datetime
-                uploaded_at_unix = int(parts[0])
-                unix_timestamp = int(parts[1])
-                uploaded_at_dt = datetime.fromtimestamp(
-                    uploaded_at_unix, tz=timezone.utc)
-                date_time = datetime.fromtimestamp(
-                    unix_timestamp, tz=timezone.utc)
-
-                point = {
-                    "device_id": device_id,
-                    "date_time": date_time,
-                    "lat": float(parts[2]),
-                    "lon": float(parts[3]),
-                    "gps_alt": float(parts[4]),
-                    "heading": float(parts[6]),  # heading/bearing
-                    "speed": float(parts[5]),
-                    "uploaded_at": uploaded_at_dt
-                }
-                points.append(point)
-
-            except (ValueError, IndexError) as e:
-                logger.warning(
-                    f"Skipping invalid line: {line}, error: {str(e)}")
-                continue
-
-        # Create the batch request
-        flymaster_points = [FlymasterPointCreate(**point) for point in points]
-
-        batch_request = FlymasterBatchCreate(
-            device_serial=device_serial,
-            sha256key=sha256key,
-            points=flymaster_points
-        )
-
-        # Use fast batch insert without duplicate checking
-        points_added = 0
-        points_skipped = 0
-
-        logger.info(
-            f"Processing Flymaster file upload for device {device_id} with {len(flymaster_points)} points")
-
-        if flymaster_points:
-            try:
-                # Prepare points for queueing
-                points_for_queue = []
-                for point in flymaster_points:
-                    point_dict = {
-                        "device_id": point.device_id,
-                        "date_time": point.date_time,
-                        "lat": point.lat,
-                        "lon": point.lon,
-                        "gps_alt": point.gps_alt,
-                        "heading": point.heading,
-                        "speed": point.speed,
-                        "uploaded_at": point.uploaded_at or datetime.now(timezone.utc)
-                    }
-                    points_for_queue.append(point_dict)
-
-                # Queue for background processing
-                queued = await redis_queue.queue_points(
-                    QUEUE_NAMES['flymaster'],
-                    points_for_queue,
-                    priority=1
-                )
-
-                if queued:
-                    points_added = len(flymaster_points)
-                    logger.info(
-                        f"Successfully queued {points_added} Flymaster points for background processing")
-                else:
-                    # Fallback to direct insertion if queueing fails
-                    flymaster_objects = []
-
-                    for point in flymaster_points:
-                        point_data = {
-                            "device_id": point.device_id,
-                            "date_time": point.date_time,
-                            "lat": point.lat,
-                            "lon": point.lon,
-                            "gps_alt": point.gps_alt,
-                            "heading": point.heading,
-                            "speed": point.speed,
-                            "uploaded_at": point.uploaded_at or datetime.now(timezone.utc),
-                        }
-                        flymaster_objects.append(point_data)
-
-                    # Use insert().on_conflict_do_nothing() for handling duplicates gracefully
-                    stmt = insert(Flymaster).on_conflict_do_nothing(
-                        index_elements=['device_id', 'date_time', 'lat', 'lon']
-                    )
-                    db.execute(stmt, flymaster_objects)
-                    db.commit()
-                    points_added = len(flymaster_objects)
-
-                    logger.info(
-                        f"Successfully inserted {points_added} Flymaster points via batch insert (fallback)")
-
-            except Exception as e:
-                db.rollback()
-                logger.error(f"Error processing Flymaster points: {str(e)}")
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Failed to process points: {str(e)}"
-                )
-
-        logger.info(
-            f"Flymaster file upload completed: {points_added} added, {points_skipped} skipped")
-
-        # return FlymasterBatchResponse(
-        #     device_serial=device_serial,
-        #     points_added=points_added,
-        #     points_skipped=points_skipped,
-        #     message=f"Successfully processed {points_added} points from file, skipped {points_skipped} duplicates"
-        # )
-        return PlainTextResponse("OK", status_code=200)
-
-    except HTTPException:
-        raise
-    except SQLAlchemyError as e:
-        db.rollback()
-        logger.error(f"Database error during Flymaster file upload: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail="Database error during file upload"
-        )
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Error during Flymaster file upload: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to upload Flymaster file: {str(e)}"
-        )
-
-
-# @router.post("/flymaster/upload/file", response_model=FlymasterBatchResponse)
+# @router.post("/flymaster/upload/file")
 # async def upload_flymaster_file(
-#     file: Optional[UploadFile] = File(None),
+#     request: Request,
+#     file: UploadFile = File(None),
 #     db: Session = Depends(get_db)
 # ):
 #     """
-#     Upload Flymaster tracking data from either:
-#     1. File upload (original format)
-#     2. Form data with 'data' field containing the content
+#     Upload Flymaster tracking data supporting multiple formats:
+#     1. File upload (multipart/form-data)
+#     2. Raw data (text/plain content from PHP curl with post_as_file=1)
 
 #     Format:
 #     device_serial, sha256key
@@ -4059,17 +3860,36 @@ async def upload_flymaster_file(
 #     """
 #     try:
 #         # Determine content source
-#         if file and file.filename:
-#             # File upload format
-#             content = await file.read()
-#             content_str = content.decode('utf-8')
-#         else:
+#         content_str = None
+#         source_type = "unknown"
+
+#         # Priority 1: File upload (multipart/form-data)
+#         if file and hasattr(file, 'read'):
+#             try:
+#                 content = await file.read()
+#                 content_str = content.decode('utf-8')
+#                 source_type = "file_upload"
+#             except Exception as e:
+#                 logger.warning(f"Failed to read uploaded file: {e}")
+
+#         # Priority 2: Raw body (text/plain from PHP curl)
+#         if not content_str:
+#             try:
+#                 body = await request.body()
+#                 if body:
+#                     content_str = body.decode('utf-8')
+#                     source_type = "raw_body"
+#             except Exception as e:
+#                 logger.warning(f"Failed to read request body: {e}")
+
+#         # Validate we got some content
+#         if not content_str or not content_str.strip():
 #             raise HTTPException(
 #                 status_code=400,
-#                 detail="Either 'file' or 'data' parameter must be provided"
+#                 detail="No data received. Send as file upload or text/plain body"
 #             )
 
-#         # Rest of the processing logic remains the same
+#         logger.info(f"Flymaster upload received via: {source_type}")
 #         lines = content_str.strip().split('\n')
 
 #         if len(lines) < 3:
@@ -4080,7 +3900,6 @@ async def upload_flymaster_file(
 #         if len(header_parts) != 2:
 #             raise HTTPException(
 #                 status_code=400, detail="Invalid header format: expected 'device_serial, sha256key'")
-
 
 #         device_serial = header_parts[0].strip()
 #         sha256key = header_parts[1].strip()
@@ -4239,12 +4058,13 @@ async def upload_flymaster_file(
 #         logger.info(
 #             f"Flymaster file upload completed: {points_added} added, {points_skipped} skipped")
 
-#         return FlymasterBatchResponse(
-#             device_serial=device_serial,
-#             points_added=points_added,
-#             points_skipped=points_skipped,
-#             message=f"Successfully processed {points_added} points from file, skipped {points_skipped} duplicates"
-#         )
+#         # return FlymasterBatchResponse(
+#         #     device_serial=device_serial,
+#         #     points_added=points_added,
+#         #     points_skipped=points_skipped,
+#         #     message=f"Successfully processed {points_added} points from file, skipped {points_skipped} duplicates"
+#         # )
+#         return PlainTextResponse("OK", status_code=200)
 
 #     except HTTPException:
 #         raise
@@ -4262,3 +4082,463 @@ async def upload_flymaster_file(
 #             status_code=500,
 #             detail=f"Failed to upload Flymaster file: {str(e)}"
 #         )
+
+
+
+@router.post("/flymaster/upload/file")
+async def upload_flymaster_file(
+    request: Request,
+    file: UploadFile = File(None),
+    db: Session = Depends(get_db)
+):
+    """
+    Upload Flymaster tracking data supporting multiple formats:
+    1. File upload (multipart/form-data)
+    2. Raw data (text/plain content from PHP curl with post_as_file=1)
+
+    Format:
+    device_serial, sha256key
+    list of points with uploaded_at, date_time (unix timestamp), lat, lon, gps_alt, speed, heading
+    EOF
+    """
+    try:
+        # Determine content source
+        content_str = None
+        source_type = "unknown"
+
+        # Priority 1: File upload (multipart/form-data)
+        if file and hasattr(file, 'read'):
+            try:
+                content = await file.read()
+                content_str = content.decode('utf-8')
+                source_type = "file_upload"
+            except Exception as e:
+                logger.warning(f"Failed to read uploaded file: {e}")
+
+        # Priority 2: Raw body (text/plain from PHP curl)
+        if not content_str:
+            try:
+                body = await request.body()
+                if body:
+                    content_str = body.decode('utf-8')
+                    source_type = "raw_body"
+            except Exception as e:
+                logger.warning(f"Failed to read request body: {e}")
+
+        # Validate we got some content
+        if not content_str or not content_str.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="No data received. Send as file upload or text/plain body"
+            )
+
+        logger.info(f"Flymaster upload received via: {source_type}")
+        lines = content_str.strip().split('\n')
+
+        if len(lines) < 3:
+            raise HTTPException(status_code=400, detail="Invalid file format")
+
+        # Parse header line (format: device_serial, sha256key)
+        header_parts = lines[0].split(',')
+        if len(header_parts) != 2:
+            raise HTTPException(
+                status_code=400, detail="Invalid header format: expected 'device_serial, sha256key'")
+
+        device_serial = header_parts[0].strip()
+        sha256key = header_parts[1].strip()
+
+        # Convert device_serial directly to integer (it's already a numeric device ID)
+        try:
+            device_id = int(device_serial)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid device_serial format: expected integer, got '{device_serial}'"
+            )
+
+        # Validate SHA256 key - it should be SHA256(device_id + secret)
+        import hashlib
+        combined = str(device_id) + settings.FLYMASTER_SECRET
+        expected_sha256 = hashlib.sha256(combined.encode()).hexdigest()
+
+        if sha256key != expected_sha256:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid SHA256 key - authentication failed"
+            )
+
+        # Find EOF
+        eof_index = -1
+        for i, line in enumerate(lines):
+            if line.strip() == "EOF":
+                eof_index = i
+                break
+
+        if eof_index == -1:
+            raise HTTPException(status_code=400, detail="EOF marker not found")
+
+        # Parse data points (between header and EOF)
+        data_lines = lines[1:eof_index]
+        points = []
+
+        for line in data_lines:
+            line = line.strip()
+            if not line:
+                continue
+
+            try:
+                # Expected format: uploaded_at, date_time (unix timestamp), lat, lon, gps_alt, speed, heading
+                parts = [part.strip() for part in line.split(',')]
+                if len(parts) != 7:
+                    logger.warning(f"Skipping malformed line: {line}")
+                    continue
+
+                # Convert unix timestamps to datetime
+                uploaded_at_unix = int(parts[0])
+                unix_timestamp = int(parts[1])
+                uploaded_at_dt = datetime.fromtimestamp(
+                    uploaded_at_unix, tz=timezone.utc)
+                date_time = datetime.fromtimestamp(
+                    unix_timestamp, tz=timezone.utc)
+
+                point = {
+                    "device_id": device_id,
+                    "date_time": date_time,
+                    "lat": float(parts[2]),
+                    "lon": float(parts[3]),
+                    "gps_alt": float(parts[4]),
+                    "heading": float(parts[6]),  # heading/bearing
+                    "speed": float(parts[5]),
+                    "uploaded_at": uploaded_at_dt
+                }
+                points.append(point)
+
+            except (ValueError, IndexError) as e:
+                logger.warning(
+                    f"Skipping invalid line: {line}, error: {str(e)}")
+                continue
+
+        # Create flight management for Flymaster data
+        # Use device_id as both pilot_id and in flight_id generation
+        pilot_id = str(device_id)
+        pilot_name = f"Flymaster-pilot-{device_id}"
+        race_id = f"flymaster-race-{device_id}"  # Make race_id unique per device
+
+        # Create a flight_id using device_id and first point timestamp
+        if points:  # Use original points array instead of track_points_data
+            first_point = points[0]
+            first_timestamp = first_point['date_time'].strftime('%Y-%m-%dT%H:%M:%SZ')
+            flight_id = f"flymaster-{device_id}-{first_timestamp}"
+        else:
+            flight_id = f"flymaster-{device_id}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+
+        # Check/create race record for Flymaster data
+        race = db.query(Race).filter(Race.race_id == race_id).first()
+        if not race:
+            race = Race(
+                race_id=race_id,
+                name=f"Flymaster Device {device_id}",  # More specific name
+                date=datetime.now(timezone.utc).date(),
+                end_date=datetime.now(
+                    timezone.utc).date() + timedelta(days=365),
+                timezone="UTC",
+                location="Global"
+            )
+            db.add(race)
+            try:
+                db.commit()
+            except SQLAlchemyError as e:
+                db.rollback()
+                logger.error(
+                    f"Failed to create Flymaster race record: {str(e)}")
+
+        # Flight management logic adapted from live_tracking
+        flight = db.query(Flight).filter(
+            Flight.flight_id == flight_id).first()
+
+        if points:
+            latest_point = points[-1]
+            first_point['date_time'].astimezone(timezone.utc)
+            latest_datetime = latest_point['date_time'].astimezone(timezone.utc)
+
+            if not flight:
+                first_point = points[0]
+                first_datetime = first_point['date_time'].astimezone(timezone.utc)
+
+                flight = Flight(
+                    flight_id=flight_id,
+                    race_uuid=race.id,
+                    race_id=race_id,
+                    pilot_id=pilot_id,
+                    pilot_name=pilot_name,
+                    created_at=datetime.now(timezone.utc),
+                    source='live',
+                    first_fix={
+                        'lat': first_point['lat'],
+                        'lon': first_point['lon'],
+                        'elevation': first_point.get('elevation'),
+                        'datetime': first_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
+                    },
+                    last_fix={
+                        'lat': latest_point['lat'],
+                        'lon': latest_point['lon'],
+                        'elevation': latest_point.get('elevation'),
+                        'datetime': latest_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
+                    },
+                    total_points=len(points),
+                    device_id=str(device_id)
+                )
+                db.add(flight)
+            else:
+                # Update last_fix, total_points for existing flight
+                flight.last_fix = {
+                    'lat': latest_point['lat'],
+                    'lon': latest_point['lon'],
+                    'elevation': latest_point.get('elevation'),
+                    'datetime': latest_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
+                }
+                flight.total_points = flight.total_points + \
+                    len(points)
+                flight.pilot_name = pilot_name  # Update pilot name in case it changed
+
+            try:
+                db.commit()
+                # Asynchronously update the flight state with 'flymaster' source
+                asyncio.create_task(update_flight_state(
+                    flight.id, db, source='live'))
+                logger.info(
+                    f"Successfully updated Flymaster flight record: {flight_id}")
+            except SQLAlchemyError as e:
+                db.rollback()
+                logger.error(f"Failed to update Flymaster flight: {str(e)}")
+                raise HTTPException(
+                    status_code=500,
+                    detail="Failed to update flight record"
+                )
+
+        # Create the batch request
+        flymaster_points = [FlymasterPointCreate(**point) for point in points]
+
+        batch_request = FlymasterBatchCreate(
+            device_serial=device_serial,
+            sha256key=sha256key,
+            points=flymaster_points
+        )
+
+        # Use fast batch insert without duplicate checking
+        points_added = 0
+        points_skipped = 0
+
+        logger.info(
+            f"Processing Flymaster file upload for device {device_id} with {len(flymaster_points)} points")
+
+        if flymaster_points:
+            try:
+                # Prepare points for queueing
+                points_for_queue = []
+                for point in flymaster_points:
+                    point_dict = {
+                        "device_id": point.device_id,
+                        "date_time": point.date_time,
+                        "lat": point.lat,
+                        "lon": point.lon,
+                        "gps_alt": point.gps_alt,
+                        "heading": point.heading,
+                        "speed": point.speed,
+                        "uploaded_at": point.uploaded_at or datetime.now(timezone.utc)
+                    }
+                    points_for_queue.append(point_dict)
+
+                # Queue for background processing
+                queued = await redis_queue.queue_points(
+                    QUEUE_NAMES['flymaster'],
+                    points_for_queue,
+                    priority=1
+                )
+
+                if queued:
+                    points_added = len(flymaster_points)
+                    logger.info(
+                        f"Successfully queued {points_added} Flymaster points for background processing")
+                else:
+                    # Fallback to direct insertion if queueing fails
+                    flymaster_objects = []
+
+                    for point in flymaster_points:
+                        point_data = {
+                            "device_id": point.device_id,
+                            "date_time": point.date_time,
+                            "lat": point.lat,
+                            "lon": point.lon,
+                            "gps_alt": point.gps_alt,
+                            "heading": point.heading,
+                            "speed": point.speed,
+                            "uploaded_at": point.uploaded_at or datetime.now(timezone.utc),
+                        }
+                        flymaster_objects.append(point_data)
+
+                    # Use insert().on_conflict_do_nothing() for handling duplicates gracefully
+                    stmt = insert(Flymaster).on_conflict_do_nothing(
+                        index_elements=['device_id', 'date_time', 'lat', 'lon']
+                    )
+                    db.execute(stmt, flymaster_objects)
+                    db.commit()
+                    points_added = len(flymaster_objects)
+
+                    logger.info(
+                        f"Successfully inserted {points_added} Flymaster points via batch insert (fallback)")
+
+            except Exception as e:
+                db.rollback()
+                logger.error(f"Error processing Flymaster points: {str(e)}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to process points: {str(e)}"
+                )
+
+        logger.info(
+            f"Flymaster file upload completed: {points_added} added, {points_skipped} skipped")
+
+        # return FlymasterBatchResponse(
+        #     device_serial=device_serial,
+        #     points_added=points_added,
+        #     points_skipped=points_skipped,
+        #     message=f"Successfully processed {points_added} points from file, skipped {points_skipped} duplicates"
+        # )
+        return PlainTextResponse("OK", status_code=200)
+
+    except HTTPException:
+        raise
+    except SQLAlchemyError as e:
+        db.rollback()
+        logger.error(f"Database error during Flymaster file upload: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Database error during file upload"
+        )
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error during Flymaster file upload: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to upload Flymaster file: {str(e)}"
+        )
+
+
+@router.get("/flymaster/points/{serial_id}/raw")
+async def flymaster_points(
+    serial_id: int,
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    start_date: Optional[str] = Query(
+        None, description="Start date filter (ISO 8601 format, e.g. 2025-06-08T09:31:22+03:00)"),
+    end_date: Optional[str] = Query(
+        None, description="End date filter (ISO 8601 format, e.g. 2025-06-08T18:31:22+03:00)"),
+    db: Session = Depends(get_db)
+):
+    """
+    Get all track points for a specific flymaster serial id.
+    Requires JWT token in Authorization header (Bearer token).
+    Returns points with datetime, lat, lon, and elevation.
+    Optional date filtering with start_date and end_date parameters.
+    """
+    try:
+        # Get token from Authorization header and verify it
+        token = credentials.credentials
+        try:
+            token_data = jwt.decode(
+                token,
+                settings.SECRET_KEY,
+                algorithms=["HS256"],
+                audience="api.hikeandfly.app",
+                issuer="hikeandfly.app",
+                verify=True
+            )
+
+            if not token_data.get("sub", "").startswith("contest:"):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Invalid token subject - must be contest-specific"
+                )
+
+        except jwt.ExpiredSignatureError:
+            raise HTTPException(
+                status_code=401,
+                detail="Token has expired"
+            )
+        except PyJWTError as e:
+            raise HTTPException(
+                status_code=401,
+                detail=f"Invalid token: {str(e)}"
+            )
+
+        # Get all track points for this flight
+        query = db.query(Flymaster).filter(
+            Flymaster.device_id == serial_id
+        )
+
+        # Apply date filters if provided
+        if start_date:
+            try:
+                start_datetime = datetime.fromisoformat(
+                    start_date.replace('Z', '+00:00'))
+                query = query.filter(Flymaster.date_time >= start_datetime)
+            except ValueError as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid start_date format: {str(e)}. Use ISO 8601 format (e.g., 2025-06-08T09:31:22+03:00)"
+                )
+
+        if end_date:
+            try:
+                end_datetime = datetime.fromisoformat(
+                    end_date.replace('Z', '+00:00'))
+                query = query.filter(Flymaster.date_time <= end_datetime)
+            except ValueError as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid end_date format: {str(e)}. Use ISO 8601 format (e.g., 2025-06-08T18:31:22+03:00)"
+                )
+
+        track_points = query.order_by(Flymaster.date_time).all()
+
+        if not track_points:
+            logger.warning(
+                f"No track points found for serial_id: {serial_id} with filters start_date: {start_date}, end_date: {end_date}")
+            return {
+                "success": True,
+                "serial_id": serial_id,
+                "total_points": 0,
+                "date_filters": {
+                    "start_date": start_date,
+                    "end_date": end_date
+                },
+                "points": []
+            }
+
+        # Format points as simple dictionaries
+        points = [{
+            "datetime": point.date_time.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "lat": float(point.lat),
+            "lon": float(point.lon),
+            "gps_alt": float(point.gps_alt) if point.gps_alt is not None else None
+        } for point in track_points]
+
+        return {
+            "success": True,
+            "serial_id": serial_id,
+            "total_points": len(points),
+            "date_filters": {
+                "start_date": start_date,
+                "end_date": end_date
+            },
+            "points": points
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving flight points: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve flight points: {str(e)}"
+        )
