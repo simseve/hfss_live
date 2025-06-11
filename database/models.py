@@ -261,3 +261,45 @@ class Flymaster(Base):
 
     def __repr__(self):
         return f"<Flymaster(device_id={self.device_id}, date_time={self.date_time})>"
+
+
+class SentNotification(Base):
+    __tablename__ = 'sent_notifications'
+
+    id = Column(UUID(as_uuid=True), primary_key=True,
+                nullable=False, default=uuid.uuid4)
+    race_id = Column(String, nullable=False)
+    title = Column(String, nullable=False)
+    body = Column(String, nullable=False)
+    # Additional data sent with notification
+    data = Column(JSON, nullable=True)
+
+    # Statistics about the send
+    total_recipients = Column(Integer, nullable=False, default=0)
+    successful_sends = Column(Integer, nullable=False, default=0)
+    failed_sends = Column(Integer, nullable=False, default=0)
+
+    # Token distribution breakdown
+    expo_recipients = Column(Integer, nullable=False, default=0)
+    fcm_recipients = Column(Integer, nullable=False, default=0)
+
+    # Send details
+    sent_at = Column(DateTime(timezone=True), nullable=False,
+                     default=lambda: datetime.now(timezone.utc))
+    # JWT token subject for audit trail
+    sender_token_subject = Column(String, nullable=True)
+
+    # Optional error details (JSON array of errors)
+    error_details = Column(JSON, nullable=True)
+
+    # Status flags
+    batch_processing = Column(Boolean, nullable=False, default=True)
+
+    __table_args__ = (
+        Index('idx_sent_notifications_race_id', 'race_id'),
+        Index('idx_sent_notifications_sent_at', 'sent_at'),
+        Index('idx_sent_notifications_race_sent_at', 'race_id', 'sent_at'),
+    )
+
+    def __repr__(self):
+        return f"<SentNotification(id={self.id}, race_id={self.race_id}, title={self.title[:30]}...)>"
