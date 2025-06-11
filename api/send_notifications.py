@@ -5,6 +5,7 @@ from typing import List, Tuple, Dict, Any
 from enum import Enum
 import logging
 import asyncio
+import datetime
 from exponent_server_sdk import (
     DeviceNotRegisteredError,
     PushClient,
@@ -151,11 +152,12 @@ def initialize_firebase():
 
 
 async def send_fcm_message(token: str, title: str, body: str, extra_data: dict = None):
-    """Send a push notification using Firebase Cloud Messaging
+    """Send a data-only push notification using Firebase Cloud Messaging
     
-    Per FCM best practices, title and body are included in both:
-    - notification payload (for automatic display when app is in background)
-    - data payload (for app to handle when in foreground)
+    This sends a data-only message that:
+    - Wakes up the app in the background to process data
+    - Does not display a notification in the system tray
+    - Allows the app to handle the notification display
     """
     try:
         # Check if Firebase is initialized
@@ -165,38 +167,34 @@ async def send_fcm_message(token: str, title: str, body: str, extra_data: dict =
             raise ValueError(
                 "Firebase not initialized. FCM notifications unavailable.")
 
-        # Prepare data payload with title and body included as per FCM specs
+        # Prepare data payload with title and body
         fcm_data = {
             "title": title,
             "body": body,
             **(extra_data or {})
         }
         
-        # Create the message
+        # Create data-only message (no notification payload)
         message = messaging.Message(
-            notification=messaging.Notification(
-                title=title,
-                body=body,
-            ),
-            data=serialize_fcm_data(fcm_data),  # Include title/body in data
+            # Data-only payload
+            data=serialize_fcm_data(fcm_data),
             token=token,
-            # Optional: Configure Android and iOS specific options
+            # Android configuration for background wake-up
             android=messaging.AndroidConfig(
-                priority='high',
-                notification=messaging.AndroidNotification(
-                    channel_id='default',  # Make sure this matches your app's channel
-                    priority='high',
-                )
+                priority='high',  # Required for background wake-up
+                # Set time-to-live (optional)
+                ttl=datetime.timedelta(seconds=3600),
             ),
+            # iOS configuration for background wake-up
             apns=messaging.APNSConfig(
+                headers={
+                    'apns-priority': '10',  # High priority
+                    'apns-push-type': 'background',  # Background push type
+                },
                 payload=messaging.APNSPayload(
                     aps=messaging.Aps(
-                        alert=messaging.ApsAlert(
-                            title=title,
-                            body=body,
-                        ),
-                        badge=1,
-                        sound='default',
+                        content_available=True,  # Required for background wake-up on iOS
+                        # No alert, badge, or sound for data-only messages
                     )
                 )
             )
