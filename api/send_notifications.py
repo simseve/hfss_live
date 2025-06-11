@@ -206,86 +206,79 @@ async def send_fcm_message(token: str, title: str, body: str, extra_data: dict =
 
 
 async def send_fcm_messages_batch(tokens: List[str], title: str, body: str, extra_data: dict = None):
-    """Send multiple FCM notifications in batch (up to 500 per batch)"""
+    """Send multiple FCM notifications concurrently (send_all is deprecated)"""
     try:
         # Check if Firebase is initialized
         try:
             app = firebase_admin.get_app()
             # Log project info for debugging
             if hasattr(app, 'project_id'):
-                logger.debug(f"FCM batch send using project_id: {app.project_id}")
+                logger.debug(f"FCM concurrent send using project_id: {app.project_id}")
         except ValueError:
             raise ValueError(
                 "Firebase not initialized. FCM notifications unavailable.")
-
-        # Create messages for all tokens
-        messages = []
-        for token in tokens:
-            message = messaging.Message(
-                notification=messaging.Notification(
-                    title=title,
-                    body=body,
-                ),
-                data=serialize_fcm_data(extra_data),  # Serialize data for FCM
-                token=token,
-                android=messaging.AndroidConfig(
-                    priority='high',
-                    notification=messaging.AndroidNotification(
-                        channel_id='default',
-                        priority='high',
-                    )
-                ),
-                apns=messaging.APNSConfig(
-                    payload=messaging.APNSPayload(
-                        aps=messaging.Aps(
-                            alert=messaging.ApsAlert(
-                                title=title,
-                                body=body,
-                            ),
-                            badge=1,
-                            sound='default',
-                        )
-                    )
-                )
-            )
-            messages.append(message)
-
-        # Send batch (FCM supports up to 500 messages per batch)
-        logger.debug(f"Sending FCM batch of {len(messages)} messages")
-        batch_response = messaging.send_all(messages)
 
         # Process responses
         successful_responses = []
         failed_responses = []
         tokens_to_remove = []
 
-        for i, response in enumerate(batch_response.responses):
-            if response.success:
-                successful_responses.append({
-                    "message_id": response.message_id,
-                    "token_index": i
-                })
-            else:
-                error_code = response.exception.code if response.exception else "unknown"
-                error_message = str(
-                    response.exception) if response.exception else "Unknown error"
-
+        # Send messages concurrently using asyncio
+        logger.debug(f"Sending {len(tokens)} FCM messages concurrently")
+        
+        # Create tasks for concurrent sending
+        tasks = []
+        for i, token in enumerate(tokens):
+            task = send_fcm_message_with_index(token, title, body, extra_data, i)
+            tasks.append(task)
+        
+        # Execute all tasks concurrently
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Process results
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                error_message = str(result)
+                
                 # Check if token should be removed
-                if (error_code in ['NOT_FOUND', 'UNREGISTERED'] or
-                        'not registered' in error_message.lower()):
-                    # Return index for token removal
+                if ('Device not registered' in error_message or 
+                    'not registered' in error_message.lower() or
+                    'NOT_FOUND' in error_message or
+                    'UNREGISTERED' in error_message):
                     tokens_to_remove.append(i)
-
+                
                 failed_responses.append({
                     "token": tokens[i][:10] + "...",
                     "error": error_message,
-                    "error_code": error_code
+                    "error_code": "error"
+                })
+            elif isinstance(result, dict) and result.get('success'):
+                successful_responses.append({
+                    "message_id": result.get('message_id'),
+                    "token_index": i
+                })
+            else:
+                # Handle unexpected result format
+                failed_responses.append({
+                    "token": tokens[i][:10] + "...",
+                    "error": "Unexpected response format",
+                    "error_code": "unknown"
                 })
 
         return successful_responses, failed_responses, tokens_to_remove
 
     except Exception as e:
-        raise ValueError(f"Error sending FCM batch notifications: {e}")
+        raise ValueError(f"Error sending FCM concurrent notifications: {e}")
+
+
+async def send_fcm_message_with_index(token: str, title: str, body: str, extra_data: dict, index: int):
+    """Helper function to send FCM message and preserve index for error tracking"""
+    try:
+        result = await send_fcm_message(token, title, body, extra_data)
+        return result
+    except Exception as e:
+        # Re-raise the exception to be caught by gather()
+        raise e
 
 # Updated main notification functions
 
@@ -368,60 +361,27 @@ async def send_push_messages_batch_unified(tokens: list, token_records: list, ti
 
     # Send FCM notifications if any
     if fcm_tokens:
-        # Check if we should use batch or individual sending
-        use_batch = True
-        
-        # Check if project ID is properly configured
         try:
-            app = firebase_admin.get_app()
-            if not hasattr(app, 'project_id') or not app.project_id:
-                logger.warning("Firebase project_id not accessible - using individual FCM sending")
-                use_batch = False
-        except:
-            use_batch = False
-        
-        if use_batch and len(fcm_tokens) > 1:
-            try:
-                fcm_tickets, fcm_errors, fcm_token_indices_to_remove = await send_fcm_messages_batch(
-                    fcm_tokens, title, message, extra_data
-                )
-                all_tickets.extend(fcm_tickets)
-                all_errors.extend(fcm_errors)
+            # Use concurrent sending for FCM (since send_all is deprecated)
+            fcm_tickets, fcm_errors, fcm_token_indices_to_remove = await send_fcm_messages_batch(
+                fcm_tokens, title, message, extra_data
+            )
+            all_tickets.extend(fcm_tickets)
+            all_errors.extend(fcm_errors)
 
-                # Convert FCM token indices to record IDs
-                for index in fcm_token_indices_to_remove:
-                    if index < len(fcm_records):
-                        all_tokens_to_remove.append(fcm_records[index].id)
+            # Convert FCM token indices to record IDs
+            for index in fcm_token_indices_to_remove:
+                if index < len(fcm_records):
+                    all_tokens_to_remove.append(fcm_records[index].id)
 
-            except Exception as e:
-                logger.error(f"Error sending FCM batch: {e}")
-                logger.warning("Falling back to individual FCM sending...")
-                use_batch = False
-        
-        # Use individual sending if batch failed or wasn't attempted
-        if not use_batch or len(fcm_tokens) == 1:
-            # Use individual FCM sending
+        except Exception as e:
+            logger.error(f"Error sending FCM notifications: {e}")
+            # Add all FCM tokens to errors if batch completely failed
             for record in fcm_records:
-                try:
-                    ticket = await send_fcm_message(
-                        token=record.token,
-                        title=title,
-                        body=message,
-                        extra_data=extra_data
-                    )
-                    all_tickets.append(ticket)
-                except ValueError as e:
-                    if "Device not registered" in str(e) or "not registered" in str(e).lower():
-                        all_tokens_to_remove.append(record.id)
-                    all_errors.append({
-                        "token": record.token[:10] + "...",
-                        "error": str(e)
-                    })
-                except Exception as e:
-                    all_errors.append({
-                        "token": record.token[:10] + "...",
-                        "error": f"FCM individual send failed: {str(e)}"
-                    })
+                all_errors.append({
+                    "token": record.token[:10] + "...",
+                    "error": f"FCM send failed: {str(e)}"
+                })
 
     return all_tickets, all_errors, all_tokens_to_remove
 
