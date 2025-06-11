@@ -151,7 +151,12 @@ def initialize_firebase():
 
 
 async def send_fcm_message(token: str, title: str, body: str, extra_data: dict = None):
-    """Send a push notification using Firebase Cloud Messaging"""
+    """Send a push notification using Firebase Cloud Messaging
+    
+    Per FCM best practices, title and body are included in both:
+    - notification payload (for automatic display when app is in background)
+    - data payload (for app to handle when in foreground)
+    """
     try:
         # Check if Firebase is initialized
         try:
@@ -160,13 +165,20 @@ async def send_fcm_message(token: str, title: str, body: str, extra_data: dict =
             raise ValueError(
                 "Firebase not initialized. FCM notifications unavailable.")
 
+        # Prepare data payload with title and body included as per FCM specs
+        fcm_data = {
+            "title": title,
+            "body": body,
+            **(extra_data or {})
+        }
+        
         # Create the message
         message = messaging.Message(
             notification=messaging.Notification(
                 title=title,
                 body=body,
             ),
-            data=serialize_fcm_data(extra_data),  # Serialize data for FCM
+            data=serialize_fcm_data(fcm_data),  # Include title/body in data
             token=token,
             # Optional: Configure Android and iOS specific options
             android=messaging.AndroidConfig(
