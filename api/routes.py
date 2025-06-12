@@ -674,8 +674,8 @@ async def delete_track(
 @router.delete("/tracks/fuuid/{flight_uuid}")
 async def delete_track_uuid(
     flight_uuid: UUID,
-    source: str = Query(..., regex="^(live|upload)$",
-                        description="Track source ('live' or 'upload')"),
+    source: str = Query(..., regex="^(live|upload|flymaster)$",
+                        description="Track source ('live', 'upload', or 'flymaster')"),
     credentials: HTTPAuthorizationCredentials = Security(security),
     db: Session = Depends(get_db)
 ):
@@ -1332,7 +1332,7 @@ async def get_live_users(
         ..., description="Start time for tracking window (ISO 8601 format, e.g. 2025-01-25T06:00:00Z)"),
     closetime: Optional[str] = Query(
         None, description="End time for tracking window (ISO 8601 format, e.g. 2025-01-25T06:00:00Z)"),
-    source: Optional[str] = Query(None, regex="^(live|upload)$"),
+    source: Optional[str] = Query(None, regex="^(live|upload|flymaster)$"),
     credentials: HTTPAuthorizationCredentials = Security(security),
     db: Session = Depends(get_db)
 ):
@@ -3255,7 +3255,7 @@ async def get_flight_state_endpoint(
     history_points: int = Query(
         10, description="Number of history points to include if history=True"),
     credentials: HTTPAuthorizationCredentials = Security(security),
-    source: str = Query(..., regex="^(live|upload)$"),
+    source: str = Query(..., regex="^(live|upload|flymaster)$"),
     db: Session = Depends(get_db)
 ):
     """
@@ -3837,18 +3837,19 @@ async def send_notification(
 @router.get("/notifications/sent", response_model=List[SentNotificationResponse])
 async def get_sent_notifications(
     race_id: Optional[str] = Query(None, description="Filter by race ID"),
-    limit: int = Query(100, ge=1, le=500, description="Maximum number of results"),
+    limit: int = Query(100, ge=1, le=500,
+                       description="Maximum number of results"),
     offset: int = Query(0, ge=0, description="Number of results to skip"),
     credentials: HTTPAuthorizationCredentials = Security(security),
     db: Session = Depends(get_db)
 ):
     """
     Retrieve sent notifications with optional filtering by race.
-    
+
     - **race_id**: Optional filter to get notifications for a specific race
     - **limit**: Maximum number of results to return (1-500, default: 100)
     - **offset**: Number of results to skip for pagination (default: 0)
-    
+
     Returns a list of sent notifications sorted by sent_at timestamp (newest first).
     """
     try:
@@ -3869,13 +3870,13 @@ async def get_sent_notifications(
             raise HTTPException(
                 status_code=401, detail=f"Invalid token: {str(e)}"
             )
-        
+
         # Extract user info from token
         token_subject = token_data.get("sub", "")
-        
+
         # Build query
         query = db.query(SentNotification)
-        
+
         # Apply race filter if provided
         if race_id:
             # Verify user has access to this race
@@ -3883,17 +3884,18 @@ async def get_sent_notifications(
                 # Check if user has access to this specific race
                 race = db.query(Race).filter(Race.race_id == race_id).first()
                 if not race:
-                    raise HTTPException(status_code=404, detail="Race not found")
+                    raise HTTPException(
+                        status_code=404, detail="Race not found")
                 # For now, allow access if race exists - you may want to add more specific authorization
-            
+
             query = query.filter(SentNotification.race_id == race_id)
-        
+
         # Apply sorting (newest first)
         query = query.order_by(SentNotification.sent_at.desc())
-        
+
         # Apply pagination
         notifications = query.offset(offset).limit(limit).all()
-        
+
         # Convert to response models
         response_notifications = []
         for notification in notifications:
@@ -3912,15 +3914,15 @@ async def get_sent_notifications(
                 sender_token_subject=notification.sender_token_subject,
                 batch_processing=notification.batch_processing
             ))
-        
+
         return response_notifications
-        
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error retrieving sent notifications: {str(e)}")
         raise HTTPException(
-            status_code=500, 
+            status_code=500,
             detail=f"Failed to retrieve notifications: {str(e)}"
         )
 
@@ -3933,9 +3935,9 @@ async def get_sent_notifications_count(
 ):
     """
     Get the total count of sent notifications with optional filtering by race.
-    
+
     - **race_id**: Optional filter to count notifications for a specific race
-    
+
     Returns the total count of notifications matching the criteria.
     """
     try:
@@ -3956,32 +3958,30 @@ async def get_sent_notifications_count(
             raise HTTPException(
                 status_code=401, detail=f"Invalid token: {str(e)}"
             )
-        
+
         # Build query
         query = db.query(func.count(SentNotification.id))
-        
+
         # Apply race filter if provided
         if race_id:
             query = query.filter(SentNotification.race_id == race_id)
-        
+
         # Get count
         total_count = query.scalar()
-        
+
         return {
             "total_count": total_count,
             "race_id": race_id
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error counting sent notifications: {str(e)}")
         raise HTTPException(
-            status_code=500, 
+            status_code=500,
             detail=f"Failed to count notifications: {str(e)}"
         )
-
-
 
 
 # @router.post("/flymaster/upload/file")
@@ -4226,7 +4226,6 @@ async def get_sent_notifications_count(
 #         )
 
 
-
 @router.post("/flymaster/upload/file")
 async def upload_flymaster_file(
     request: Request,
@@ -4364,12 +4363,14 @@ async def upload_flymaster_file(
         # Use device_id as both pilot_id and in flight_id generation
         pilot_id = str(device_id)
         pilot_name = f"Flymaster-pilot-{device_id}"
-        race_id = f"flymaster-race-{device_id}"  # Make race_id unique per device
+        # Make race_id unique per device
+        race_id = f"flymaster-race-{device_id}"
 
         # Create a flight_id using device_id and first point timestamp
         if points:  # Use original points array instead of track_points_data
             first_point = points[0]
-            first_timestamp = first_point['date_time'].strftime('%Y-%m-%dT%H:%M:%SZ')
+            first_timestamp = first_point['date_time'].strftime(
+                '%Y-%m-%dT%H:%M:%SZ')
             flight_id = f"flymaster-{device_id}-{first_timestamp}"
         else:
             flight_id = f"flymaster-{device_id}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
@@ -4401,11 +4402,13 @@ async def upload_flymaster_file(
         if points:
             latest_point = points[-1]
             first_point['date_time'].astimezone(timezone.utc)
-            latest_datetime = latest_point['date_time'].astimezone(timezone.utc)
+            latest_datetime = latest_point['date_time'].astimezone(
+                timezone.utc)
 
             if not flight:
                 first_point = points[0]
-                first_datetime = first_point['date_time'].astimezone(timezone.utc)
+                first_datetime = first_point['date_time'].astimezone(
+                    timezone.utc)
 
                 flight = Flight(
                     flight_id=flight_id,
@@ -4414,7 +4417,7 @@ async def upload_flymaster_file(
                     pilot_id=pilot_id,
                     pilot_name=pilot_name,
                     created_at=datetime.now(timezone.utc),
-                    source='live',
+                    source='flymaster',
                     first_fix={
                         'lat': first_point['lat'],
                         'lon': first_point['lon'],
@@ -4447,7 +4450,7 @@ async def upload_flymaster_file(
                 db.commit()
                 # Asynchronously update the flight state with 'flymaster' source
                 asyncio.create_task(update_flight_state(
-                    flight.id, db, source='live'))
+                    flight.id, db, source='flymaster'))
                 logger.info(
                     f"Successfully updated Flymaster flight record: {flight_id}")
             except SQLAlchemyError as e:
@@ -4684,5 +4687,3 @@ async def flymaster_points(
             status_code=500,
             detail=f"Failed to retrieve flight points: {str(e)}"
         )
-
-
