@@ -16,6 +16,7 @@ from sqlalchemy import text
 
 from datetime import datetime, timezone, timedelta, time
 import jwt
+import hashlib
 from config import settings
 from math import radians, sin, cos, sqrt, atan2
 from uuid import UUID
@@ -4298,7 +4299,6 @@ async def upload_flymaster_file(
             )
 
         # Validate SHA256 key - it should be SHA256(device_id + secret)
-        import hashlib
         combined = str(device_id) + settings.FLYMASTER_SECRET
         expected_sha256 = hashlib.sha256(combined.encode()).hexdigest()
 
@@ -4397,19 +4397,17 @@ async def upload_flymaster_file(
 
         # Flight management logic adapted from live_tracking
         flight = db.query(Flight).filter(
-            Flight.flight_id == flight_id).first()
+            Flight.device_id == str(device_id),
+            Flight.source == 'flymaster').first()
 
         if points:
             latest_point = points[-1]
-            first_point['date_time'].astimezone(timezone.utc)
+            first_point = points[0]
+            first_datetime = first_point['date_time'].astimezone(timezone.utc)
             latest_datetime = latest_point['date_time'].astimezone(
                 timezone.utc)
 
             if not flight:
-                first_point = points[0]
-                first_datetime = first_point['date_time'].astimezone(
-                    timezone.utc)
-
                 flight = Flight(
                     flight_id=flight_id,
                     race_uuid=race.id,
@@ -4421,13 +4419,13 @@ async def upload_flymaster_file(
                     first_fix={
                         'lat': first_point['lat'],
                         'lon': first_point['lon'],
-                        'elevation': first_point.get('elevation'),
+                        'gps_alt': first_point.get('gps_alt'),
                         'datetime': first_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
                     },
                     last_fix={
                         'lat': latest_point['lat'],
                         'lon': latest_point['lon'],
-                        'elevation': latest_point.get('elevation'),
+                        'gps_alt': latest_point.get('gps_alt'),
                         'datetime': latest_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
                     },
                     total_points=len(points),
@@ -4439,7 +4437,7 @@ async def upload_flymaster_file(
                 flight.last_fix = {
                     'lat': latest_point['lat'],
                     'lon': latest_point['lon'],
-                    'elevation': latest_point.get('elevation'),
+                    'gps_alt': latest_point.get('gps_alt'),
                     'datetime': latest_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
                 }
                 flight.total_points = flight.total_points + \
