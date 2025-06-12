@@ -1271,3 +1271,6 @@ async def get_daily_tracks_tile(
         logger.error(f"Error generating daily tracks vector tile: {str(e)}")
         raise HTTPException(
             status_code=500, detail=f"Failed to generate daily tracks tile: {str(e)}")
+
+
+

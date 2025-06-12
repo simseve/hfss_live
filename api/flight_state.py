@@ -182,7 +182,7 @@ def update_flight_state_in_db(flight_uuid, db, force_update=False, source=None):
         flight_uuid: UUID of the flight
         db: Database session
         force_update: Whether to force update even if recently updated
-        source: Source of the flight data ('live' or 'upload') - if None, will be determined by the flight record
+        source: Source of the flight data ('live', 'upload', or 'flymaster') - if None, will be determined by the flight record
 
     Returns:
         Tuple of (state, state_info)
@@ -217,11 +217,12 @@ def update_flight_state_in_db(flight_uuid, db, force_update=False, source=None):
             pass
 
     # Handle uploaded flights specially - they always have the 'uploaded' state
-    if source == 'upload' or (flight and flight.source == 'upload'):
+    if source == 'upload' or source == 'flymaster' or (flight and flight.source in ['upload', 'flymaster']):
+        reason = 'flymaster_uploaded' if source == 'flymaster' else 'track_uploaded'
         state_info = {
             'state': 'uploaded',
             'confidence': 'high',
-            'reason': 'track_uploaded',
+            'reason': reason,
             'last_updated': datetime.now(timezone.utc).isoformat()
         }
         flight.flight_state = state_info

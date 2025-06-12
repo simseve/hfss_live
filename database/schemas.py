@@ -97,7 +97,7 @@ class FlightBase(BaseModel):
     race_id: str
     pilot_id: str
     pilot_name: str
-    source: Literal['live', 'upload']
+    source: Literal['live', 'upload', 'flymaster']
 
 
 class FlightCreate(FlightBase):
