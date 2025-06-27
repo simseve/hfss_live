@@ -35,6 +35,7 @@ class TrackPointBase(BaseModel):
     lat: float
     lon: float
     elevation: Optional[float] = None
+    barometric_altitude: Optional[float] = None
 
 
 class LiveTrackPointCreate(TrackPointBase):
@@ -60,12 +61,14 @@ class LiveTrackingRequest(BaseModel):
                         "lat": 45.5231,
                         "lon": -122.6765,
                         "elevation": 1200.5,
+                        "barometric_altitude": 1185.2,
                         "datetime": "2024-03-20T14:23:45.123Z"
                     },
                     {
                         "lat": 45.5233,
                         "lon": -122.6768,
                         "elevation": 1205.0,
+                        "barometric_altitude": 1190.1,
                         "datetime": "2024-03-20T14:23:46.123Z"
                     }
                 ]
@@ -140,7 +143,8 @@ class TrackUploadRequest(BaseModel):
                         "datetime": "2024-03-20T14:23:45.123Z",
                         "lat": 45.5231,
                         "lon": -122.6765,
-                        "elevation": 1200.5
+                        "elevation": 1200.5,
+                        "barometric_altitude": 1185.2
                     }
                 ],
                 "metadata": {
