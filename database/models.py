@@ -92,6 +92,7 @@ class LiveTrackPoint(Base):
     lat = Column(Float(precision=53), nullable=False)
     lon = Column(Float(precision=53), nullable=False)
     elevation = Column(Float(precision=53))
+    barometric_altitude = Column(Float(precision=53), nullable=True)
     # Add a geometry column for the point location (SRID 4326 = WGS84)
     geom = Column(Geometry('POINT', srid=4326))
 
@@ -125,6 +126,7 @@ class UploadedTrackPoint(Base):
     lat = Column(Float(precision=53), nullable=False)
     lon = Column(Float(precision=53), nullable=False)
     elevation = Column(Float(precision=53))
+    barometric_altitude = Column(Float(precision=53), nullable=True)
     # Add a geometry column for the point location (SRID 4326 = WGS84)
     geom = Column(Geometry('POINT', srid=4326))
 
