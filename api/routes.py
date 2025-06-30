@@ -21,10 +21,12 @@ from config import settings
 from math import radians, sin, cos, sqrt, atan2
 from uuid import UUID
 from sqlalchemy import func
+import aiohttp
 from aiohttp import ClientSession
 from jwt.exceptions import PyJWTError
 import asyncio
 import json
+import requests
 from ws_conn import manager
 # Import Expo Push Notification modules
 from exponent_server_sdk import (
@@ -4684,4 +4686,120 @@ async def flymaster_points(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to retrieve flight points: {str(e)}"
+        )
+
+
+@router.get("/tasks", status_code=200)
+async def get_tasks(
+    token: str = Query(..., description="Authentication token"),
+    token_data: Dict = Depends(verify_tracking_token),
+    db: Session = Depends(get_db)
+):
+    """
+    Get tasks from HFSS server for the specified race.
+    Returns task information including scoring and competition details.
+
+    Parameters:
+    - token: Authentication token (automatically validated via dependency)
+
+    Returns:
+    - Task data from HFSS server
+    """
+    try:
+        race_id = token_data['race_id']
+
+        # Validate race_id format and existence
+        if not race_id:
+            logger.warning("Empty race_id in token_data")
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid race_id in authentication token"
+            )
+
+        # Check if race exists in local database
+        race = db.query(Race).filter(Race.race_id == race_id).first()
+        if not race:
+            logger.warning(f"Race not found in database: {race_id}")
+            raise HTTPException(
+                status_code=404,
+                detail=f"Race {race_id} not found"
+            )
+
+        # Construct HFSS server URL
+        hfss_url = f"{settings.HFSS_SERVER.rstrip('/')}/tasks/{race_id}"
+
+        logger.info(f"Fetching tasks from HFSS server: {hfss_url}")
+
+        # Use aiohttp for async HTTP requests (more suitable for FastAPI)
+        timeout = aiohttp.ClientTimeout(total=10)  # 10 second timeout
+
+        async with ClientSession(timeout=timeout) as session:
+            try:
+                async with session.get(hfss_url) as response:
+                    if response.status == 200:
+                        tasks_data = await response.json()
+
+                        logger.info(
+                            f"Successfully retrieved tasks for race {race_id}")
+
+                        # Add metadata to response
+                        return {
+                            "success": True,
+                            "race_id": race_id,
+                            "race_name": race.name,
+                            "retrieved_at": datetime.now(timezone.utc).isoformat(),
+                            "source": "hfss_server",
+                            "tasks": tasks_data
+                        }
+
+                    elif response.status == 404:
+                        logger.warning(
+                            f"Tasks not found on HFSS server for race {race_id}")
+                        raise HTTPException(
+                            status_code=404,
+                            detail=f"Tasks not found for race {race_id} on HFSS server"
+                        )
+
+                    elif response.status == 403:
+                        logger.error(
+                            f"Access forbidden for race {race_id} on HFSS server")
+                        raise HTTPException(
+                            status_code=403,
+                            detail="Access forbidden to HFSS server"
+                        )
+
+                    else:
+                        error_text = await response.text()
+                        logger.error(
+                            f"HFSS server returned status {response.status}: {error_text}")
+                        raise HTTPException(
+                            status_code=response.status,
+                            detail=f"HFSS server error: {response.status}"
+                        )
+
+            except asyncio.TimeoutError:
+                logger.error(
+                    f"Timeout connecting to HFSS server for race {race_id}")
+                raise HTTPException(
+                    status_code=504,
+                    detail="Timeout connecting to HFSS server"
+                )
+
+            except aiohttp.ClientError as e:
+                logger.error(
+                    f"Client error connecting to HFSS server: {str(e)}")
+                raise HTTPException(
+                    status_code=502,
+                    detail="Error connecting to HFSS server"
+                )
+
+    except HTTPException:
+        # Re-raise HTTP exceptions (they're already properly formatted)
+        raise
+
+    except Exception as e:
+        logger.error(f"Unexpected error in get_tasks endpoint: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Internal server error while retrieving tasks"
         )

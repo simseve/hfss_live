@@ -175,8 +175,32 @@ class DateTimeEncoder(json.JSONEncoder):
         return super().default(obj)
 
 
-@app.get('/health')
+@app.get('/')
 async def root():
+    """
+    Simple root endpoint that provides basic system status.
+    Returns minimal system information to confirm the service is running.
+    """
+    now = datetime.datetime.now()
+    uptime = now - system_startup_time
+
+    return {
+        'service': 'HFSS Live Tracking API',
+        'status': 'up',
+        'version': '1.0.0',
+        'uptime': str(uptime),
+        'timestamp': now.isoformat(),
+        'endpoints': {
+            'health': '/health',
+            'tracking': '/tracking',
+            'scoring': '/scoring',
+            'queue_status': '/queue/status'
+        }
+    }
+
+
+@app.get('/health')
+async def health():
     now = datetime.datetime.now()
     uptime = now - system_startup_time
 
