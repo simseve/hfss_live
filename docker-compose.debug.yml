@@ -10,3 +10,9 @@ services:
     ports:
       - 8000:8000
       - 5678:5678
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"        # Max size per log file
+        max-file: "5"           # Keep 5 rotated files
+        compress: "true"        # Compress rotated files
