@@ -176,7 +176,8 @@ async def live_tracking(
                 .strftime('%Y-%m-%dT%H:%M:%SZ'),
                 "lat": point['lat'],
                 "lon": point['lon'],
-                "elevation": point.get('elevation')
+                "elevation": point.get('elevation'),
+                "barometric_altitude": point.get('barometric_altitude')
             }
             track_points_data.append(point_data)
 
@@ -364,7 +365,8 @@ async def upload_track(
                         'Z', '+00:00')).astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
                     "lat": point['lat'],
                     "lon": point['lon'],
-                    "elevation": point.get('elevation')
+                    "elevation": point.get('elevation'),
+                    "barometric_altitude": point.get('barometric_altitude')
                 }
                 points_data.append(point_data)
 
