@@ -36,6 +36,8 @@ from exponent_server_sdk import (
     PushServerError,
 )
 from zoneinfo import ZoneInfo
+# Import XContest service
+from services.xcontest_service import xcontest_service
 
 from .send_notifications import (
     send_push_message_unified,
@@ -1713,7 +1715,7 @@ async def websocket_tracking_endpoint(
                     "trackHistory": downsampled_points,
                     "totalPoints": len(track_points),
                     "downsampledPoints": len(downsampled_points),
-                    "source": flight.source,
+                    "source": "HFSS",  # Mark as HFSS data
                     "lastFixTime": flight.last_fix['datetime'],
                     "isActive": True,  # Mark as currently active
                     # Include flight state information
@@ -1723,6 +1725,46 @@ async def websocket_tracking_endpoint(
 
         # Now convert the dictionary values to a list for the response
         consolidated_flight_data = list(pilot_latest_flights.values())
+
+        # Fetch XContest data if available
+        try:
+            # Get race configuration and pilots from HFSS API
+            race_config = await xcontest_service.get_race_config_and_pilots(race_id, token)
+            
+            if race_config.get('success') and race_config.get('xc_entity') and race_config.get('xc_api_key'):
+                # Store the working token for background updates
+                manager.store_hfss_token(race_id, token)
+                # Get XContest flights
+                xc_flights = await xcontest_service.get_xcontest_flights_for_race(
+                    race_config['xc_entity'],
+                    race_config['xc_api_key'],
+                    race_config['xcontest_map'],
+                    race_timezone
+                )
+                
+                # Merge XContest flights with HFSS flights
+                # Keep track of pilots already in HFSS data
+                hfss_pilot_ids = {flight['pilot_id'] for flight in consolidated_flight_data}
+                
+                # Add XContest flights for pilots not already tracked via HFSS
+                for xc_flight in xc_flights:
+                    if xc_flight['pilot_id'] not in hfss_pilot_ids:
+                        consolidated_flight_data.append(xc_flight)
+                        # Track this XContest flight for incremental updates
+                        manager.update_xc_flight_tracking(
+                            race_id, 
+                            xc_flight['uuid'], 
+                            xc_flight['lastFixTime']
+                        )
+                    else:
+                        # Optionally, you could merge or compare data here
+                        # For now, HFSS data takes precedence
+                        logger.info(f"Pilot {xc_flight['pilot_id']} has both HFSS and XContest data, using HFSS")
+                
+                logger.info(f"Added {len(xc_flights)} XContest flights to tracking data")
+        except Exception as e:
+            logger.error(f"Error fetching XContest data: {str(e)}")
+            # Continue without XContest data if there's an error
 
         # Send just the most recent flight per pilot
         await websocket.send_json({
