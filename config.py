@@ -36,9 +36,10 @@ class Settings(BaseSettings):
             return self.REDIS_URL
 
         # Use different hostnames for dev vs prod
-        host = "redis" if self.PROD else self.REDIS_HOST
+        host = "redis" if self.PROD else "192.168.68.130"
 
         if self.REDIS_PASSWORD:
+            # Include password in URL for authentication
             return f"redis://:{self.REDIS_PASSWORD}@{host}:{self.REDIS_PORT}/{self.REDIS_DB}"
         else:
             return f"redis://{host}:{self.REDIS_PORT}/{self.REDIS_DB}"

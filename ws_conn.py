@@ -1,6 +1,6 @@
 from fastapi import WebSocket
 from starlette.websockets import WebSocketState
-from typing import Dict, Set, List
+from typing import Dict, Set, List, Optional
 
 
 class ConnectionManager:
@@ -12,6 +12,12 @@ class ConnectionManager:
         # Dictionary to track pilots that have already received their initial data
         # Structure: {race_id: {pilot_id: last_update_time}}
         self.pilots_with_sent_data: Dict[str, Dict[str, float]] = {}
+        # Track active XContest flights per race
+        # Structure: {race_id: {xc_flight_id: {lastFixTime: str, ...}}}
+        self.xc_flights_tracking: Dict[str, Dict[str, Dict]] = {}
+        # Store valid HFSS API tokens per race for background updates
+        # Structure: {race_id: token}
+        self.hfss_tokens: Dict[str, str] = {}
 
     async def connect(self, websocket: WebSocket, race_id: str, client_id: str):
         """Connect a client to a specific race's updates"""
@@ -117,6 +123,32 @@ class ConnectionManager:
         """Remove tracking data for a race when it's no longer active"""
         if race_id in self.pilots_with_sent_data:
             del self.pilots_with_sent_data[race_id]
+        if race_id in self.xc_flights_tracking:
+            del self.xc_flights_tracking[race_id]
+        if race_id in self.hfss_tokens:
+            del self.hfss_tokens[race_id]
+    
+    def get_xc_flights_tracking(self, race_id: str) -> Dict[str, Dict]:
+        """Get XContest flight tracking data for a race"""
+        if race_id not in self.xc_flights_tracking:
+            self.xc_flights_tracking[race_id] = {}
+        return self.xc_flights_tracking[race_id]
+    
+    def update_xc_flight_tracking(self, race_id: str, flight_id: str, last_fix_time: str):
+        """Update the last fix time for an XContest flight"""
+        if race_id not in self.xc_flights_tracking:
+            self.xc_flights_tracking[race_id] = {}
+        if flight_id not in self.xc_flights_tracking[race_id]:
+            self.xc_flights_tracking[race_id][flight_id] = {}
+        self.xc_flights_tracking[race_id][flight_id]['lastFixTime'] = last_fix_time
+    
+    def store_hfss_token(self, race_id: str, token: str):
+        """Store a valid HFSS API token for a race"""
+        self.hfss_tokens[race_id] = token
+    
+    def get_hfss_token(self, race_id: str) -> Optional[str]:
+        """Get the stored HFSS API token for a race"""
+        return self.hfss_tokens.get(race_id)
 
 
 # Create a global connection manager for the application

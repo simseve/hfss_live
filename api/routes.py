@@ -1732,6 +1732,8 @@ async def websocket_tracking_endpoint(
             race_config = await xcontest_service.get_race_config_and_pilots(race_id, token)
             
             if race_config.get('success') and race_config.get('xc_entity') and race_config.get('xc_api_key'):
+                # Store the working token for background updates
+                manager.store_hfss_token(race_id, token)
                 # Get XContest flights
                 xc_flights = await xcontest_service.get_xcontest_flights_for_race(
                     race_config['xc_entity'],
@@ -1748,6 +1750,12 @@ async def websocket_tracking_endpoint(
                 for xc_flight in xc_flights:
                     if xc_flight['pilot_id'] not in hfss_pilot_ids:
                         consolidated_flight_data.append(xc_flight)
+                        # Track this XContest flight for incremental updates
+                        manager.update_xc_flight_tracking(
+                            race_id, 
+                            xc_flight['uuid'], 
+                            xc_flight['lastFixTime']
+                        )
                     else:
                         # Optionally, you could merge or compare data here
                         # For now, HFSS data takes precedence
