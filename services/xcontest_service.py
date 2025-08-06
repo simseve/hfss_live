@@ -394,9 +394,15 @@ class XContestService:
             
             flight_uuid = xc_flight_id[3:]  # Remove 'xc_' prefix
             last_known_time = flight_info.get('lastFixTime')
+            pilot_id = flight_info.get('pilot_id')  # Get stored pilot_id
+            pilot_name = flight_info.get('pilot_name')  # Get stored pilot name
             
             if not last_known_time:
                 logger.warning(f"No last fix time for flight {xc_flight_id}, skipping")
+                continue
+            
+            if not pilot_id:
+                logger.warning(f"No pilot_id for flight {xc_flight_id}, skipping")
                 continue
             
             logger.debug(f"Fetching updates for flight {xc_flight_id} since {last_known_time}")
@@ -448,9 +454,11 @@ class XContestService:
                     coordinates.append(coordinate)
                     last_time = current_time
                 
-                # Create flight update with minimal info (just the new track points)
+                # Create flight update with pilot info and new track points
                 flight_update = {
                     "uuid": xc_flight_id,
+                    "pilot_id": pilot_id,  # REQUIRED for frontend to identify the pilot
+                    "pilot_name": pilot_name if pilot_name else "",
                     "source": "XC",
                     "total_points": len(track_data['coordinates']),
                     "track_update": {

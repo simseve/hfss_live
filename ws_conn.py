@@ -134,13 +134,21 @@ class ConnectionManager:
             self.xc_flights_tracking[race_id] = {}
         return self.xc_flights_tracking[race_id]
     
-    def update_xc_flight_tracking(self, race_id: str, flight_id: str, last_fix_time: str):
-        """Update the last fix time for an XContest flight"""
+    def update_xc_flight_tracking(self, race_id: str, flight_id: str, last_fix_time: str, 
+                                   pilot_id: str = None, pilot_name: str = None):
+        """Update the tracking info for an XContest flight"""
         if race_id not in self.xc_flights_tracking:
             self.xc_flights_tracking[race_id] = {}
         if flight_id not in self.xc_flights_tracking[race_id]:
             self.xc_flights_tracking[race_id][flight_id] = {}
+        
         self.xc_flights_tracking[race_id][flight_id]['lastFixTime'] = last_fix_time
+        
+        # Store pilot info if provided (typically on first tracking)
+        if pilot_id:
+            self.xc_flights_tracking[race_id][flight_id]['pilot_id'] = pilot_id
+        if pilot_name:
+            self.xc_flights_tracking[race_id][flight_id]['pilot_name'] = pilot_name
     
     def store_hfss_token(self, race_id: str, token: str):
         """Store a valid HFSS API token for a race"""
