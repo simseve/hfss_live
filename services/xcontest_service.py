@@ -2,7 +2,7 @@ import httpx
 import asyncio
 import logging
 from typing import Dict, List, Optional, Any, Set
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, time
 from sqlalchemy.orm import Session
 from database.models import Race, Flight
 import jwt
@@ -101,6 +101,8 @@ class XContestService:
                 "source": "live"
             }
             headers = {"Authorization": f"Bearer {api_key}"}
+            
+            logger.debug(f"XContest API request params: {params}")
             
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.get(
@@ -208,28 +210,30 @@ class XContestService:
         if not xc_entity or not xc_api_key:
             return []
         
-        # Calculate time window for XContest data
+        # XContest API returns flights that STARTED within the time window
+        # To get all active flights, look back 48 hours (max allowed by API)
         current_time = datetime.now(timezone.utc)
-        race_local_time = current_time.astimezone(race_timezone)
         
-        # Set start time to beginning of today in race timezone
-        race_day_start = datetime.combine(
-            race_local_time.date(), 
-            datetime.min.time(), 
-            tzinfo=race_timezone
-        )
+        # Look back 48 hours to catch all flights
+        open_time_dt = current_time - timedelta(hours=48)
+        close_time_dt = current_time + timedelta(hours=1)  # Small buffer for recently started flights
         
-        # Set end time to 24 hours after start
-        race_day_end = race_day_start + timedelta(hours=24) - timedelta(seconds=1)
+        open_time = open_time_dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+        close_time = close_time_dt.strftime('%Y-%m-%dT%H:%M:%SZ')
         
-        # Convert to UTC for API calls
-        utc_day_start = race_day_start.astimezone(timezone.utc)
-        utc_day_end = race_day_end.astimezone(timezone.utc)
-        
-        open_time = utc_day_start.strftime('%Y-%m-%dT%H:%M:%SZ')
-        close_time = utc_day_end.strftime('%Y-%m-%dT%H:%M:%SZ')
+        # Console log the timing for initial fetch
+        print(f"\n{'='*60}")
+        print(f"XCONTEST API INITIAL FETCH TIMING:")
+        print(f"  Current UTC time:     {current_time.isoformat()}")
+        print(f"  Open time (UTC):      {open_time} (48 hours ago)")
+        print(f"  Close time (UTC):     {close_time}")
+        print(f"  API URL: {self.users_url}")
+        print(f"  Entity: {xc_entity}")
+        print(f"  Source: (not specified - both live and upload)")
+        print(f"{'='*60}\n")
         
         # Fetch users and flights from XContest
+        logger.info(f"Fetching XContest flights for full day: {open_time} to {close_time}")
         users_response, status = await self.get_users_and_flights(
             xc_entity,
             open_time,
@@ -238,14 +242,22 @@ class XContestService:
         )
         
         if not users_response or status != 200:
+            logger.warning(f"Failed to get XContest users: status={status}")
             return []
+        
+        logger.info(f"XContest returned {len(users_response.get('users', {}))} users for full day")
         
         # Filter users to only include registered pilots
         filtered_users = {}
+        all_usernames = []
         for user_id, user_data in users_response.get('users', {}).items():
             username = user_data.get('username', '').lower()
+            all_usernames.append(username)
             if username in xcontest_pilot_map:
                 filtered_users[user_id] = user_data
+        
+        logger.info(f"XContest users found: {all_usernames}")
+        logger.info(f"Filtered to {len(filtered_users)} pilots registered in race")
         
         # Process flights
         pilot_flights = []
@@ -341,9 +353,13 @@ class XContestService:
         xc_entity: str,
         xc_api_key: str,
         xcontest_pilot_map: Dict[str, Dict],
-        active_xc_flights: Dict[str, Dict]
+        active_xc_flights: Dict[str, Dict],
+        race_timezone: Any = None,
+        lookback_seconds: int = 300
     ) -> List[Dict]:
         """Get incremental updates for active XContest flights
+        
+        Simply fetches new points for each tracked flight using lastfixtime
         
         Args:
             xc_entity: XContest entity identifier
@@ -357,113 +373,107 @@ class XContestService:
         if not xc_entity or not xc_api_key:
             return []
             
+        logger.info(f"Getting XContest incremental updates for {len(active_xc_flights)} tracked flights")
+        
+        # Console log
+        print(f"\n{'='*60}")
+        print(f"XCONTEST INCREMENTAL UPDATES:")
+        print(f"  Tracked flights: {len(active_xc_flights)}")
+        if active_xc_flights:
+            for flight_id, flight_data in list(active_xc_flights.items())[:3]:  # Show first 3
+                print(f"    {flight_id}: last fix = {flight_data.get('lastFixTime')}")
+        print(f"{'='*60}\n")
+        
         flight_updates = []
         
-        # Get current time window (last 5 minutes for updates)
-        current_time = datetime.now(timezone.utc)
-        open_time = (current_time - timedelta(minutes=5)).strftime('%Y-%m-%dT%H:%M:%SZ')
-        close_time = current_time.strftime('%Y-%m-%dT%H:%M:%SZ')
-        
-        # Fetch recent user activity
-        users_response, status = await self.get_users_and_flights(
-            xc_entity,
-            open_time,
-            close_time,
-            xc_api_key
-        )
-        
-        if not users_response or status != 200:
-            return []
-        
-        # Process only flights for registered pilots
-        for user_id, user_data in users_response.get('users', {}).items():
-            username = user_data.get('username', '').lower()
-            if username not in xcontest_pilot_map:
+        # For each tracked flight, fetch new points since last fix time
+        for xc_flight_id, flight_info in active_xc_flights.items():
+            # Extract the actual flight UUID (remove 'xc_' prefix)
+            if not xc_flight_id.startswith('xc_'):
                 continue
-                
-            pilot_info = xcontest_pilot_map[username]
             
-            for flight in user_data.get('flights', []):
-                flight_uuid = flight.get('uuid')
-                if not flight_uuid:
-                    continue
+            flight_uuid = xc_flight_id[3:]  # Remove 'xc_' prefix
+            last_known_time = flight_info.get('lastFixTime')
+            
+            if not last_known_time:
+                logger.warning(f"No last fix time for flight {xc_flight_id}, skipping")
+                continue
+            
+            logger.debug(f"Fetching updates for flight {xc_flight_id} since {last_known_time}")
+            
+            # Fetch incremental track data directly
+            track_data = await self.fetch_track_data(
+                flight_uuid,
+                xc_entity,
+                xc_api_key,
+                lastfixtime=last_known_time  # Get only points after this time
+            )
+            
+            if track_data and track_data.get('coordinates'):
+                logger.info(f"Got {len(track_data['coordinates'])} new points for flight {xc_flight_id}")
                 
-                # Check if this is a known flight or a new one
-                xc_flight_id = f"xc_{flight_uuid}"
-                last_known_time = active_xc_flights.get(xc_flight_id, {}).get('lastFixTime')
+                # Get the last coordinate to extract the new last fix
+                last_coord = track_data['coordinates'][-1] if track_data['coordinates'] else None
                 
-                # Get last fix time from the flight
-                last_fix = flight.get('lastFix', [])
-                current_last_fix_time = None
-                if last_fix and len(last_fix) >= 4 and isinstance(last_fix[3], dict):
-                    current_last_fix_time = last_fix[3].get('t')
+                # Format the update (no downsampling for incremental updates)
+                coordinates = []
+                is_first_point = True
+                last_time = None
                 
-                # Skip if no new data
-                if last_known_time and current_last_fix_time and last_known_time >= current_last_fix_time:
-                    continue
-                
-                # Fetch incremental track data
-                track_data = await self.fetch_track_data(
-                    flight_uuid,
-                    xc_entity,
-                    xc_api_key,
-                    lastfixtime=last_known_time  # Use last known time for incremental
-                )
-                
-                if track_data and track_data.get('coordinates'):
-                    # Format the update (no downsampling for incremental updates)
-                    coordinates = []
-                    is_first_point = True
-                    last_time = None
+                for point in track_data['coordinates']:
+                    current_time = point['timestamp']
                     
-                    for point in track_data['coordinates']:
-                        current_time = point['timestamp']
-                        
-                        coordinate = [
-                            float(point['lon']),
-                            float(point['lat']),
-                            int(point['gps_alt'] or 0)
-                        ]
-                        
-                        if is_first_point:
-                            extra_data = {"dt": 0}
-                            coordinate.append(extra_data)
-                            is_first_point = False
-                        elif last_time is not None:
-                            dt = int((current_time - last_time).total_seconds())
-                            if dt != 1:
-                                extra_data = {"dt": dt}
-                                coordinate.append(extra_data)
-                        
-                        coordinates.append(coordinate)
-                        last_time = current_time
+                    coordinate = [
+                        float(point['lon']),
+                        float(point['lat']),
+                        int(point['gps_alt'] or 0)
+                    ]
                     
-                    # Create flight update
-                    flight_update = {
-                        "uuid": xc_flight_id,
-                        "pilot_id": pilot_info['pilot_id'],
-                        "pilot_name": f"{pilot_info['name']} {pilot_info['surname']}",
-                        "lastFix": {
-                            "lat": last_fix[1] if len(last_fix) > 1 else 0,
-                            "lon": last_fix[0] if len(last_fix) > 0 else 0,
-                            "elevation": last_fix[2] if len(last_fix) > 2 else 0,
-                            "datetime": current_last_fix_time
-                        },
-                        "source": "XC",
-                        "total_points": len(track_data['coordinates']),
-                        "track_update": {
-                            "type": "LineString",
-                            "coordinates": coordinates
-                        },
-                        "flight_state": "landed" if flight.get('landed', False) else "flying",
-                        "flight_state_info": {
-                            "state": "landed" if flight.get('landed', False) else "flying",
-                            "landed": flight.get('landed', False)
-                        }
+                    # Add barometric altitude if available
+                    extra_data = {}
+                    if point.get('baro_alt') is not None:
+                        extra_data['b'] = int(point['baro_alt'])
+                    
+                    if is_first_point:
+                        extra_data['dt'] = 0
+                        is_first_point = False
+                    elif last_time is not None:
+                        dt = int((current_time - last_time).total_seconds())
+                        if dt != 1:
+                            extra_data['dt'] = dt
+                    
+                    if extra_data:
+                        coordinate.append(extra_data)
+                    
+                    coordinates.append(coordinate)
+                    last_time = current_time
+                
+                # Create flight update with minimal info (just the new track points)
+                flight_update = {
+                    "uuid": xc_flight_id,
+                    "source": "XC",
+                    "total_points": len(track_data['coordinates']),
+                    "track_update": {
+                        "type": "LineString",
+                        "coordinates": coordinates
                     }
-                    
-                    flight_updates.append(flight_update)
+                }
+                
+                # Add last fix info if we have it
+                if last_coord:
+                    flight_update["lastFix"] = {
+                        "lat": float(last_coord['lat']),
+                        "lon": float(last_coord['lon']),
+                        "elevation": float(last_coord['gps_alt']) if last_coord['gps_alt'] is not None else 0,
+                        "datetime": last_coord['timestamp'].strftime("%Y-%m-%dT%H:%M:%SZ")
+                    }
+                
+                flight_updates.append(flight_update)
+                logger.info(f"Added XContest flight update for {xc_flight_id} with {len(coordinates)} new points")
+            else:
+                logger.debug(f"No new track data for flight {xc_flight_id} since {last_known_time}")
         
+        logger.info(f"Returning {len(flight_updates)} XContest flight updates")
         return flight_updates
 
 

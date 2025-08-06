@@ -247,33 +247,44 @@ async def periodic_tracking_update(interval_seconds: int = 30):
                         if not hfss_api_token:
                             # No token available - skip XContest updates
                             logger.debug(f"No HFSS token available for race {race_id}, skipping XContest updates")
-                            continue
-                        
-                        # Get race configuration and pilots from HFSS API using stored token
-                        race_config = await xcontest_service.get_race_config_and_pilots(race_id, hfss_api_token)
-                        
-                        if race_config.get('success') and race_config.get('xc_entity') and race_config.get('xc_api_key'):
-                            # Get current XC flight tracking data
-                            xc_flights_tracking = manager.get_xc_flights_tracking(race_id)
+                        else:
+                            logger.debug(f"Found HFSS token for race {race_id}")
                             
-                            # Get incremental XContest updates
-                            xc_updates = await xcontest_service.get_xcontest_incremental_updates(
-                                race_config['xc_entity'],
-                                race_config['xc_api_key'],
-                                race_config['xcontest_map'],
-                                xc_flights_tracking
-                            )
+                            # Get race configuration and pilots from HFSS API using stored token
+                            race_config = await xcontest_service.get_race_config_and_pilots(race_id, hfss_api_token)
                             
-                            # Update tracking data for XC flights
-                            for xc_update in xc_updates:
-                                flight_id = xc_update['uuid']
-                                last_fix_time = xc_update['lastFix']['datetime']
-                                manager.update_xc_flight_tracking(race_id, flight_id, last_fix_time)
+                            logger.debug(f"Race config success: {race_config.get('success')}, "
+                                       f"XC entity: {race_config.get('xc_entity')}, "
+                                       f"Has API key: {bool(race_config.get('xc_api_key'))}, "
+                                       f"Pilots: {len(race_config.get('pilots', []))}, "
+                                       f"XContest map: {len(race_config.get('xcontest_map', {}))}")
                             
-                            # Add XContest updates to flight updates
-                            if xc_updates:
-                                flight_updates.extend(xc_updates)
-                                logger.info(f"Added {len(xc_updates)} XContest flight updates for race {race_id}")
+                            if race_config.get('success') and race_config.get('xc_entity') and race_config.get('xc_api_key'):
+                                # Get current XC flight tracking data
+                                xc_flights_tracking = manager.get_xc_flights_tracking(race_id)
+                                
+                                # Get incremental XContest updates
+                                # XContest only allows fetching new points every 30 seconds minimum
+                                xc_lookback = 30  # Hardcoded 30-second interval for XContest
+                                xc_updates = await xcontest_service.get_xcontest_incremental_updates(
+                                    race_config['xc_entity'],
+                                    race_config['xc_api_key'],
+                                    race_config['xcontest_map'],
+                                    xc_flights_tracking,
+                                    race_timezone,
+                                    lookback_seconds=xc_lookback
+                                )
+                                
+                                # Update tracking data for XC flights
+                                for xc_update in xc_updates:
+                                    flight_id = xc_update['uuid']
+                                    last_fix_time = xc_update['lastFix']['datetime']
+                                    manager.update_xc_flight_tracking(race_id, flight_id, last_fix_time)
+                                
+                                # Add XContest updates to flight updates
+                                if xc_updates:
+                                    flight_updates.extend(xc_updates)
+                                    logger.info(f"Added {len(xc_updates)} XContest flight updates for race {race_id}")
                     
                     except Exception as xc_error:
                         logger.error(f"Error fetching XContest updates for race {race_id}: {str(xc_error)}")
