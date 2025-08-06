@@ -1754,7 +1754,9 @@ async def websocket_tracking_endpoint(
                         manager.update_xc_flight_tracking(
                             race_id, 
                             xc_flight['uuid'], 
-                            xc_flight['lastFixTime']
+                            xc_flight['lastFixTime'],
+                            pilot_id=xc_flight.get('pilot_id'),
+                            pilot_name=xc_flight.get('pilot_name')
                         )
                     else:
                         # Optionally, you could merge or compare data here

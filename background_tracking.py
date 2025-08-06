@@ -279,6 +279,7 @@ async def periodic_tracking_update(interval_seconds: int = 30):
                                 for xc_update in xc_updates:
                                     flight_id = xc_update['uuid']
                                     last_fix_time = xc_update['lastFix']['datetime']
+                                    # Pilot info is already stored from initial tracking, just update last fix time
                                     manager.update_xc_flight_tracking(race_id, flight_id, last_fix_time)
                                 
                                 # Add XContest updates to flight updates
