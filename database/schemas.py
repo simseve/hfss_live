@@ -340,6 +340,10 @@ class ScoringTrackBatchCreate(BaseModel):
         description="List of track points to insert",
         min_items=1
     )
+    flight_uuid: Optional[UUID] = Field(
+        None,
+        description="Optional flight UUID for migration. If not provided, a new UUID will be generated"
+    )
 
     class Config:
         json_schema_extra = {
@@ -370,6 +374,10 @@ class ScoringTrackBatchResponse(BaseModel):
                               description="UUID of the flight the points were added to")
     points_added: int = Field(...,
                               description="Number of track points successfully added")
+    points_skipped: int = Field(0,
+                                description="Number of duplicate track points that were skipped")
+    queued: bool = Field(False,
+                        description="Whether points were queued for background processing")
 
     model_config = {
         "from_attributes": True
