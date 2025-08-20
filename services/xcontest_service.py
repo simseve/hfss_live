@@ -210,30 +210,43 @@ class XContestService:
         if not xc_entity or not xc_api_key:
             return []
         
-        # XContest API returns flights that STARTED within the time window
-        # To get all active flights, look back 48 hours (max allowed by API)
+        # Get current time in race timezone
         current_time = datetime.now(timezone.utc)
+        race_local_time = current_time.astimezone(race_timezone)
         
-        # Look back 48 hours to catch all flights
-        open_time_dt = current_time - timedelta(hours=48)
-        close_time_dt = current_time + timedelta(hours=1)  # Small buffer for recently started flights
+        # Calculate the start and end of the current day in race's timezone
+        race_day_start = datetime.combine(
+            race_local_time.date(), time.min, tzinfo=race_timezone)
+        race_day_end = datetime.combine(
+            race_local_time.date(), time.max, tzinfo=race_timezone)
+        
+        # Convert back to UTC for API calls
+        utc_day_start = race_day_start.astimezone(timezone.utc)
+        utc_day_end = race_day_end.astimezone(timezone.utc)
+        
+        # XContest API returns flights that STARTED within the time window
+        # Look back with a 4-hour buffer (same as default method) to catch flights that started slightly before today
+        lookback_buffer = timedelta(hours=4)
+        open_time_dt = utc_day_start - lookback_buffer
+        close_time_dt = utc_day_end
         
         open_time = open_time_dt.strftime('%Y-%m-%dT%H:%M:%SZ')
         close_time = close_time_dt.strftime('%Y-%m-%dT%H:%M:%SZ')
         
-        # Console log the timing for initial fetch
-        print(f"\n{'='*60}")
-        print(f"XCONTEST API INITIAL FETCH TIMING:")
-        print(f"  Current UTC time:     {current_time.isoformat()}")
-        print(f"  Open time (UTC):      {open_time} (48 hours ago)")
-        print(f"  Close time (UTC):     {close_time}")
-        print(f"  API URL: {self.users_url}")
-        print(f"  Entity: {xc_entity}")
-        print(f"  Source: (not specified - both live and upload)")
-        print(f"{'='*60}\n")
+        # Log the timing for initial fetch
+        logger.info("="*60)
+        logger.info("XCONTEST API INITIAL FETCH TIMING:")
+        logger.info(f"  Race timezone:        {race_timezone}")
+        logger.info(f"  Race local time:      {race_local_time.isoformat()}")
+        logger.info(f"  Today in race TZ:     {race_day_start.isoformat()} to {race_day_end.isoformat()}")
+        logger.info(f"  Open time (UTC):      {open_time} (today start - 4h buffer)")
+        logger.info(f"  Close time (UTC):     {close_time} (today end)")
+        logger.info(f"  API URL: {self.users_url}")
+        logger.info(f"  Entity: {xc_entity}")
+        logger.info("="*60)
         
         # Fetch users and flights from XContest
-        logger.info(f"Fetching XContest flights for full day: {open_time} to {close_time}")
+        logger.info(f"Fetching XContest flights for today in race timezone: {open_time} to {close_time}")
         users_response, status = await self.get_users_and_flights(
             xc_entity,
             open_time,
@@ -245,7 +258,7 @@ class XContestService:
             logger.warning(f"Failed to get XContest users: status={status}")
             return []
         
-        logger.info(f"XContest returned {len(users_response.get('users', {}))} users for full day")
+        logger.info(f"XContest returned {len(users_response.get('users', {}))} users for today")
         
         # Filter users to only include registered pilots
         filtered_users = {}
@@ -268,20 +281,34 @@ class XContestService:
             if not pilot_info:
                 continue
             
-            # Get latest flight for this pilot
+            # Get latest flight for this pilot that is from today or still active
             latest_flight = None
             latest_time = None
+            flights_found = 0
+            flights_filtered = 0
             
             for flight in user_data.get('flights', []):
-                # Extract last fix time
+                flights_found += 1
+                # Check if this flight is from today or has last fix during today
+                # First, check last fix time
                 last_fix = flight.get('lastFix')
                 if last_fix and len(last_fix) >= 4 and isinstance(last_fix[3], dict):
                     last_fix_str = last_fix[3].get('t')
                     if last_fix_str:
-                        last_fix_time = datetime.strptime(last_fix_str, "%Y-%m-%dT%H:%M:%SZ")
-                        if latest_time is None or last_fix_time > latest_time:
-                            latest_time = last_fix_time
-                            latest_flight = flight
+                        last_fix_time = datetime.strptime(last_fix_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                        
+                        # Check if last fix is within today's window (or within lookback buffer)
+                        if last_fix_time >= open_time_dt and last_fix_time <= close_time_dt:
+                            # This flight is from today or still active today
+                            if latest_time is None or last_fix_time > latest_time:
+                                latest_time = last_fix_time
+                                latest_flight = flight
+                        else:
+                            flights_filtered += 1
+                            logger.debug(f"Filtered out flight for {xcontest_id}: last fix {last_fix_str} not in today's window")
+            
+            if flights_filtered > 0:
+                logger.info(f"Pilot {xcontest_id}: {flights_found} flights found, {flights_filtered} filtered out (not today), using latest from today")
             
             if latest_flight:
                 # Fetch track data
@@ -344,7 +371,9 @@ class XContestService:
                     }
                     
                     pilot_flights.append(pilot_flight)
+                    logger.info(f"Added XContest flight for {xcontest_id} from today (last fix: {pilot_flight['lastFixTime']})")
         
+        logger.info(f"Returning {len(pilot_flights)} XContest flights from today for race")
         return pilot_flights
 
 
@@ -375,14 +404,14 @@ class XContestService:
             
         logger.info(f"Getting XContest incremental updates for {len(active_xc_flights)} tracked flights")
         
-        # Console log
-        print(f"\n{'='*60}")
-        print(f"XCONTEST INCREMENTAL UPDATES:")
-        print(f"  Tracked flights: {len(active_xc_flights)}")
+        # Log incremental update details
+        logger.info("="*60)
+        logger.info("XCONTEST INCREMENTAL UPDATES:")
+        logger.info(f"  Tracked flights: {len(active_xc_flights)}")
         if active_xc_flights:
             for flight_id, flight_data in list(active_xc_flights.items())[:3]:  # Show first 3
-                print(f"    {flight_id}: last fix = {flight_data.get('lastFixTime')}")
-        print(f"{'='*60}\n")
+                logger.info(f"    {flight_id}: last fix = {flight_data.get('lastFixTime')}")
+        logger.info("="*60)
         
         flight_updates = []
         
