@@ -1687,9 +1687,12 @@ async def websocket_tracking_endpoint(
                 downsampled_points = []
                 last_added_time = None
 
-                for point in track_points:
+                for i, point in enumerate(track_points):
                     current_time = point.datetime
-                    if last_added_time is None or (current_time - last_added_time).total_seconds() >= 3:
+                    is_last_point = (i == len(track_points) - 1)
+                    
+                    # Include point if it's the first, meets time threshold, or is the last point
+                    if last_added_time is None or (current_time - last_added_time).total_seconds() >= 3 or is_last_point:
                         downsampled_points.append({
                             "lat": float(point.lat),
                             "lon": float(point.lon),
@@ -1698,6 +1701,12 @@ async def websocket_tracking_endpoint(
                         })
                         last_added_time = current_time
 
+                # Store the actual last datetime from the downsampled points
+                # This helps prevent overlap when incremental updates arrive
+                last_sent_datetime = None
+                if downsampled_points:
+                    last_sent_datetime = downsampled_points[-1]['datetime']
+                
                 pilot_latest_flights[pilot_id] = {
                     "uuid": str(flight.id),
                     "pilot_id": flight.pilot_id,
@@ -1719,6 +1728,7 @@ async def websocket_tracking_endpoint(
                     "downsampledPoints": len(downsampled_points),
                     "source": "HFSS",  # Mark as HFSS data
                     "lastFixTime": flight.last_fix['datetime'],
+                    "lastSentPointTime": last_sent_datetime,  # Track the actual last point sent
                     "isActive": True,  # Mark as currently active
                     # Include flight state information
                     "flight_state": flight.flight_state.get('state', 'unknown') if flight.flight_state else 'unknown',
@@ -1777,6 +1787,15 @@ async def websocket_tracking_endpoint(
             "flights": consolidated_flight_data,
             "active_viewers": manager.get_active_viewers(race_id)
         })
+        
+        # Track the last sent point time for each flight to prevent overlap with incremental updates
+        for flight_data in consolidated_flight_data:
+            if flight_data.get('source') == 'HFSS' and flight_data.get('lastSentPointTime'):
+                # Convert the ISO string back to datetime
+                last_sent_time = datetime.fromisoformat(
+                    flight_data['lastSentPointTime'].replace('Z', '+00:00')
+                )
+                manager.add_pilot_with_sent_data(race_id, flight_data['uuid'], last_sent_time)
 
         # Keep connection alive and handle client messages
         while True:
