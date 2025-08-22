@@ -463,10 +463,12 @@ async def get_flights(
                 'race_id': flight.race_id,
                 'source': flight.source,
                 'created_at': flight.created_at.isoformat() if flight.created_at else None,
-                'start_time': flight.start_time.isoformat() if flight.start_time else None,
-                'end_time': flight.end_time.isoformat() if flight.end_time else None,
+                'start_time': flight.first_fix.get('datetime') if flight.first_fix and 'datetime' in flight.first_fix else None,
+                'end_time': flight.last_fix.get('datetime') if flight.last_fix and 'datetime' in flight.last_fix else None,
                 'total_points': flight.total_points,
-                'metadata': flight.flight_metadata
+                'first_fix': flight.first_fix,
+                'last_fix': flight.last_fix,
+                'flight_state': flight.flight_state
             } for flight in flights]
         }
 
