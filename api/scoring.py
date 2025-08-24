@@ -33,22 +33,36 @@ async def create_scoring_track_batch(
     track_batch: ScoringTrackBatchCreate,
     db: Session = Depends(get_db)
 ):
-    """Insert a batch of scoring track points efficiently and create a new flight with generated UUID"""
+    """Insert a batch of scoring track points efficiently. 
+    Optionally accepts existing flight_uuid for migration, otherwise generates a new UUID.
+    """
+    # Define max batch size constant
+    MAX_BATCH_SIZE = 10000
+    CHUNK_SIZE = 1000
+    
     try:
         # Validate that we have track points to process
         if not track_batch.tracks:
             raise HTTPException(
                 status_code=400, detail="No track points provided in the batch"
             )
+        
+        # Validate batch size
+        if len(track_batch.tracks) > MAX_BATCH_SIZE:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Batch size {len(track_batch.tracks)} exceeds maximum {MAX_BATCH_SIZE}"
+            )
 
         # Log batch size for monitoring
         logger.info(
-            # Generate a new flight UUID
             f"Processing batch with {len(track_batch.tracks)} track points")
-        flight_uuid = uuid.uuid4()
+        
+        # Use provided flight_uuid or generate a new one
+        flight_uuid = track_batch.flight_uuid or uuid.uuid4()
 
         logger.info(
-            f"Created new flight UUID {flight_uuid} for scoring tracks")
+            f"Using flight UUID {flight_uuid} for scoring tracks")
 
         # Create track objects for bulk insertion with optimized geometry handling
         track_objects = []
@@ -56,7 +70,7 @@ async def create_scoring_track_batch(
 
         # Process all tracks in the batch
         for track in track_batch.tracks:
-            # Set the flight_uuid to our new generated UUID for all tracks
+            # Set the flight_uuid for all tracks
             track.flight_uuid = flight_uuid
 
             # Create track object as a dictionary for SQLAlchemy Core insert
@@ -65,12 +79,14 @@ async def create_scoring_track_batch(
 
         # Bulk insert all track objects if we have any, ignoring conflicts
         if track_objects:
-            # Try queueing first for better performance
-            queued = await redis_queue.queue_points(
-                QUEUE_NAMES['scoring'],
-                track_objects,
-                priority=2  # Medium priority
-            )
+            # Try queueing first for better performance (only for smaller batches)
+            queued = False
+            if len(track_objects) <= 2000:  # Only queue smaller batches
+                queued = await redis_queue.queue_points(
+                    QUEUE_NAMES['scoring'],
+                    track_objects,
+                    priority=2  # Medium priority
+                )
 
             if queued:
                 # Just commit the flight UUID generation, points will be processed in background
@@ -80,21 +96,54 @@ async def create_scoring_track_batch(
 
                 return ScoringTrackBatchResponse(
                     flight_uuid=flight_uuid,
-                    points_added=points_to_add
+                    points_added=points_to_add,
+                    points_skipped=0,
+                    queued=True
                 )
             else:
-                # Fallback to direct insertion if queueing fails
-                stmt = insert(ScoringTracks).on_conflict_do_nothing(
-                    index_elements=['flight_uuid', 'date_time', 'lat', 'lon']
-                )
-                db.execute(stmt, track_objects)
+                # Direct insertion with chunking for large batches
+                points_added = 0
+                points_skipped = 0
+                
+                # Process in chunks for better performance and memory management
+                for i in range(0, len(track_objects), CHUNK_SIZE):
+                    chunk = track_objects[i:i + CHUNK_SIZE]
+                    
+                    # Count existing points before insertion to track duplicates
+                    existing_count_query = db.query(ScoringTracks).filter(
+                        ScoringTracks.flight_uuid == flight_uuid
+                    ).count()
+                    before_count = existing_count_query
+                    
+                    # Use on_conflict_do_nothing to handle duplicates
+                    stmt = insert(ScoringTracks).on_conflict_do_nothing(
+                        index_elements=['flight_uuid', 'date_time', 'lat', 'lon']
+                    )
+                    db.execute(stmt, chunk)
+                    
+                    # Count points after insertion to determine how many were added
+                    after_count = db.query(ScoringTracks).filter(
+                        ScoringTracks.flight_uuid == flight_uuid
+                    ).count()
+                    
+                    chunk_inserted = after_count - before_count
+                    chunk_skipped = len(chunk) - chunk_inserted
+                    
+                    points_added += chunk_inserted
+                    points_skipped += chunk_skipped
+                    
+                    logger.debug(f"Chunk {i//CHUNK_SIZE + 1}: inserted {chunk_inserted}, skipped {chunk_skipped}")
 
                 # Commit once after all operations
                 db.commit()
+                
+                logger.info(f"Batch complete: {points_added} added, {points_skipped} skipped (duplicates)")
 
                 return ScoringTrackBatchResponse(
                     flight_uuid=flight_uuid,
-                    points_added=points_to_add
+                    points_added=points_added,
+                    points_skipped=points_skipped,
+                    queued=False
                 )
         else:
             # Still commit the flight even if no track points
@@ -102,7 +151,9 @@ async def create_scoring_track_batch(
 
             return ScoringTrackBatchResponse(
                 flight_uuid=flight_uuid,
-                points_added=0
+                points_added=0,
+                points_skipped=0,
+                queued=False
             )
 
     except SQLAlchemyError as e:

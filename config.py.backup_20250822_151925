@@ -5,11 +5,6 @@ from pydantic import UUID4
 
 class Settings(BaseSettings):
     DATABASE_URI: str
-    # Support both DATABASE_URL for compatibility
-    DATABASE_URL: Optional[str] = None
-    # Flag to indicate if using Neon DB
-    USE_NEON: bool = False
-    
     APP_NAME: str
     PROD: bool
     SECRET_KEY: str
