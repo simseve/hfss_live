@@ -4784,13 +4784,13 @@ async def get_tasks(
             )
 
         # Check if race exists in local database
-        race = db.query(Race).filter(Race.race_id == race_id).first()
-        if not race:
-            logger.warning(f"Race not found in database: {race_id}")
-            raise HTTPException(
-                status_code=404,
-                detail=f"Race {race_id} not found"
-            )
+        # race = db.query(Race).filter(Race.race_id == race_id).first()
+        # if not race:
+        #     logger.warning(f"Race not found in database: {race_id}")
+        #     raise HTTPException(
+        #         status_code=404,
+        #         detail=f"Race {race_id} not found"
+        #     )
 
         # Construct HFSS server URL
         hfss_url = f"{settings.HFSS_SERVER.rstrip('/')}/tasks/{race_id}"
@@ -4813,7 +4813,7 @@ async def get_tasks(
                         return {
                             "success": True,
                             "race_id": race_id,
-                            "race_name": race.name,
+                            # "race_name": race.name,
                             "retrieved_at": datetime.now(timezone.utc).isoformat(),
                             "source": "hfss_server",
                             "tasks": tasks_data
