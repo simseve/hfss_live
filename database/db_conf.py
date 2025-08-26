@@ -21,16 +21,18 @@ if is_neon:
     using_pooler = '-pooler' in database_uri
     
     if using_pooler:
-        # For Neon pooler endpoint - use aggressive settings to handle SSL timeouts
+        # Neon pooler uses PgBouncer in TRANSACTION MODE
+        # This means connections are returned to pool after each transaction
+        # IMPORTANT: Cannot use prepared statements, LISTEN, or session-level features
         engine = create_engine(
             database_uri,
-            poolclass=QueuePool,  # QueuePool with aggressive settings
-            pool_size=10,         # Moderate pool size
-            max_overflow=2,       # Very limited overflow
+            poolclass=QueuePool,  # Local pool management (Neon handles the real pooling)
+            pool_size=200,        # For 15k users: ~1500 req/sec needs 150-200 connections
+            max_overflow=300,     # Total 500 - handles traffic spikes gracefully
             pool_pre_ping=True,   # CRITICAL: Check connection validity before using
-            pool_recycle=60,      # Recycle connections every minute
+            pool_recycle=300,     # Recycle every 5 minutes (longer is OK with pooler)
             pool_timeout=30,      # Timeout waiting for connection from pool
-            pool_use_lifo=True,   # Use LIFO to keep connections warm
+            pool_use_lifo=False,  # Use FIFO for better distribution with pooler
             echo=False,
             connect_args={
                 'connect_timeout': 10,
@@ -38,6 +40,8 @@ if is_neon:
                 'keepalives_idle': 30,
                 'keepalives_interval': 10,
                 'keepalives_count': 5,
+                # Disable prepared statements for transaction pooling compatibility
+                'prepare_threshold': None,
             }
         )
         logger.info("Using Neon pooler endpoint with QueuePool and aggressive keepalive settings")
