@@ -7,6 +7,10 @@ class Settings(BaseSettings):
     DATABASE_URI: str
     # Support both DATABASE_URL for compatibility
     DATABASE_URL: Optional[str] = None
+    # Read-only replica database URI (defaults to primary if not set)
+    DATABASE_REPLICA_URI: Optional[str] = None
+    # Flag to enable/disable replica usage
+    USE_REPLICA: bool = True  # Default to True, can be overridden by env
     # Flag to indicate if using Neon DB
     USE_NEON: bool = False
     
