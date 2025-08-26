@@ -163,6 +163,13 @@ async def log_request(request: Request, call_next):
 app.include_router(routes.router, tags=['Tracking'], prefix='/tracking')
 app.include_router(scoring.router, tags=['Scoring'], prefix='/scoring')
 
+# Admin endpoints for queue management
+try:
+    from api.queue_admin import router as queue_admin_router
+    app.include_router(queue_admin_router, tags=['Queue Admin'])
+except ImportError:
+    logger.warning("Queue admin endpoints not available")
+
 
 # Attach the rate limiter as a middleware
 app.state.limiter = rate_limiter
@@ -216,6 +223,20 @@ async def health():
 
     # Check queue statistics
     queue_stats = await redis_queue.get_queue_stats()
+    
+    # Get Redis connection pool info
+    redis_pool_info = {}
+    try:
+        if redis_queue.redis_client and hasattr(redis_queue.redis_client, 'connection_pool'):
+            pool = redis_queue.redis_client.connection_pool
+            redis_pool_info = {
+                'created_connections': getattr(pool, 'created_connections', 'N/A'),
+                'available_connections': len(getattr(pool, '_available_connections', [])),
+                'in_use_connections': len(getattr(pool, '_in_use_connections', [])),
+                'max_connections': getattr(settings, 'REDIS_MAX_CONNECTIONS', 10)
+            }
+    except Exception as e:
+        redis_pool_info = {'error': str(e)}
 
     status = 'healthy' if (
         is_db_connected and is_redis_connected) else 'unhealthy'
@@ -233,7 +254,8 @@ async def health():
         },
         'redis': {
             'status': 'connected' if is_redis_connected else 'disconnected',
-            'queue_stats': queue_stats
+            'queue_stats': queue_stats,
+            'connection_pool': redis_pool_info
         }
     }
 
