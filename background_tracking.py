@@ -3,7 +3,7 @@ from database.models import Flight, LiveTrackPoint, Race
 import asyncio
 from ws_conn import manager
 from database.db_conf import Session
-from database.db_replica import ReplicaSession  # Use replica for read operations
+from database.db_replica import ReplicaSession, PrimarySession  # Use replica for reads, primary for writes
 import logging
 from zoneinfo import ZoneInfo
 from sqlalchemy import func  # Add this at the top with other imports
@@ -179,7 +179,7 @@ async def periodic_tracking_update(interval_seconds: int = 30):
                                         flight.last_fix['datetime'].replace('Z', '+00:00'))
 
                                     if (datetime.now(timezone.utc) - last_fix_time) > INACTIVITY_THRESHOLD:
-                                        # Update flight state to 'inactive'
+                                        # Update flight state to 'inactive' - need to use primary DB for writes
                                         state_info = {
                                             'state': 'inactive',
                                             'confidence': 'high',
@@ -187,8 +187,15 @@ async def periodic_tracking_update(interval_seconds: int = 30):
                                             'last_updated': datetime.now(timezone.utc).isoformat(),
                                             'last_active': flight.last_fix['datetime']
                                         }
-                                        flight.flight_state = state_info
-                                        db.commit()
+                                        
+                                        # Use primary database for the UPDATE operation
+                                        with PrimarySession() as primary_db:
+                                            primary_flight = primary_db.query(Flight).filter(
+                                                Flight.id == flight.id
+                                            ).first()
+                                            if primary_flight:
+                                                primary_flight.flight_state = state_info
+                                                primary_db.commit()
 
                                         # Include the flight state info but no points
                                         flight_info["flight_state"] = "inactive"
