@@ -3,6 +3,7 @@ from database.models import Flight, LiveTrackPoint, Race
 import asyncio
 from ws_conn import manager
 from database.db_conf import Session
+from database.db_replica import ReplicaSession  # Use replica for read operations
 import logging
 from zoneinfo import ZoneInfo
 from sqlalchemy import func  # Add this at the top with other imports
@@ -35,8 +36,8 @@ async def periodic_tracking_update(interval_seconds: int = 30):
                 if manager.get_active_viewers(race_id) == 0:
                     continue
 
-                # Get a DB session
-                with Session() as db:
+                # Get a read-only DB session from replica
+                with ReplicaSession() as db:
                     # Current server time in UTC
                     current_time = datetime.now(timezone.utc)
 

@@ -26,6 +26,7 @@ import sqlalchemy
 from redis_queue_system.redis_queue import redis_queue
 from redis_queue_system.point_processor import point_processor
 from middleware.db_recovery import setup_database_recovery
+from config import settings
 
 
 def check_database_connection():
@@ -46,6 +47,18 @@ async def lifespan(app):
         raise RuntimeError(f"Database connection check failed: {message}")
     else:
         logger.info(f"Database connection check: {message}")
+    
+    # Check replica connection if configured
+    try:
+        from database.db_replica import test_replica_connection
+        replica_connected, replica_message = test_replica_connection()
+        if replica_connected:
+            logger.info(f"Replica database check: {replica_message}")
+        else:
+            logger.warning(f"Replica database check: {replica_message}")
+            logger.warning("Falling back to primary database for all operations")
+    except ImportError:
+        logger.debug("Replica database module not available")
 
     # Initialize Redis connection
     try:

@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from database.schemas import LiveTrackingRequest, LiveTrackPointCreate, FlightResponse, TrackUploadRequest, NotificationCommand, SubscriptionRequest, UnsubscriptionRequest, NotificationRequest, FlymasterBatchCreate, FlymasterBatchResponse, FlymasterPointCreate, SentNotificationResponse
 from database.models import UploadedTrackPoint, Flight, LiveTrackPoint, Race, NotificationTokenDB, Flymaster, SentNotification
 from typing import Dict, Optional, List
-from database.db_conf import get_db
+from database.db_replica import get_db, get_replica_db
 import logging
 from api.auth import verify_tracking_token
 from sqlalchemy.exc import SQLAlchemyError
@@ -67,7 +67,7 @@ async def live_tracking(
     data: LiveTrackingRequest,
     token: str = Query(..., description="Authentication token"),
     token_data: Dict = Depends(verify_tracking_token),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db)  # Use primary for writes
 ):
     try:
         pilot_id = token_data['pilot_id']
@@ -250,7 +250,7 @@ async def live_tracking(
 async def upload_track(
     upload_data: TrackUploadRequest,
     token: str = Query(..., description="Authentication token"),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db),  # Use primary for writes
     token_data: dict = Depends(verify_tracking_token)
 ):
     """Handle complete track upload from mobile devices"""
@@ -434,7 +434,7 @@ async def get_flights(
     race_id: Optional[str] = Query(None, description="Filter by race ID"),
     source: Optional[str] = Query(
         None, description="Filter by source ('live' or 'upload')"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_replica_db)  # Use read replica
 ):
     """Get all flights with optional filtering"""
     try:
@@ -607,7 +607,7 @@ async def delete_track(
     flight_id: str,
     token: str = Query(..., description="Authentication token"),
     token_data: Dict = Depends(verify_tracking_token),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db)  # Use primary for deletes
 ):
     """
     Delete a specific track from the database.
@@ -788,7 +788,7 @@ async def get_live_points(
     credentials: HTTPAuthorizationCredentials = Security(security),
     last_fix_dt: Optional[str] = Query(
         None, description="Only return points after this time (ISO 8601 format, e.g. 2025-01-25T06:00:00Z)"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_replica_db)  # Use read replica
 ):
     """
     Get all live tracking points for a specific flight in GeoJSON format.
@@ -959,7 +959,7 @@ async def get_live_points_raw(
     credentials: HTTPAuthorizationCredentials = Security(security),
     last_fix_dt: Optional[str] = Query(
         None, description="Only return points after this time (ISO 8601 format, e.g. 2025-01-25T06:00:00Z)"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_replica_db)  # Use read replica
 ):
     """
     Get all live tracking points for a specific flight in raw format.
@@ -1343,7 +1343,7 @@ async def get_live_users(
         None, description="End time for tracking window (ISO 8601 format, e.g. 2025-01-25T06:00:00Z)"),
     source: Optional[str] = Query(None, regex="^(live|upload|flymaster)$"),
     credentials: HTTPAuthorizationCredentials = Security(security),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_replica_db)  # Use read replica
 ):
     """
     Return active users and their flights within the specified time window.
@@ -1578,7 +1578,7 @@ async def websocket_tracking_endpoint(
     race_id: str,
     client_id: str = Query(...),
     token: str = Query(...),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_replica_db)  # Use read replica for WebSocket reads
 ):
     """WebSocket endpoint for real-time tracking updates"""
     try:
@@ -1998,7 +1998,7 @@ async def get_track_tile(
     gzip: bool = Query(
         False, description="Apply gzip compression to the tile data"),
     token_data: Dict = Depends(verify_tracking_token),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_replica_db)  # Use read replica for MVT tiles
 ):
     """
     Serve vector tiles for track points in Mapbox Vector Tile (MVT) format.
@@ -4760,7 +4760,7 @@ async def flymaster_points(
 async def get_tasks(
     token: str = Query(..., description="Authentication token"),
     token_data: Dict = Depends(verify_tracking_token),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_replica_db)  # Use read replica for mobile task fetching
 ):
     """
     Get tasks from HFSS server for the specified race.
