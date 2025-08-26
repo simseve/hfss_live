@@ -25,6 +25,7 @@ from database.db_conf import engine, test_db_connection
 import sqlalchemy
 from redis_queue_system.redis_queue import redis_queue
 from redis_queue_system.point_processor import point_processor
+from middleware.db_recovery import setup_database_recovery
 
 
 def check_database_connection():
@@ -146,6 +147,9 @@ app.add_middleware(
                    "OPTIONS"],  # Explicitly list allowed methods
     allow_headers=["*"],
 )
+
+# Setup database recovery middleware for Neon connection issues
+setup_database_recovery(app, max_retries=3, retry_delay=0.5)
 
 
 @app.middleware("http")
