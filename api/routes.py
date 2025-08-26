@@ -2232,7 +2232,7 @@ async def get_daily_tracks_tile(
     pilot_id: Optional[str] = Query(
         None, description="Optional pilot ID to filter tracks"),
     token_data: Dict = Depends(verify_tracking_token),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_replica_db)  # Use read replica for heavy PostGIS queries
 ):
     """
     Serve vector tiles for all tracks from today for a specific race.
@@ -3597,7 +3597,7 @@ async def get_flight_bounds_by_id(
     source: str = Query(..., regex="^(live|upload)$",
                         description="Either 'live' or 'upload'"),
     token_data: Dict = Depends(verify_tracking_token),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_replica_db)  # Use read replica for reads
 ):
     """
     Calculate the bounding box for a flight track using flight ID.
