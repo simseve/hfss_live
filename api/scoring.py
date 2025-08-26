@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 import uuid
 from database.models import ScoringTracks
 from database.db_conf import get_db
+from database.db_replica import get_replica_db
 from database.schemas import (
     ScoringTrackBatchCreate,
     ScoringTrackBatchResponse,
@@ -517,7 +518,7 @@ async def get_track_preview(
     weight: int = Query(5, description="Weight/thickness of the track path"),
     max_points: int = Query(
         1000, description="Maximum number of points to use in the polyline"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_replica_db)  # Use read replica for heavy map generation
 ):
     """
     Generate a Google Static Maps preview URL for a flight track using the encoded polyline.
