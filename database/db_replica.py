@@ -52,8 +52,8 @@ def create_db_engine(database_uri, pool_size_override=None, max_overflow_overrid
                     'keepalives_idle': 30,
                     'keepalives_interval': 10,
                     'keepalives_count': 5,
-                    'prepare_threshold': None,  # Disable for transaction pooling
-                    'options': '-c statement_timeout=30000'  # 30 second statement timeout
+                    'prepare_threshold': None  # Disable for transaction pooling
+                    # Note: statement_timeout not supported in Neon pooler mode
                 }
             )
         else:
