@@ -7,7 +7,7 @@ from typing import List, Dict
 from datetime import datetime, timezone
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.dialects.postgresql import insert
-from database.db_conf import Session
+from database.db_replica import PrimarySession as Session  # Use primary for writes
 from database.models import LiveTrackPoint, UploadedTrackPoint, Flymaster, ScoringTracks
 from geoalchemy2.functions import ST_SetSRID, ST_MakePoint
 from redis_queue_system.redis_queue import redis_queue, QUEUE_NAMES

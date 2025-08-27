@@ -34,13 +34,13 @@ def create_db_engine(database_uri, pool_size_override=None, max_overflow_overrid
         using_pooler = '-pooler' in database_uri
         
         if using_pooler:
-            # Neon pooler configuration - conservative settings to prevent SSL drops
-            # Neon pooler already handles connection pooling, so we use smaller local pools
+            # Neon pooler configuration - optimized for transaction pooling mode
+            # Pooler endpoint can handle many connections but works best with moderate local pools
             return create_engine(
                 database_uri,
                 poolclass=QueuePool,
-                pool_size=pool_size_override or 20,  # Reduced from 250
-                max_overflow=max_overflow_override or 10,  # Reduced from 350
+                pool_size=pool_size_override or 50,  # Moderate size for pooler
+                max_overflow=max_overflow_override or 50,  # Total 100 connections per engine
                 pool_pre_ping=True,
                 pool_recycle=300,  # Recycle connections every 5 minutes
                 pool_timeout=30,
@@ -85,9 +85,9 @@ def create_db_engine(database_uri, pool_size_override=None, max_overflow_overrid
         )
 
 # Create engines for primary and replica
-# For Neon pooler endpoints, use conservative pool sizes to prevent connection exhaustion
-primary_engine = create_db_engine(primary_database_uri, pool_size_override=15, max_overflow_override=10)
-replica_engine = create_db_engine(replica_database_uri, pool_size_override=20, max_overflow_override=10)
+# For Neon pooler endpoints, use moderate pool sizes optimized for transaction pooling
+primary_engine = create_db_engine(primary_database_uri, pool_size_override=40, max_overflow_override=40)
+replica_engine = create_db_engine(replica_database_uri, pool_size_override=50, max_overflow_override=50)
 
 # Log configuration
 if primary_database_uri == replica_database_uri:
@@ -191,7 +191,7 @@ def test_replica_connection(max_retries=3):
     while retry_count < max_retries:
         try:
             with replica_engine.connect() as connection:
-                result = connection.execute(text("SELECT 1"))
+                connection.execute(text("SELECT 1"))
                 # Also check if it's actually a read-only replica
                 try:
                     connection.execute(text("CREATE TEMP TABLE test_write (id int)"))
