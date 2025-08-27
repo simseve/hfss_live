@@ -8,7 +8,7 @@ from typing import List, Dict, Optional
 from datetime import datetime, timezone, timedelta
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 from sqlalchemy.dialects.postgresql import insert
-from database.db_conf import Session
+from database.db_replica import PrimarySession as Session  # Use primary for writes
 from database.models import LiveTrackPoint, UploadedTrackPoint, Flymaster, ScoringTracks, Flight
 from redis_queue_system.redis_queue import redis_queue, QUEUE_NAMES
 

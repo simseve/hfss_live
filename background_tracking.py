@@ -2,7 +2,6 @@ from datetime import datetime, timezone, timedelta, time
 from database.models import Flight, LiveTrackPoint, Race
 import asyncio
 from ws_conn import manager
-from database.db_conf import Session
 from database.db_replica import ReplicaSession, PrimarySession  # Use replica for reads, primary for writes
 import logging
 from zoneinfo import ZoneInfo

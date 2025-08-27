@@ -3444,11 +3444,10 @@ async def update_flight_state(flight_uuid, db, source=None):
         # Import here to avoid circular imports
         from api.flight_state import update_flight_state_in_db
 
-        # Create a new session to avoid conflicts
-        from database.db_conf import Session
-        db_session = Session()
-
-        try:
+        # Use proper context manager for session handling
+        from database.db_replica import primary_db_context
+        
+        with primary_db_context() as db_session:
             # If source wasn't provided, determine it from the flight record
             if source is None:
                 flight_info = db_session.query(Flight).filter(
@@ -3461,10 +3460,6 @@ async def update_flight_state(flight_uuid, db, source=None):
                 flight_uuid, db_session, source=source)
 
             # No need to broadcast separately as flight state will be included in regular track updates
-
-        finally:
-            # Always close the session
-            db_session.close()
     except Exception as e:
         # Log but don't raise - this is a background task
         logger.error(f"Error updating flight state: {str(e)}")

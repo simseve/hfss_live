@@ -4,7 +4,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import and_, delete
 from sqlalchemy.exc import SQLAlchemyError
-from database.db_conf import Session
+from database.db_replica import PrimarySession as Session  # Use primary for deletes
 from database.models import Flight
 
 # Set up logging

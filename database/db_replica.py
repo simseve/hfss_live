@@ -34,17 +34,17 @@ def create_db_engine(database_uri, pool_size_override=None, max_overflow_overrid
         using_pooler = '-pooler' in database_uri
         
         if using_pooler:
-            # Neon pooler configuration for read replicas
-            # Read replicas typically handle more concurrent reads, so increase pool size
+            # Neon pooler configuration - optimized for transaction pooling mode
+            # Pooler endpoint can handle many connections but works best with moderate local pools
             return create_engine(
                 database_uri,
                 poolclass=QueuePool,
-                pool_size=pool_size_override or 250,  # Higher for read replica
-                max_overflow=max_overflow_override or 350,  # Total 600 for reads
+                pool_size=pool_size_override or 50,  # Moderate size for pooler
+                max_overflow=max_overflow_override or 50,  # Total 100 connections per engine
                 pool_pre_ping=True,
-                pool_recycle=300,
+                pool_recycle=300,  # Recycle connections every 5 minutes
                 pool_timeout=30,
-                pool_use_lifo=False,
+                pool_use_lifo=True,  # Use LIFO to keep connections warm
                 echo=False,
                 connect_args={
                     'connect_timeout': 10,
@@ -53,6 +53,7 @@ def create_db_engine(database_uri, pool_size_override=None, max_overflow_overrid
                     'keepalives_interval': 10,
                     'keepalives_count': 5,
                     'prepare_threshold': None,  # Disable for transaction pooling
+                    'options': '-c statement_timeout=30000'  # 30 second statement timeout
                 }
             )
         else:
@@ -84,8 +85,9 @@ def create_db_engine(database_uri, pool_size_override=None, max_overflow_overrid
         )
 
 # Create engines for primary and replica
-primary_engine = create_db_engine(primary_database_uri, pool_size_override=200, max_overflow_override=300)
-replica_engine = create_db_engine(replica_database_uri, pool_size_override=250, max_overflow_override=350)
+# For Neon pooler endpoints, use moderate pool sizes optimized for transaction pooling
+primary_engine = create_db_engine(primary_database_uri, pool_size_override=40, max_overflow_override=40)
+replica_engine = create_db_engine(replica_database_uri, pool_size_override=50, max_overflow_override=50)
 
 # Log configuration
 if primary_database_uri == replica_database_uri:
@@ -189,7 +191,7 @@ def test_replica_connection(max_retries=3):
     while retry_count < max_retries:
         try:
             with replica_engine.connect() as connection:
-                result = connection.execute(text("SELECT 1"))
+                connection.execute(text("SELECT 1"))
                 # Also check if it's actually a read-only replica
                 try:
                     connection.execute(text("CREATE TEMP TABLE test_write (id int)"))
