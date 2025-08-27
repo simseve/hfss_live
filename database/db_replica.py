@@ -34,17 +34,17 @@ def create_db_engine(database_uri, pool_size_override=None, max_overflow_overrid
         using_pooler = '-pooler' in database_uri
         
         if using_pooler:
-            # Neon pooler configuration for read replicas
-            # Read replicas typically handle more concurrent reads, so increase pool size
+            # Neon pooler configuration - conservative settings to prevent SSL drops
+            # Neon pooler already handles connection pooling, so we use smaller local pools
             return create_engine(
                 database_uri,
                 poolclass=QueuePool,
-                pool_size=pool_size_override or 250,  # Higher for read replica
-                max_overflow=max_overflow_override or 350,  # Total 600 for reads
+                pool_size=pool_size_override or 20,  # Reduced from 250
+                max_overflow=max_overflow_override or 10,  # Reduced from 350
                 pool_pre_ping=True,
-                pool_recycle=300,
+                pool_recycle=300,  # Recycle connections every 5 minutes
                 pool_timeout=30,
-                pool_use_lifo=False,
+                pool_use_lifo=True,  # Use LIFO to keep connections warm
                 echo=False,
                 connect_args={
                     'connect_timeout': 10,
@@ -53,6 +53,7 @@ def create_db_engine(database_uri, pool_size_override=None, max_overflow_overrid
                     'keepalives_interval': 10,
                     'keepalives_count': 5,
                     'prepare_threshold': None,  # Disable for transaction pooling
+                    'options': '-c statement_timeout=30000'  # 30 second statement timeout
                 }
             )
         else:
@@ -84,8 +85,9 @@ def create_db_engine(database_uri, pool_size_override=None, max_overflow_overrid
         )
 
 # Create engines for primary and replica
-primary_engine = create_db_engine(primary_database_uri, pool_size_override=200, max_overflow_override=300)
-replica_engine = create_db_engine(replica_database_uri, pool_size_override=250, max_overflow_override=350)
+# For Neon pooler endpoints, use conservative pool sizes to prevent connection exhaustion
+primary_engine = create_db_engine(primary_database_uri, pool_size_override=15, max_overflow_override=10)
+replica_engine = create_db_engine(replica_database_uri, pool_size_override=20, max_overflow_override=10)
 
 # Log configuration
 if primary_database_uri == replica_database_uri:
