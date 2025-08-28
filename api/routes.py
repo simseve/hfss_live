@@ -670,8 +670,8 @@ async def delete_track(
 @router.delete("/tracks/fuuid/{flight_uuid}")
 async def delete_track_uuid(
     flight_uuid: UUID,
-    source: str = Query(..., regex="^(live|upload|flymaster)$",
-                        description="Track source ('live', 'upload', or 'flymaster')"),
+    source: str = Query(..., regex="^.*(?:live|upload).*$",
+                        description="Track source (must contain 'live' or 'upload')"),
     credentials: HTTPAuthorizationCredentials = Security(security),
     db: Session = Depends(get_db)
 ):
@@ -1331,7 +1331,7 @@ async def get_live_users(
         ..., description="Start time for tracking window (ISO 8601 format, e.g. 2025-01-25T06:00:00Z)"),
     closetime: Optional[str] = Query(
         None, description="End time for tracking window (ISO 8601 format, e.g. 2025-01-25T06:00:00Z)"),
-    source: Optional[str] = Query(None, regex="^(live|upload|flymaster)$"),
+    source: Optional[str] = Query(None, regex="^.*(?:live|upload).*$"),
     credentials: HTTPAuthorizationCredentials = Security(security),
     db: Session = Depends(get_replica_db)  # Use read replica
 ):
@@ -3323,7 +3323,7 @@ async def get_flight_state_endpoint(
     history_points: int = Query(
         10, description="Number of history points to include if history=True"),
     credentials: HTTPAuthorizationCredentials = Security(security),
-    source: str = Query(..., regex="^(live|upload|flymaster)$"),
+    source: str = Query(..., regex="^.*(?:live|upload).*$"),
     db: Session = Depends(get_db)
 ):
     """
@@ -4718,4 +4718,232 @@ async def get_tasks(
         raise HTTPException(
             status_code=500,
             detail="Internal server error while retrieving tasks"
+        )
+
+
+@router.delete("/admin/delete-all-live-flights")
+async def delete_all_live_flights(
+    token: str = Query(..., description="Admin auth token"),
+    db: Session = Depends(get_db)
+):
+    """
+    Delete all live flights and their associated track points.
+    Points are automatically deleted due to CASCADE constraints.
+    Requires admin authentication token.
+    """
+    # Simple token check for admin access
+    if token != settings.SECRET_KEY:
+        raise HTTPException(status_code=403, detail="Invalid admin token")
+    
+    try:
+        # Count flights before deletion for response
+        live_flight_count = db.query(Flight).filter(
+            Flight.source == 'live'
+        ).count()
+        
+        # Delete all live flights (CASCADE will delete points automatically)
+        db.query(Flight).filter(
+            Flight.source == 'live'
+        ).delete(synchronize_session=False)
+        
+        db.commit()
+        
+        logger.warning(f"Admin deleted all live flights. Count: {live_flight_count}")
+        
+        return {
+            "success": True,
+            "message": f"Deleted {live_flight_count} live flights and all associated points",
+            "deleted_flights": live_flight_count
+        }
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error deleting live flights: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete live flights: {str(e)}"
+        )
+
+
+@router.delete("/admin/delete-all-upload-flights")
+async def delete_all_upload_flights(
+    token: str = Query(..., description="Admin auth token"),
+    db: Session = Depends(get_db)
+):
+    """
+    Delete all uploaded flights and their associated track points.
+    Points are automatically deleted due to CASCADE constraints.
+    Requires admin authentication token.
+    """
+    # Simple token check for admin access
+    if token != settings.SECRET_KEY:
+        raise HTTPException(status_code=403, detail="Invalid admin token")
+    
+    try:
+        # Count flights before deletion for response
+        upload_flight_count = db.query(Flight).filter(
+            Flight.source == 'upload'
+        ).count()
+        
+        # Delete all upload flights (CASCADE will delete points automatically)
+        db.query(Flight).filter(
+            Flight.source == 'upload'
+        ).delete(synchronize_session=False)
+        
+        db.commit()
+        
+        logger.warning(f"Admin deleted all upload flights. Count: {upload_flight_count}")
+        
+        return {
+            "success": True,
+            "message": f"Deleted {upload_flight_count} upload flights and all associated points",
+            "deleted_flights": upload_flight_count
+        }
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error deleting upload flights: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete upload flights: {str(e)}"
+        )
+
+
+@router.post("/admin/persist-flymaster-flights")
+async def persist_flymaster_flights(
+    token: str = Query(..., description="Admin auth token"),
+    db: Session = Depends(get_db)
+):
+    """
+    Convert Flymaster live tracking points to upload points for permanent storage.
+    Creates a duplicate flight record with source='flymaster_upload' to distinguish from live data.
+    This prevents Flymaster data from being deleted after 2 days by the hypertable retention policy.
+    The original live flight and points are preserved.
+    """
+    # Simple token check for admin access
+    if token != settings.SECRET_KEY:
+        raise HTTPException(status_code=403, detail="Invalid admin token")
+    
+    try:
+        # Get all Flymaster flights that are still in live (not yet persisted)
+        flymaster_flights = db.query(Flight).filter(
+            Flight.source == 'flymaster_live'
+        ).all()
+        
+        if not flymaster_flights:
+            return {
+                "success": True,
+                "message": "No Flymaster flights found to persist",
+                "flights_processed": 0,
+                "points_copied": 0
+            }
+        
+        total_points_copied = 0
+        flights_processed = 0
+        flight_details = []
+        
+        for flight in flymaster_flights:
+            # Check if we already have a corresponding upload flight
+            upload_flight_id = f"{flight.flight_id}-upload"
+            existing_upload_flight = db.query(Flight).filter(
+                Flight.flight_id == upload_flight_id,
+                Flight.source == 'flymaster_upload'
+            ).first()
+            
+            if not existing_upload_flight:
+                # Create a new flight record for the upload version
+                upload_flight = Flight(
+                    flight_id=upload_flight_id,
+                    race_uuid=flight.race_uuid,
+                    race_id=flight.race_id,
+                    pilot_id=flight.pilot_id,
+                    pilot_name=flight.pilot_name,
+                    created_at=flight.created_at,
+                    source='flymaster_upload',  # Mark as upload version
+                    device_id=flight.device_id,
+                    first_fix=flight.first_fix,
+                    last_fix=flight.last_fix,
+                    total_points=flight.total_points
+                )
+                db.add(upload_flight)
+                db.commit()
+                db.refresh(upload_flight)
+                logger.info(f"Created upload flight {upload_flight_id} with UUID {upload_flight.id}")
+            else:
+                upload_flight = existing_upload_flight
+                logger.info(f"Using existing upload flight {upload_flight_id}")
+            
+            # Get all live points for this flight
+            live_points = db.query(LiveTrackPoint).filter(
+                LiveTrackPoint.flight_uuid == flight.id
+            ).all()
+            
+            if not live_points:
+                continue
+            
+            # Delete any existing upload points for this flight to ensure 100% sync
+            db.query(UploadedTrackPoint).filter(
+                UploadedTrackPoint.flight_uuid == upload_flight.id
+            ).delete(synchronize_session=False)
+            db.commit()
+            logger.info(f"Cleared existing upload points for flight {upload_flight.flight_id}")
+            
+            # Convert live points to upload points format with the upload flight UUID
+            upload_points = []
+            for point in live_points:
+                upload_point = {
+                    'flight_id': upload_flight.flight_id,  # Use upload flight ID
+                    'flight_uuid': str(upload_flight.id),   # Use upload flight UUID
+                    'datetime': point.datetime.isoformat() if hasattr(point.datetime, 'isoformat') else str(point.datetime),
+                    'lat': point.lat,
+                    'lon': point.lon,
+                    'elevation': point.elevation,
+                    'barometric_altitude': point.barometric_altitude
+                }
+                upload_points.append(upload_point)
+            
+            # Queue upload points using Redis queue for batch processing
+            if upload_points:
+                from redis_queue_system.redis_queue import redis_queue
+                
+                # Split into chunks if needed (queue in batches of 100)
+                chunk_size = 100
+                for i in range(0, len(upload_points), chunk_size):
+                    chunk = upload_points[i:i + chunk_size]
+                    await redis_queue.queue_points('upload', chunk)
+                
+                points_added = len(upload_points)
+                total_points_copied += points_added
+                flights_processed += 1
+                
+                flight_details.append({
+                    "original_flight_id": flight.flight_id,
+                    "upload_flight_id": upload_flight.flight_id,
+                    "pilot": flight.pilot_name,
+                    "device": flight.device_id,
+                    "points_queued": points_added,
+                    "total_live_points": len(live_points)
+                })
+                
+                logger.info(f"Queued {points_added} points for persistence from Flymaster flight {flight.flight_id}")
+        
+        db.commit()
+        
+        logger.warning(f"Admin persisted Flymaster flights. Flights: {flights_processed}, Points: {total_points_copied}")
+        
+        return {
+            "success": True,
+            "message": f"Successfully queued {flights_processed} Flymaster flights for persistence",
+            "flights_processed": flights_processed,
+            "points_queued": total_points_copied,
+            "note": "Points are processed asynchronously via Redis queue. Duplicates are skipped automatically.",
+            "flight_details": flight_details
+        }
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error persisting Flymaster flights: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to persist Flymaster flights: {str(e)}"
         )
