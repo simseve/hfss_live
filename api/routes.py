@@ -4811,7 +4811,7 @@ async def delete_all_upload_flights(
 
 @router.post("/admin/persist-flymaster-flights")
 async def persist_flymaster_flights(
-    token: str = Query(..., description="Admin auth token"),
+    credentials: HTTPAuthorizationCredentials = Security(security),
     db: Session = Depends(get_db)
 ):
     """
@@ -4820,9 +4820,18 @@ async def persist_flymaster_flights(
     This prevents Flymaster data from being deleted after 2 days by the hypertable retention policy.
     The original live flight and points are preserved.
     """
-    # Simple token check for admin access
-    if token != settings.SECRET_KEY:
-        raise HTTPException(status_code=403, detail="Invalid admin token")
+    # Verify JWT token
+    try:
+        token_data = jwt.decode(
+            credentials.credentials,
+            settings.SECRET_KEY,
+            algorithms=["HS256"],
+            audience="api.hikeandfly.app",
+            issuer="hikeandfly.app",
+            verify=True
+        )
+    except (PyJWTError, jwt.ExpiredSignatureError) as e:
+        raise HTTPException(status_code=403, detail="Invalid or expired token")
     
     try:
         # Get all Flymaster flights that are still in live (not yet persisted)
