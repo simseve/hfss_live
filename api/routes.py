@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Security, WebSocke
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
 from database.schemas import LiveTrackingRequest, LiveTrackPointCreate, FlightResponse, TrackUploadRequest, NotificationCommand, SubscriptionRequest, UnsubscriptionRequest, NotificationRequest, SentNotificationResponse
-from database.models import UploadedTrackPoint, Flight, LiveTrackPoint, Race, NotificationTokenDB, SentNotification
+from database.models import UploadedTrackPoint, Flight, LiveTrackPoint, Race, NotificationTokenDB, SentNotification, DeviceRegistration
 from typing import Dict, Optional, List
 from database.db_replica import get_db, get_replica_db
 import logging
@@ -4331,22 +4331,21 @@ async def upload_flymaster_file(
 
         # Validate we got some content
         if not content_str or not content_str.strip():
-            raise HTTPException(
-                status_code=400,
-                detail="No data received. Send as file upload or text/plain body"
-            )
+            logger.warning("No data received in Flymaster upload")
+            return PlainTextResponse("NOK", status_code=400)
 
         logger.info(f"Flymaster upload received via: {source_type}")
         lines = content_str.strip().split('\n')
 
         if len(lines) < 3:
-            raise HTTPException(status_code=400, detail="Invalid file format")
+            logger.warning("Invalid Flymaster file format - less than 3 lines")
+            return PlainTextResponse("NOK", status_code=400)
 
         # Parse header line (format: device_serial, sha256key)
         header_parts = lines[0].split(',')
         if len(header_parts) != 2:
-            raise HTTPException(
-                status_code=400, detail="Invalid header format: expected 'device_serial, sha256key'")
+            logger.warning("Invalid Flymaster header format")
+            return PlainTextResponse("NOK", status_code=400)
 
         device_serial = header_parts[0].strip()
         sha256key = header_parts[1].strip()
@@ -4355,20 +4354,58 @@ async def upload_flymaster_file(
         try:
             device_id = int(device_serial)
         except ValueError:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid device_serial format: expected integer, got '{device_serial}'"
-            )
+            logger.warning(f"Invalid device_serial format: {device_serial}")
+            return PlainTextResponse("NOK", status_code=400)
 
         # Validate SHA256 key - it should be SHA256(device_id + secret)
         combined = str(device_id) + settings.FLYMASTER_SECRET
         expected_sha256 = hashlib.sha256(combined.encode()).hexdigest()
+        
+        logger.info(f"SHA256 validation - device: {device_serial}, received: {sha256key}, expected: {expected_sha256}")
 
         if sha256key != expected_sha256:
-            raise HTTPException(
-                status_code=401,
-                detail="Invalid SHA256 key - authentication failed"
+            logger.warning(f"Invalid SHA256 key for device {device_serial} - received: {sha256key}, expected: {expected_sha256}")
+            return PlainTextResponse("NOK", status_code=401)
+        
+        # Check if device is registered and active
+        logger.info(f"Checking registration for device {device_serial}")
+        registration = db.query(DeviceRegistration).filter(
+            DeviceRegistration.serial_number == device_serial,
+            DeviceRegistration.is_active == True
+        ).first()
+        
+        if not registration:
+            logger.warning(f"Device {device_serial} not registered or inactive - rejecting points")
+            return PlainTextResponse("NOK", status_code=403)
+        else:
+            logger.info(f"Found registration for device {device_serial}: pilot={registration.pilot_name}, race={registration.race_id}")
+        
+        # Validate the stored token
+        try:
+            token_data = jwt.decode(
+                registration.pilot_token,
+                settings.SECRET_KEY,
+                algorithms=["HS256"],
+                options={"verify_aud": False, "verify_iss": False}  # Don't verify audience and issuer for tracking tokens
             )
+            
+            # Extract race and pilot info from token
+            race_id = token_data['race_id']
+            pilot_id = token_data['pilot_id']
+            pilot_name = token_data['pilot_name']
+            
+            logger.info(f"Device {device_serial} validated for pilot {pilot_name} in race {race_id}")
+            
+        except jwt.ExpiredSignatureError:
+            # Token expired - deactivate registration
+            registration.is_active = False
+            registration.updated_at = datetime.now(timezone.utc)
+            db.commit()
+            logger.warning(f"Token expired for device {device_serial} - deactivated registration")
+            return PlainTextResponse("NOK", status_code=401)
+        except PyJWTError as e:
+            logger.error(f"Invalid token for device {device_serial}: {str(e)}")
+            return PlainTextResponse("NOK", status_code=401)
 
         # Find EOF
         eof_index = -1
@@ -4378,7 +4415,8 @@ async def upload_flymaster_file(
                 break
 
         if eof_index == -1:
-            raise HTTPException(status_code=400, detail="EOF marker not found")
+            logger.warning("EOF marker not found in Flymaster file")
+            return PlainTextResponse("NOK", status_code=400)
 
         # Parse data points (between header and EOF)
         data_lines = lines[1:eof_index]
@@ -4436,11 +4474,18 @@ async def upload_flymaster_file(
 
         if points:
             try:
+                # Add race and pilot information to each point for the queue processor
+                for point in points:
+                    point['race_id'] = race_id
+                    point['pilot_id'] = pilot_id
+                    point['pilot_name'] = pilot_name
+                    point['race_uuid'] = str(registration.race_uuid)
+                
                 # Queue for background processing
                 # The queue processor will handle flight creation/updates
                 queued = await redis_queue.queue_points(
                     QUEUE_NAMES['flymaster'],
-                    points,  # Send the raw points dictionary
+                    points,  # Send the raw points dictionary with race/pilot info
                     priority=1
                 )
 
@@ -4450,17 +4495,11 @@ async def upload_flymaster_file(
                         f"Successfully queued {points_added} Flymaster points for conversion to live tracking")
                 else:
                     logger.error("Failed to queue Flymaster points")
-                    raise HTTPException(
-                        status_code=500,
-                        detail="Failed to queue points for processing"
-                    )
+                    return PlainTextResponse("NOK", status_code=500)
 
             except Exception as e:
                 logger.error(f"Error queueing Flymaster points: {str(e)}")
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Failed to process points: {str(e)}"
-                )
+                return PlainTextResponse("NOK", status_code=500)
 
         logger.info(
             f"Flymaster file upload completed: {points_added} queued")
@@ -4468,22 +4507,14 @@ async def upload_flymaster_file(
         # Return plain text "OK" as expected by Flymaster devices
         return PlainTextResponse("OK", status_code=200)
 
-    except HTTPException:
-        raise
     except SQLAlchemyError as e:
         db.rollback()
         logger.error(f"Database error during Flymaster file upload: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail="Database error during file upload"
-        )
+        return PlainTextResponse("NOK", status_code=500)
     except Exception as e:
         db.rollback()
         logger.error(f"Error during Flymaster file upload: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to upload Flymaster file: {str(e)}"
-        )
+        return PlainTextResponse("NOK", status_code=500)
 
 
 @router.get("/flymaster/points/{serial_id}/raw")
@@ -4969,4 +5000,380 @@ async def persist_flymaster_flights(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to persist Flymaster flights: {str(e)}"
+        )
+
+
+# ============== Device Registration Endpoints ==============
+
+@router.post("/api/devices/register")
+async def register_device(
+    serial_number: str,
+    pilot_token: str = Query(..., description="Pilot tracking token to associate with device"),
+    device_type: str = "flymaster",
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    db: Session = Depends(get_db)
+):
+    """
+    Register a tracking device (Flymaster, Skytraxx, etc.) with a pilot token.
+    Requires admin JWT authentication.
+    Automatically deactivates any existing active registration for this serial number.
+    """
+    # Verify admin JWT token (same as other management endpoints)
+    try:
+        admin_token_data = jwt.decode(
+            credentials.credentials,
+            settings.SECRET_KEY,
+            algorithms=["HS256"],
+            audience="api.hikeandfly.app",
+            issuer="hikeandfly.app",
+            verify=True
+        )
+    except (PyJWTError, jwt.ExpiredSignatureError) as e:
+        raise HTTPException(status_code=403, detail="Invalid or expired admin token")
+    
+    try:
+        # Validate the pilot token (same as live/upload)
+        token_data = await verify_tracking_token(pilot_token)
+        race_id = token_data['race_id']
+        pilot_id = token_data['pilot_id']
+        pilot_name = token_data['pilot_name']
+        race_data = token_data['race']
+        
+        # Check/create race record
+        race = db.query(Race).filter(Race.race_id == race_id).first()
+        if not race:
+            race = Race(
+                race_id=race_id,
+                name=race_data['name'],
+                date=datetime.fromisoformat(race_data['date']),
+                end_date=datetime.fromisoformat(race_data['end_date']),
+                timezone=race_data['timezone'],
+                location=race_data['location']
+            )
+            db.add(race)
+            db.commit()
+            db.refresh(race)
+        
+        # Deactivate any existing active registration for this serial
+        existing = db.query(DeviceRegistration).filter(
+            DeviceRegistration.serial_number == serial_number,
+            DeviceRegistration.is_active == True
+        ).first()
+        
+        if existing:
+            existing.is_active = False
+            existing.updated_at = datetime.now(timezone.utc)
+            logger.info(f"Deactivated existing registration for serial {serial_number}")
+        
+        # Create new registration
+        registration = DeviceRegistration(
+            serial_number=serial_number,
+            device_type=device_type.lower(),
+            pilot_token=pilot_token,  # Store the pilot token, not admin token
+            race_uuid=race.id,
+            race_id=race_id,
+            pilot_id=pilot_id,
+            pilot_name=pilot_name,
+            is_active=True
+        )
+        
+        db.add(registration)
+        db.commit()
+        db.refresh(registration)
+        
+        logger.info(f"Registered device {serial_number} ({device_type}) for pilot {pilot_name} in race {race_id}")
+        
+        return {
+            "success": True,
+            "message": f"Device {serial_number} registered successfully",
+            "registration": {
+                "id": str(registration.id),
+                "serial_number": registration.serial_number,
+                "device_type": registration.device_type,
+                "race_id": registration.race_id,
+                "pilot_id": registration.pilot_id,
+                "pilot_name": registration.pilot_name,
+                "is_active": registration.is_active,
+                "created_at": registration.created_at.isoformat()
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error registering device: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to register device: {str(e)}"
+        )
+
+
+@router.get("/api/devices")
+async def list_all_devices(
+    active_only: bool = Query(False, description="Show only active devices"),
+    device_type: Optional[str] = Query(None, description="Filter by device type"),
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    db: Session = Depends(get_replica_db)
+):
+    """
+    List all registered devices (admin endpoint).
+    Requires admin JWT authentication.
+    """
+    # Verify admin JWT token (same as persist endpoint)
+    try:
+        token_data = jwt.decode(
+            credentials.credentials,
+            settings.SECRET_KEY,
+            algorithms=["HS256"],
+            audience="api.hikeandfly.app",
+            issuer="hikeandfly.app",
+            verify=True
+        )
+    except (PyJWTError, jwt.ExpiredSignatureError) as e:
+        raise HTTPException(status_code=403, detail="Invalid or expired token")
+    
+    try:
+        
+        query = db.query(DeviceRegistration)
+        
+        if active_only:
+            query = query.filter(DeviceRegistration.is_active == True)
+        
+        if device_type:
+            query = query.filter(DeviceRegistration.device_type == device_type.lower())
+        
+        devices = query.order_by(DeviceRegistration.created_at.desc()).all()
+        
+        return {
+            "success": True,
+            "total": len(devices),
+            "devices": [{
+                "id": str(device.id),
+                "serial_number": device.serial_number,
+                "device_type": device.device_type,
+                "race_id": device.race_id,
+                "pilot_id": device.pilot_id,
+                "pilot_name": device.pilot_name,
+                "is_active": device.is_active,
+                "created_at": device.created_at.isoformat(),
+                "updated_at": device.updated_at.isoformat()
+            } for device in devices]
+        }
+        
+    except Exception as e:
+        logger.error(f"Error listing devices: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to list devices: {str(e)}"
+        )
+
+
+@router.get("/api/devices/race/{race_id}")
+async def list_race_devices(
+    race_id: str,
+    active_only: bool = Query(True, description="Show only active devices"),
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    db: Session = Depends(get_replica_db)
+):
+    """
+    List all devices registered for a specific race.
+    Requires admin JWT authentication.
+    """
+    # Verify admin JWT token (same as persist endpoint)
+    try:
+        token_data = jwt.decode(
+            credentials.credentials,
+            settings.SECRET_KEY,
+            algorithms=["HS256"],
+            audience="api.hikeandfly.app",
+            issuer="hikeandfly.app",
+            verify=True
+        )
+    except (PyJWTError, jwt.ExpiredSignatureError) as e:
+        raise HTTPException(status_code=403, detail="Invalid or expired token")
+    
+    try:
+        
+        query = db.query(DeviceRegistration).filter(
+            DeviceRegistration.race_id == race_id
+        )
+        
+        if active_only:
+            query = query.filter(DeviceRegistration.is_active == True)
+        
+        devices = query.order_by(DeviceRegistration.pilot_name).all()
+        
+        return {
+            "success": True,
+            "race_id": race_id,
+            "total": len(devices),
+            "devices": [{
+                "id": str(device.id),
+                "serial_number": device.serial_number,
+                "device_type": device.device_type,
+                "pilot_id": device.pilot_id,
+                "pilot_name": device.pilot_name,
+                "is_active": device.is_active,
+                "created_at": device.created_at.isoformat(),
+                "updated_at": device.updated_at.isoformat()
+            } for device in devices]
+        }
+        
+    except Exception as e:
+        logger.error(f"Error listing race devices: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to list race devices: {str(e)}"
+        )
+
+
+@router.patch("/api/devices/{serial_number}/activate")
+async def activate_device(
+    serial_number: str,
+    race_id: str,
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    db: Session = Depends(get_db)
+):
+    """
+    Activate a device for a specific race.
+    Automatically deactivates it from other races.
+    Requires admin JWT authentication.
+    """
+    # Verify admin JWT token (same as persist endpoint)
+    try:
+        token_data = jwt.decode(
+            credentials.credentials,
+            settings.SECRET_KEY,
+            algorithms=["HS256"],
+            audience="api.hikeandfly.app",
+            issuer="hikeandfly.app",
+            verify=True
+        )
+    except (PyJWTError, jwt.ExpiredSignatureError) as e:
+        raise HTTPException(status_code=403, detail="Invalid or expired token")
+    
+    try:
+        
+        # Find the registration for this serial and race
+        registration = db.query(DeviceRegistration).filter(
+            DeviceRegistration.serial_number == serial_number,
+            DeviceRegistration.race_id == race_id
+        ).first()
+        
+        if not registration:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Device {serial_number} not registered for race {race_id}"
+            )
+        
+        # Deactivate any other active registrations for this serial
+        db.query(DeviceRegistration).filter(
+            DeviceRegistration.serial_number == serial_number,
+            DeviceRegistration.id != registration.id,
+            DeviceRegistration.is_active == True
+        ).update({"is_active": False, "updated_at": datetime.now(timezone.utc)})
+        
+        # Activate this registration
+        registration.is_active = True
+        registration.updated_at = datetime.now(timezone.utc)
+        
+        db.commit()
+        
+        logger.info(f"Activated device {serial_number} for race {race_id}")
+        
+        return {
+            "success": True,
+            "message": f"Device {serial_number} activated for race {race_id}",
+            "registration": {
+                "id": str(registration.id),
+                "serial_number": registration.serial_number,
+                "device_type": registration.device_type,
+                "race_id": registration.race_id,
+                "pilot_id": registration.pilot_id,
+                "pilot_name": registration.pilot_name,
+                "is_active": registration.is_active,
+                "updated_at": registration.updated_at.isoformat()
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error activating device: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to activate device: {str(e)}"
+        )
+
+
+@router.patch("/api/devices/{serial_number}/deactivate")
+async def deactivate_device(
+    serial_number: str,
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    db: Session = Depends(get_db)
+):
+    """
+    Deactivate a device.
+    Requires admin JWT authentication.
+    """
+    # Verify admin JWT token (same as persist endpoint)
+    try:
+        token_data = jwt.decode(
+            credentials.credentials,
+            settings.SECRET_KEY,
+            algorithms=["HS256"],
+            audience="api.hikeandfly.app",
+            issuer="hikeandfly.app",
+            verify=True
+        )
+    except (PyJWTError, jwt.ExpiredSignatureError) as e:
+        raise HTTPException(status_code=403, detail="Invalid or expired token")
+    
+    try:
+        
+        # Find active registration for this serial
+        registration = db.query(DeviceRegistration).filter(
+            DeviceRegistration.serial_number == serial_number,
+            DeviceRegistration.is_active == True
+        ).first()
+        
+        if not registration:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No active registration found for device {serial_number}"
+            )
+        
+        # Deactivate the registration
+        registration.is_active = False
+        registration.updated_at = datetime.now(timezone.utc)
+        
+        db.commit()
+        
+        logger.info(f"Deactivated device {serial_number}")
+        
+        return {
+            "success": True,
+            "message": f"Device {serial_number} deactivated",
+            "registration": {
+                "id": str(registration.id),
+                "serial_number": registration.serial_number,
+                "device_type": registration.device_type,
+                "race_id": registration.race_id,
+                "pilot_id": registration.pilot_id,
+                "pilot_name": registration.pilot_name,
+                "is_active": registration.is_active,
+                "updated_at": registration.updated_at.isoformat()
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error deactivating device: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to deactivate device: {str(e)}"
         )
