@@ -186,7 +186,11 @@ class RedisPointQueue:
     async def get_queue_size(self, queue_name: str) -> int:
         """Get current queue size"""
         try:
-            return await self.redis_client.llen(f"list:{queue_name}")
+            # Check ZSET size (primary queue)
+            zset_size = await self.redis_client.zcard(f"queue:{queue_name}")
+            # Also check LIST size for legacy support
+            list_size = await self.redis_client.llen(f"list:{queue_name}")
+            return zset_size + list_size
         except Exception as e:
             logger.error(f"Failed to get queue size: {e}")
             return 0

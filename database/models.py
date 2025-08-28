@@ -1,4 +1,5 @@
 from sqlalchemy import Column, String, Float, DateTime, MetaData, CHAR, BigInteger, Index, Integer, JSON, ForeignKey, UniqueConstraint, text, Boolean
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import UUID
@@ -171,10 +172,9 @@ class NotificationTokenDB(Base):
 class ScoringTracks(Base):
     __tablename__ = 'scoring_tracks'
 
-    # Remove the UUID id field entirely since we're using natural keys
-    flight_uuid = Column(UUID(as_uuid=True), nullable=False)
-    date_time = Column(DateTime(timezone=True),
-                       primary_key=True, nullable=False)
+    # Composite primary key: (flight_uuid, date_time, lat, lon) together form the PK
+    flight_uuid = Column(UUID(as_uuid=True), primary_key=True, nullable=False)
+    date_time = Column(DateTime(timezone=True), primary_key=True, nullable=False)
     lat = Column(Float(precision=53), primary_key=True, nullable=False)
     lon = Column(Float(precision=53), primary_key=True, nullable=False)
     gps_alt = Column(Float(precision=53), nullable=False)
@@ -223,46 +223,8 @@ class ScoringTracks(Base):
         return f"<ScoringTrack(datetime={self.date_time}, lat={self.lat}, lon={self.lon})>"
 
 
-class Flymaster(Base):
-    __tablename__ = 'flymaster'
-
-    date_time = Column(DateTime(timezone=True),
-                       primary_key=True, nullable=False)
-    device_id = Column(Integer, primary_key=True, nullable=False)
-    lat = Column(Float(precision=53), nullable=False)
-    lon = Column(Float(precision=53), nullable=False)
-    gps_alt = Column(Float(precision=53), nullable=False)
-    heading = Column(Float(precision=53), nullable=True)
-    speed = Column(Float(precision=53), nullable=True)
-    # First timestamp from file
-    uploaded_at = Column(DateTime(timezone=True), nullable=True)
-    created_at = Column(DateTime(timezone=True), nullable=False,
-                        default=lambda: datetime.now(timezone.utc))
-    # Add a geometry column for the point location (SRID 4326 = WGS84)
-    geom = Column(Geometry('POINT', srid=4326))
-
-    __table_args__ = (
-        # Time-based indices for hypertable performance
-        Index('idx_flymaster_datetime', 'date_time'),
-        Index('idx_flymaster_device_time', 'device_id', 'date_time'),
-
-        # Unique constraint to prevent duplicate points
-        UniqueConstraint('device_id', 'date_time', 'lat', 'lon',
-                         name='flymaster_unique_point'),
-
-        # Spatial indices
-        Index('idx_flymaster_geom', 'geom', postgresql_using='gist'),
-
-        # Add functional index on transformed geometry for Web Mercator (EPSG:3857)
-        Index('idx_flymaster_transformed_geom',
-              text('ST_Transform(geom, 3857)'), postgresql_using='gist'),
-
-        # Table comment for TimescaleDB hypertable
-        {'comment': 'hypertable:timescaledb:date_time'}
-    )
-
-    def __repr__(self):
-        return f"<Flymaster(device_id={self.device_id}, date_time={self.date_time})>"
+# Flymaster table removed - data now goes directly to live_track_points
+# Flymaster devices are tracked through the flights table with source='flymaster'
 
 
 class SentNotification(Base):
@@ -274,7 +236,7 @@ class SentNotification(Base):
     title = Column(String, nullable=False)
     body = Column(String, nullable=False)
     # Additional data sent with notification
-    data = Column(JSON, nullable=True)
+    data = Column(JSONB, nullable=True)
 
     # Statistics about the send
     total_recipients = Column(Integer, nullable=False, default=0)
@@ -292,7 +254,7 @@ class SentNotification(Base):
     sender_token_subject = Column(String, nullable=True)
 
     # Optional error details (JSON array of errors)
-    error_details = Column(JSON, nullable=True)
+    error_details = Column(JSONB, nullable=True)
 
     # Status flags
     batch_processing = Column(Boolean, nullable=False, default=True)

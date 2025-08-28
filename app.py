@@ -310,5 +310,41 @@ async def queue_status():
         )
 
 
+@app.delete('/queue/clear')
+async def clear_queues():
+    """Clear all Redis queues - useful for removing stuck items"""
+    try:
+        if not await redis_queue.is_connected():
+            return JSONResponse(
+                content={"error": "Redis not connected"},
+                status_code=503
+            )
+        
+        from redis_queue_system.redis_queue import QUEUE_NAMES
+        
+        cleared = {}
+        for queue_name in QUEUE_NAMES.values():
+            # Get count before clearing
+            queue_key = f"queue:{queue_name}"
+            count = await redis_queue.redis_client.zcard(queue_key)
+            if count > 0:
+                # Clear the queue
+                await redis_queue.redis_client.delete(queue_key)
+                cleared[queue_name] = count
+                logger.warning(f"Cleared {count} items from {queue_name}")
+        
+        return {
+            "success": True,
+            "cleared_queues": cleared,
+            "timestamp": datetime.datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error clearing queues: {e}")
+        return JSONResponse(
+            content={"error": str(e)},
+            status_code=500
+        )
+
+
 if __name__ == "__main__":
     uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
