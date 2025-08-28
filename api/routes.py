@@ -4532,9 +4532,23 @@ async def flymaster_points(
                 detail=f"Invalid token: {str(e)}"
             )
 
-        # Get all track points for this flight
-        query = db.query(Flymaster).filter(
-            Flymaster.device_id == serial_id
+        # Get all track points for this Flymaster device
+        # First find flights for this device_id
+        flights = db.query(Flight).filter(
+            Flight.device_id == str(serial_id),
+            Flight.source.in_(['flymaster_live', 'flymaster_upload'])
+        ).all()
+        
+        if not flights:
+            return {
+                "device_id": serial_id,
+                "points": []
+            }
+        
+        # Get track points for these flights
+        flight_uuids = [f.id for f in flights]
+        query = db.query(LiveTrackPoint).filter(
+            LiveTrackPoint.flight_uuid.in_(flight_uuids)
         )
 
         # Apply date filters if provided
@@ -4542,7 +4556,7 @@ async def flymaster_points(
             try:
                 start_datetime = datetime.fromisoformat(
                     start_date.replace('Z', '+00:00'))
-                query = query.filter(Flymaster.date_time >= start_datetime)
+                query = query.filter(LiveTrackPoint.datetime >= start_datetime)
             except ValueError as e:
                 raise HTTPException(
                     status_code=400,
@@ -4553,14 +4567,14 @@ async def flymaster_points(
             try:
                 end_datetime = datetime.fromisoformat(
                     end_date.replace('Z', '+00:00'))
-                query = query.filter(Flymaster.date_time <= end_datetime)
+                query = query.filter(LiveTrackPoint.datetime <= end_datetime)
             except ValueError as e:
                 raise HTTPException(
                     status_code=400,
                     detail=f"Invalid end_date format: {str(e)}. Use ISO 8601 format (e.g., 2025-06-08T18:31:22+03:00)"
                 )
 
-        track_points = query.order_by(Flymaster.date_time).all()
+        track_points = query.order_by(LiveTrackPoint.datetime).all()
 
         if not track_points:
             logger.warning(
@@ -4811,7 +4825,7 @@ async def delete_all_upload_flights(
 
 @router.post("/admin/persist-flymaster-flights")
 async def persist_flymaster_flights(
-    token: str = Query(..., description="Admin auth token"),
+    credentials: HTTPAuthorizationCredentials = Security(security),
     db: Session = Depends(get_db)
 ):
     """
@@ -4820,9 +4834,18 @@ async def persist_flymaster_flights(
     This prevents Flymaster data from being deleted after 2 days by the hypertable retention policy.
     The original live flight and points are preserved.
     """
-    # Simple token check for admin access
-    if token != settings.SECRET_KEY:
-        raise HTTPException(status_code=403, detail="Invalid admin token")
+    # Verify JWT token
+    try:
+        token_data = jwt.decode(
+            credentials.credentials,
+            settings.SECRET_KEY,
+            algorithms=["HS256"],
+            audience="api.hikeandfly.app",
+            issuer="hikeandfly.app",
+            verify=True
+        )
+    except (PyJWTError, jwt.ExpiredSignatureError) as e:
+        raise HTTPException(status_code=403, detail="Invalid or expired token")
     
     try:
         # Get all Flymaster flights that are still in live (not yet persisted)
