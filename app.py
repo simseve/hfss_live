@@ -176,6 +176,14 @@ async def log_request(request: Request, call_next):
 app.include_router(routes.router, tags=['Tracking'], prefix='/tracking')
 app.include_router(scoring.router, tags=['Scoring'], prefix='/scoring')
 
+# TK905B GPS Tracker endpoint (learning mode)
+try:
+    from api.tk905b import router as tk905b_router
+    app.include_router(tk905b_router, tags=['TK905B'], prefix='/tracking')
+    logger.info("TK905B learning endpoint registered at /tracking/tk905b/*")
+except ImportError:
+    logger.warning("TK905B endpoint not available")
+
 # Admin endpoints for queue management
 try:
     from api.queue_admin import router as queue_admin_router
