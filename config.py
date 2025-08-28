@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     FIREBASE_CREDENTIALS: Optional[str] = None
     FIREBASE_KEY_PATH: Optional[str] = None
 
+    # GPS TCP Server configuration
+    GPS_TCP_PORT: int = 9090
+    GPS_TCP_ENABLED: bool = False
+    
     # Redis configuration
     # Full Redis URL (overrides individual settings)
     REDIS_URL: Optional[str] = None
