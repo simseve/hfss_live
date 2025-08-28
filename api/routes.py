@@ -2,8 +2,8 @@ from api.flight_state import determine_if_landed, detect_flight_state
 from fastapi import APIRouter, Depends, HTTPException, Query, Security, WebSocket, WebSocketDisconnect, Response, UploadFile, File, Form, Request
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
-from database.schemas import LiveTrackingRequest, LiveTrackPointCreate, FlightResponse, TrackUploadRequest, NotificationCommand, SubscriptionRequest, UnsubscriptionRequest, NotificationRequest, FlymasterBatchCreate, FlymasterBatchResponse, FlymasterPointCreate, SentNotificationResponse
-from database.models import UploadedTrackPoint, Flight, LiveTrackPoint, Race, NotificationTokenDB, Flymaster, SentNotification
+from database.schemas import LiveTrackingRequest, LiveTrackPointCreate, FlightResponse, TrackUploadRequest, NotificationCommand, SubscriptionRequest, UnsubscriptionRequest, NotificationRequest, SentNotificationResponse
+from database.models import UploadedTrackPoint, Flight, LiveTrackPoint, Race, NotificationTokenDB, SentNotification
 from typing import Dict, Optional, List
 from database.db_replica import get_db, get_replica_db
 import logging
@@ -101,15 +101,10 @@ async def live_tracking(
         device_id = data.device_id if hasattr(
             data, 'device_id') else 'anonymous'
 
-        latest_point = data.track_points[-1]
-        latest_datetime = datetime.fromisoformat(
-            latest_point['datetime'].replace('Z', '+00:00')).astimezone(timezone.utc)
-
         if not flight:
-            first_point = data.track_points[0]
-            first_datetime = datetime.fromisoformat(
-                first_point['datetime'].replace('Z', '+00:00')).astimezone(timezone.utc)
 
+            # Create flight without first_fix/last_fix/total_points
+            # These will be automatically updated by database triggers
             flight = Flight(
                 flight_id=data.flight_id,
                 race_uuid=race.id,
@@ -118,19 +113,6 @@ async def live_tracking(
                 pilot_name=pilot_name,
                 created_at=datetime.now(timezone.utc),
                 source='live',
-                first_fix={
-                    'lat': first_point['lat'],
-                    'lon': first_point['lon'],
-                    'elevation': first_point.get('elevation'),
-                    'datetime': first_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
-                },
-                last_fix={
-                    'lat': latest_point['lat'],
-                    'lon': latest_point['lon'],
-                    'elevation': latest_point.get('elevation'),
-                    'datetime': latest_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
-                },
-                total_points=len(data.track_points),
                 device_id=device_id
             )
             db.add(flight)
@@ -141,23 +123,18 @@ async def live_tracking(
                 detail="Not authorized to update this flight"
             )
         else:
-            # Update last_fix, total_points and ensure pilot_name is current
-            flight.last_fix = {
-                'lat': latest_point['lat'],
-                'lon': latest_point['lon'],
-                'elevation': latest_point.get('elevation'),
-                'datetime': latest_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
-            }
-            flight.total_points = flight.total_points + len(data.track_points)
-            flight.pilot_name = pilot_name  # Update pilot name in case it changed
+            # Only update pilot name if it changed
+            # Triggers will handle first_fix, last_fix, and total_points
+            if flight.pilot_name != pilot_name:
+                flight.pilot_name = pilot_name
 
         try:
             db.commit()
-            # Asynchronously update the flight state with 'live' source (don't wait for it to complete)
-            asyncio.create_task(update_flight_state(
-                flight.id, db, source='live'))
+            # Refresh the flight object to get the actual UUID from database
+            db.refresh(flight)
+            # Flight must be committed before we can reference it in track points
             logger.info(
-                f"Successfully updated flight record: {data.flight_id}")
+                f"Successfully created/updated flight record: {data.flight_id} with UUID: {flight.id}")
         except SQLAlchemyError as e:
             db.rollback()
             logger.error(f"Failed to update flight: {str(e)}")
@@ -197,9 +174,8 @@ async def live_tracking(
             )
 
             if queued:
-                # Commit flight updates immediately
-                db.commit()
-                asyncio.create_task(update_flight_state(flight.id, db))
+                # Flight is already committed, update state asynchronously
+                asyncio.create_task(update_flight_state(flight.id, db, source='live'))
                 logger.info(
                     f"Successfully queued {len(track_points_data)} track points for flight {data.flight_id}")
 
@@ -218,7 +194,7 @@ async def live_tracking(
                 )
                 db.execute(stmt, track_points_data)
                 db.commit()
-                asyncio.create_task(update_flight_state(flight.id, db))
+                asyncio.create_task(update_flight_state(flight.id, db, source='live'))
                 logger.info(
                     f"Successfully saved track points for flight {data.flight_id} (fallback)")
 
@@ -315,15 +291,10 @@ async def upload_track(
             device_id = upload_data.device_id if hasattr(
                 upload_data, 'device_id') else 'anonymous'
 
-            # Process first and last points
-            first_point = upload_data.track_points[0]
-            last_point = upload_data.track_points[-1]
-            first_datetime = datetime.fromisoformat(
-                first_point['datetime'].replace('Z', '+00:00')).astimezone(timezone.utc)
-            last_datetime = datetime.fromisoformat(
-                last_point['datetime'].replace('Z', '+00:00')).astimezone(timezone.utc)
+            # No need to process first/last points - triggers will handle this
 
-            # Create new flight with all fields aligned
+            # Create new flight without first_fix/last_fix/total_points
+            # These will be automatically updated by database triggers
             flight = Flight(
                 flight_id=upload_data.flight_id,
                 race_uuid=race.id,
@@ -332,25 +303,14 @@ async def upload_track(
                 pilot_name=pilot_name,
                 created_at=datetime.now(timezone.utc),
                 source='upload',
-                first_fix={
-                    'lat': first_point['lat'],
-                    'lon': first_point['lon'],
-                    'elevation': first_point.get('elevation'),
-                    'datetime': first_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
-                },
-                last_fix={
-                    'lat': last_point['lat'],
-                    'lon': last_point['lon'],
-                    'elevation': last_point.get('elevation'),
-                    'datetime': last_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
-                },
-                total_points=len(upload_data.track_points),
                 device_id=device_id
             )
             db.add(flight)
 
             try:
                 db.commit()
+                # Refresh the flight object to get the actual UUID from database
+                db.refresh(flight)
             except SQLAlchemyError as e:
                 db.rollback()
                 logger.error(f"Failed to create flight record: {str(e)}")
@@ -373,12 +333,36 @@ async def upload_track(
                 points_data.append(point_data)
 
             try:
-                # Queue points for background processing instead of immediate DB insert
-                queued = await redis_queue.queue_points(
-                    QUEUE_NAMES['upload'],
-                    points_data,
-                    priority=2  # Medium priority for uploads
-                )
+                # For large uploads, split into chunks for better processing
+                # Increased chunk size since the system can handle it
+                max_points_per_chunk = 1000
+                if len(points_data) > max_points_per_chunk:
+                    logger.info(f"Large upload detected ({len(points_data)} points), splitting into chunks")
+                    chunks = [points_data[i:i+max_points_per_chunk] 
+                             for i in range(0, len(points_data), max_points_per_chunk)]
+                    
+                    all_queued = True
+                    for i, chunk in enumerate(chunks):
+                        chunk_queued = await redis_queue.queue_points(
+                            QUEUE_NAMES['upload'],
+                            chunk,
+                            priority=2  # Medium priority for uploads
+                        )
+                        if not chunk_queued:
+                            logger.error(f"Failed to queue chunk {i+1}/{len(chunks)}")
+                            all_queued = False
+                            break
+                        else:
+                            logger.info(f"Queued chunk {i+1}/{len(chunks)} with {len(chunk)} points")
+                    
+                    queued = all_queued
+                else:
+                    # Small upload, queue as single batch
+                    queued = await redis_queue.queue_points(
+                        QUEUE_NAMES['upload'],
+                        points_data,
+                        priority=2  # Medium priority for uploads
+                    )
 
                 if queued:
                     # Commit flight record immediately
@@ -4423,195 +4407,51 @@ async def upload_flymaster_file(
                     f"Skipping invalid line: {line}, error: {str(e)}")
                 continue
 
-        # Create flight management for Flymaster data
-        # Use device_id as both pilot_id and in flight_id generation
-        pilot_id = str(device_id)
-        pilot_name = f"Flymaster-pilot-{device_id}"
-        # Make race_id unique per device
-        race_id = f"flymaster-race-{device_id}"
+        # Note: Flight creation is now handled by the Redis queue processor
+        # The processor will:
+        # 1. Check for existing flights within 2-hour window
+        # 2. Create new flights when gaps > 2 hours detected
+        # 3. Convert points to live_track_points format
 
-        # Create a flight_id using device_id and first point timestamp
-        if points:  # Use original points array instead of track_points_data
-            first_point = points[0]
-            first_timestamp = first_point['date_time'].strftime(
-                '%Y-%m-%dT%H:%M:%SZ')
-            flight_id = f"flymaster-{device_id}-{first_timestamp}"
-        else:
-            flight_id = f"flymaster-{device_id}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
-
-        # Check/create race record for Flymaster data
-        race = db.query(Race).filter(Race.race_id == race_id).first()
-        if not race:
-            race = Race(
-                race_id=race_id,
-                name=f"Flymaster Device {device_id}",  # More specific name
-                date=datetime.now(timezone.utc).date(),
-                end_date=datetime.now(
-                    timezone.utc).date() + timedelta(days=365),
-                timezone="UTC",
-                location="Global"
-            )
-            db.add(race)
-            try:
-                db.commit()
-            except SQLAlchemyError as e:
-                db.rollback()
-                logger.error(
-                    f"Failed to create Flymaster race record: {str(e)}")
-
-        # Flight management logic adapted from live_tracking
-        flight = db.query(Flight).filter(
-            Flight.device_id == str(device_id),
-            Flight.source == 'flymaster').first()
-
-        if points:
-            latest_point = points[-1]
-            first_point = points[0]
-            first_datetime = first_point['date_time'].astimezone(timezone.utc)
-            latest_datetime = latest_point['date_time'].astimezone(
-                timezone.utc)
-
-            if not flight:
-                flight = Flight(
-                    flight_id=flight_id,
-                    race_uuid=race.id,
-                    race_id=race_id,
-                    pilot_id=pilot_id,
-                    pilot_name=pilot_name,
-                    created_at=datetime.now(timezone.utc),
-                    source='flymaster',
-                    first_fix={
-                        'lat': first_point['lat'],
-                        'lon': first_point['lon'],
-                        'gps_alt': first_point.get('gps_alt'),
-                        'datetime': first_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
-                    },
-                    last_fix={
-                        'lat': latest_point['lat'],
-                        'lon': latest_point['lon'],
-                        'gps_alt': latest_point.get('gps_alt'),
-                        'datetime': latest_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
-                    },
-                    total_points=len(points),
-                    device_id=str(device_id)
-                )
-                db.add(flight)
-            else:
-                # Update last_fix, total_points for existing flight
-                flight.last_fix = {
-                    'lat': latest_point['lat'],
-                    'lon': latest_point['lon'],
-                    'gps_alt': latest_point.get('gps_alt'),
-                    'datetime': latest_datetime.strftime('%Y-%m-%dT%H:%M:%SZ')
-                }
-                flight.total_points = flight.total_points + \
-                    len(points)
-                flight.pilot_name = pilot_name  # Update pilot name in case it changed
-
-            try:
-                db.commit()
-                # Asynchronously update the flight state with 'flymaster' source
-                asyncio.create_task(update_flight_state(
-                    flight.id, db, source='flymaster'))
-                logger.info(
-                    f"Successfully updated Flymaster flight record: {flight_id}")
-            except SQLAlchemyError as e:
-                db.rollback()
-                logger.error(f"Failed to update Flymaster flight: {str(e)}")
-                raise HTTPException(
-                    status_code=500,
-                    detail="Failed to update flight record"
-                )
-
-        # Create the batch request
-        flymaster_points = [FlymasterPointCreate(**point) for point in points]
-
-        batch_request = FlymasterBatchCreate(
-            device_serial=device_serial,
-            sha256key=sha256key,
-            points=flymaster_points
-        )
-
-        # Use fast batch insert without duplicate checking
+        # Queue points for background processing
         points_added = 0
         points_skipped = 0
-
+        
         logger.info(
-            f"Processing Flymaster file upload for device {device_id} with {len(flymaster_points)} points")
+            f"Processing Flymaster file upload for device {device_id} with {len(points)} points")
 
-        if flymaster_points:
+        if points:
             try:
-                # Prepare points for queueing
-                points_for_queue = []
-                for point in flymaster_points:
-                    point_dict = {
-                        "device_id": point.device_id,
-                        "date_time": point.date_time,
-                        "lat": point.lat,
-                        "lon": point.lon,
-                        "gps_alt": point.gps_alt,
-                        "heading": point.heading,
-                        "speed": point.speed,
-                        "uploaded_at": point.uploaded_at or datetime.now(timezone.utc)
-                    }
-                    points_for_queue.append(point_dict)
-
                 # Queue for background processing
+                # The queue processor will handle flight creation/updates
                 queued = await redis_queue.queue_points(
                     QUEUE_NAMES['flymaster'],
-                    points_for_queue,
+                    points,  # Send the raw points dictionary
                     priority=1
                 )
 
                 if queued:
-                    points_added = len(flymaster_points)
+                    points_added = len(points)
                     logger.info(
-                        f"Successfully queued {points_added} Flymaster points for background processing")
+                        f"Successfully queued {points_added} Flymaster points for conversion to live tracking")
                 else:
-                    # Fallback to direct insertion if queueing fails
-                    flymaster_objects = []
-
-                    for point in flymaster_points:
-                        point_data = {
-                            "device_id": point.device_id,
-                            "date_time": point.date_time,
-                            "lat": point.lat,
-                            "lon": point.lon,
-                            "gps_alt": point.gps_alt,
-                            "heading": point.heading,
-                            "speed": point.speed,
-                            "uploaded_at": point.uploaded_at or datetime.now(timezone.utc),
-                        }
-                        flymaster_objects.append(point_data)
-
-                    # Use insert().on_conflict_do_nothing() for handling duplicates gracefully
-                    stmt = insert(Flymaster).on_conflict_do_nothing(
-                        index_elements=['device_id', 'date_time', 'lat', 'lon']
+                    logger.error("Failed to queue Flymaster points")
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Failed to queue points for processing"
                     )
-                    db.execute(stmt, flymaster_objects)
-                    db.commit()
-                    points_added = len(flymaster_objects)
-
-                    logger.info(
-                        f"Successfully inserted {points_added} Flymaster points via batch insert (fallback)")
 
             except Exception as e:
-                db.rollback()
-                logger.error(f"Error processing Flymaster points: {str(e)}")
+                logger.error(f"Error queueing Flymaster points: {str(e)}")
                 raise HTTPException(
                     status_code=500,
                     detail=f"Failed to process points: {str(e)}"
                 )
 
         logger.info(
-            f"Flymaster file upload completed: {points_added} added, {points_skipped} skipped")
+            f"Flymaster file upload completed: {points_added} queued")
 
-        # return FlymasterBatchResponse(
-        #     device_serial=device_serial,
-        #     points_added=points_added,
-        #     points_skipped=points_skipped,
-        #     message=f"Successfully processed {points_added} points from file, skipped {points_skipped} duplicates"
-        # )
+        # Return plain text "OK" as expected by Flymaster devices
         return PlainTextResponse("OK", status_code=200)
 
     except HTTPException:

@@ -4,9 +4,12 @@ from pydantic import UUID4
 
 
 class Settings(BaseSettings):
-    DATABASE_URI: str
-    # Support both DATABASE_URL for compatibility
-    DATABASE_URL: Optional[str] = None
+    DATABASE_URL: str  # Primary database connection
+    # Legacy support - will use DATABASE_URL if not set
+    @property
+    def DATABASE_URI(self) -> str:
+        """Backward compatibility for DATABASE_URI"""
+        return self.DATABASE_URL
     # Read-only replica database URI (defaults to primary if not set)
     DATABASE_REPLICA_URI: Optional[str] = None
     # Flag to enable/disable replica usage
@@ -40,13 +43,14 @@ class Settings(BaseSettings):
     REDIS_MAX_CONNECTIONS: int = 20
 
     def get_redis_url(self) -> str:
-        """Generate Redis URL based on environment (dev vs prod)"""
+        """Get Redis URL from environment or construct from individual settings"""
+        # Always prefer REDIS_URL from environment if set
         if self.REDIS_URL:
             return self.REDIS_URL
 
-        # Use different hostnames for dev vs prod
-        host = "redis" if self.PROD else "192.168.68.130"
-
+        # Fallback to constructing URL from individual settings
+        host = self.REDIS_HOST
+        
         if self.REDIS_PASSWORD:
             # Include password in URL for authentication
             return f"redis://:{self.REDIS_PASSWORD}@{host}:{self.REDIS_PORT}/{self.REDIS_DB}"
