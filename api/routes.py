@@ -490,6 +490,9 @@ async def get_pilot_race_tracks(
         # Format track information
         tracks = []
         for flight in flights:
+            # Skip flights without fixes
+            if not flight.first_fix or not flight.last_fix:
+                continue
             # Calculate metrics from first_fix and last_fix
             first_datetime = datetime.fromisoformat(
                 flight.first_fix['datetime'].replace('Z', '+00:00'))
@@ -839,9 +842,12 @@ async def get_live_points(
         if last_fix_dt:
             filter_time = datetime.fromisoformat(
                 last_fix_dt.replace('Z', '+00:00')).astimezone(timezone.utc)
-        else:
+        elif flight.first_fix:
             filter_time = datetime.fromisoformat(
                 flight.first_fix['datetime'].replace('Z', '+00:00')).astimezone(timezone.utc)
+        else:
+            # No fix data available, use current time
+            filter_time = datetime.now(timezone.utc)
 
         # Apply the time filter and order the results
         # Remove the func.timezone() call since we're already handling UTC conversion
@@ -922,7 +928,7 @@ async def get_live_points(
                 # Number of points in filtered result
                 "totalPoints": len(track_points),
                 # From flight object
-                "flightFirstFix": flight.first_fix['datetime'],
+                "flightFirstFix": flight.first_fix['datetime'] if flight.first_fix else None,
                 "flightTotalPoints": flight.total_points         # Total points in flight
             }
         }
@@ -1163,7 +1169,7 @@ async def get_uploaded_points(
                 "lastFixTime": track_points[-1].datetime.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 # Number of points in filtered result
                 "totalPoints": len(track_points),
-                "flightFirstFix": flight.first_fix['datetime'],
+                "flightFirstFix": flight.first_fix['datetime'] if flight.first_fix else None,
                 "flightTotalPoints": flight.total_points         # Total points in flight
             }
         }
@@ -1403,7 +1409,7 @@ async def get_live_users(
         for flight in flights:
             pilot_id = str(flight.pilot_id)
             # Only consider live flights for lastLoc
-            if flight.source == 'live':
+            if flight.source == 'live' and flight.last_fix:
                 current_fix_time = datetime.fromisoformat(
                     flight.last_fix['datetime'].replace('Z', '+00:00'))
 
@@ -1419,6 +1425,10 @@ async def get_live_users(
 
         for flight in flights:
             pilot_id = str(flight.pilot_id)
+            
+            # Skip flights without any fixes yet
+            if not flight.first_fix or not flight.last_fix:
+                continue
 
             # Create flight_info dictionary
             # Get flight state
@@ -1658,6 +1668,10 @@ async def websocket_tracking_endpoint(
 
         for flight in flights:
             pilot_id = str(flight.pilot_id)
+            
+            # Skip flights without fixes
+            if not flight.first_fix or not flight.last_fix:
+                continue
 
             # If we haven't seen this pilot yet, this is their most recent flight
             if pilot_id not in pilot_latest_flights:
@@ -2822,8 +2836,8 @@ async def get_track_preview(
 
         # Get start location information using Google Geocoding API
         start_location = {
-            "lat": float(flight.first_fix['lat']),
-            "lon": float(flight.first_fix['lon']),
+            "lat": float(flight.first_fix['lat']) if flight.first_fix else 0,
+            "lon": float(flight.first_fix['lon']) if flight.first_fix else 0,
             "formatted_address": None,
             "locality": None,
             "administrative_area": None,
