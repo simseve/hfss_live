@@ -4933,7 +4933,7 @@ async def persist_flymaster_flights(
                 chunk_size = 100
                 for i in range(0, len(upload_points), chunk_size):
                     chunk = upload_points[i:i + chunk_size]
-                    await redis_queue.queue_points('upload', chunk)
+                    await redis_queue.queue_points(QUEUE_NAMES['upload'], chunk)
                 
                 points_added = len(upload_points)
                 total_points_copied += points_added
