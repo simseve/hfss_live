@@ -217,8 +217,9 @@ def update_flight_state_in_db(flight_uuid, db, force_update=False, source=None):
             pass
 
     # Handle uploaded flights specially - they always have the 'uploaded' state
-    if source == 'upload' or source == 'flymaster' or (flight and flight.source in ['upload', 'flymaster']):
-        reason = 'flymaster_uploaded' if source == 'flymaster' else 'track_uploaded'
+    # Check if source contains 'upload' (covers 'upload', 'flymaster_upload', etc.)
+    if (source and 'upload' in source) or (flight and flight.source and 'upload' in flight.source):
+        reason = 'flymaster_uploaded' if source and 'flymaster' in source else 'track_uploaded'
         state_info = {
             'state': 'uploaded',
             'confidence': 'high',

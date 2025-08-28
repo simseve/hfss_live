@@ -159,16 +159,27 @@ class PointProcessor:
         """Process uploaded track points"""
         try:
             with Session() as db:
-                # Use the dictionaries directly for batch insert
+                # Convert datetime strings back to datetime objects if needed
+                processed_points = []
+                for point in points:
+                    processed_point = point.copy()
+                    # Handle datetime conversion
+                    if 'datetime' in processed_point and isinstance(processed_point['datetime'], str):
+                        from datetime import datetime
+                        processed_point['datetime'] = datetime.fromisoformat(
+                            processed_point['datetime'].replace('Z', '+00:00')
+                        )
+                    processed_points.append(processed_point)
+                
                 # Batch insert with conflict handling
                 stmt = insert(UploadedTrackPoint).on_conflict_do_nothing(
                     index_elements=['flight_id', 'lat', 'lon', 'datetime']
                 )
-                db.execute(stmt, points)
+                db.execute(stmt, processed_points)
                 db.commit()
 
                 logger.info(
-                    f"Successfully processed {len(points)} upload points")
+                    f"Successfully processed {len(processed_points)} upload points")
                 return True
 
         except SQLAlchemyError as e:
@@ -317,7 +328,7 @@ class PointProcessor:
                 pilot_id=pilot_id,
                 pilot_name=pilot_name,
                 created_at=datetime.now(timezone.utc),
-                source='flymaster',
+                source='flymaster_live',
                 device_id=str(device_id)
                 # first_fix and last_fix will be handled by triggers
             )
