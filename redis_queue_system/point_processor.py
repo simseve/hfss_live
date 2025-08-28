@@ -257,85 +257,61 @@ class PointProcessor:
     def _get_or_create_flymaster_flight(self, db, device_id: int, first_point: Dict):
         """Get existing flight or create new one for Flymaster device
         
-        Current behavior:
-        - Uses a single persistent flight per device
-        - All points from the same device go into the same flight
-        
-        Future behavior (when end-of-flight signal is implemented):
-        - When Flymaster sends end-of-flight signal, close current flight
-        - Create new flight with timestamp suffix for subsequent points
-        - Always append to the most recent (latest) flight for that device serial
-        - Flight ID format will be: flymaster-{device_id}-{timestamp}
+        Uses the same logic as live/upload - race and pilot info comes from device registration.
+        Points are only processed if the device is registered with valid race/pilot info.
         """
         from database.models import Flight, Race
         from datetime import datetime, timedelta
         
         try:
-            # TODO: When end-of-flight signal is implemented, uncomment this section:
-            # # Get the most recent flight for this device
-            # latest_flight = db.query(Flight).filter(
-            #     Flight.device_id == str(device_id),
-            #     Flight.source == 'flymaster'
-            # ).order_by(Flight.created_at.desc()).first()
-            # 
-            # # If flight exists and is not closed, use it
-            # if latest_flight and not latest_flight.is_closed:  # Add is_closed field when implemented
-            #     return latest_flight
-            # 
-            # # Otherwise create new flight with timestamp
-            # point_datetime = first_point['date_time']
-            # if isinstance(point_datetime, str):
-            #     point_datetime = datetime.fromisoformat(point_datetime.replace('Z', '+00:00'))
-            # flight_timestamp = point_datetime.strftime('%Y%m%d-%H%M%S')
-            # flight_id = f"flymaster-{device_id}-{flight_timestamp}"
+            # Get race and pilot info from the point (added by API endpoint from registration)
+            race_id = first_point.get('race_id')
+            pilot_id = first_point.get('pilot_id')
+            pilot_name = first_point.get('pilot_name')
+            race_uuid = first_point.get('race_uuid')
             
-            # CURRENT IMPLEMENTATION: Single persistent flight per device
-            flight_id = f"flymaster-{device_id}-persistent"
+            # If any required info is missing, device is not properly registered
+            if not all([race_id, pilot_id, pilot_name, race_uuid]):
+                logger.warning(f"Device {device_id} missing registration info - skipping points")
+                return None
+            
+            # Verify the race exists (should exist from registration)
+            race = db.query(Race).filter(Race.race_id == race_id).first()
+            if not race:
+                logger.error(f"Race {race_id} not found for device {device_id}")
+                return None
+            
+            # Create flight ID using same pattern as live/upload
+            # TODO: When end-of-flight signal is implemented, add timestamp suffix
+            flight_id = f"flymaster-{pilot_id}-{race_id}-{device_id}"
             
             # Check if we already have this flight
             existing_flight = db.query(Flight).filter(
-                Flight.flight_id == flight_id
+                Flight.flight_id == flight_id,
+                Flight.source == 'flymaster_live'
             ).first()
             
             if existing_flight:
                 logger.debug(f"Using existing Flymaster flight: {flight_id}")
                 return existing_flight
             
-            # Create new persistent flight for this device
-            pilot_id = str(device_id)
-            pilot_name = f"Flymaster-{device_id}"
-            race_id = f"flymaster-race-{device_id}"
-            
-            # Ensure race exists
-            race = db.query(Race).filter(Race.race_id == race_id).first()
-            if not race:
-                race = Race(
-                    race_id=race_id,
-                    name=f"Flymaster Device {device_id}",
-                    date=datetime.now(timezone.utc).date(),
-                    end_date=datetime.now(timezone.utc).date() + timedelta(days=365),
-                    timezone="UTC",
-                    location="Global"
-                )
-                db.add(race)
-                db.commit()
-            
-            # Create new flight
+            # Create new flight using registration data (same as live/upload)
             flight = Flight(
                 flight_id=flight_id,
-                race_uuid=race.id,
+                race_uuid=race.id,  # Use race UUID from database
                 race_id=race_id,
                 pilot_id=pilot_id,
                 pilot_name=pilot_name,
                 created_at=datetime.now(timezone.utc),
-                source='flymaster_live',
+                source='flymaster_live',  # Mark as Flymaster live data
                 device_id=str(device_id)
-                # first_fix and last_fix will be handled by triggers
+                # first_fix and last_fix will be handled by database triggers
             )
             db.add(flight)
             db.commit()
+            db.refresh(flight)
             
-            logger.info(f"Created new Flymaster flight: {flight_id}")
+            logger.info(f"Created Flymaster flight {flight_id} for {pilot_name} in race {race_id}")
             return flight
             
         except Exception as e:

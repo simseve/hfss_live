@@ -227,6 +227,44 @@ class ScoringTracks(Base):
 # Flymaster devices are tracked through the flights table with source='flymaster'
 
 
+class DeviceRegistration(Base):
+    __tablename__ = 'device_registrations'
+
+    id = Column(UUID(as_uuid=True), primary_key=True,
+                nullable=False, default=uuid.uuid4)
+    serial_number = Column(String, nullable=False)
+    device_type = Column(String, nullable=False, default='flymaster')  # flymaster, skytraxx, etc.
+    pilot_token = Column(String, nullable=False)  # Raw JWT token
+    race_uuid = Column(UUID(as_uuid=True), ForeignKey(
+        'races.id', ondelete='CASCADE'), nullable=False)
+    race_id = Column(String, nullable=False)  # Extracted for convenience
+    pilot_id = Column(String, nullable=False)  # Extracted for convenience
+    pilot_name = Column(String, nullable=False)  # Extracted for convenience
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False,
+                        default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False,
+                        default=lambda: datetime.now(timezone.utc),
+                        onupdate=lambda: datetime.now(timezone.utc))
+    
+    # Relationships
+    race = relationship("Race", backref="device_registrations")
+    
+    __table_args__ = (
+        Index('idx_device_serial', 'serial_number'),
+        Index('idx_device_serial_active', 'serial_number', 'is_active'),
+        Index('idx_device_race', 'race_uuid'),
+        Index('idx_device_type', 'device_type'),
+        # Ensure only one active serial number across all races
+        Index('idx_device_unique_active_serial', 'serial_number',
+              unique=True,
+              postgresql_where=text('is_active = true')),
+    )
+
+    def __repr__(self):
+        return f"<DeviceRegistration(serial={self.serial_number}, type={self.device_type}, pilot={self.pilot_name}, race={self.race_id})>"
+
+
 class SentNotification(Base):
     __tablename__ = 'sent_notifications'
 
