@@ -5701,3 +5701,73 @@ async def deactivate_all_devices_for_race(
             status_code=500,
             detail=f"Failed to deactivate devices: {str(e)}"
         )
+
+
+@router.delete("/tracking/api/devices/{device_uuid}")
+async def delete_device_by_uuid(
+    device_uuid: UUID,
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    db: Session = Depends(get_db)
+):
+    """
+    Delete a device registration by UUID.
+    This permanently removes the device registration from the database.
+    Requires admin JWT authentication.
+    """
+    # Verify admin JWT token
+    try:
+        token_data = jwt.decode(
+            credentials.credentials,
+            settings.SECRET_KEY,
+            algorithms=["HS256"],
+            audience="api.hikeandfly.app",
+            issuer="hikeandfly.app",
+            verify=True
+        )
+    except (PyJWTError, jwt.ExpiredSignatureError) as e:
+        raise HTTPException(status_code=403, detail="Invalid or expired token")
+    
+    try:
+        # Find the registration by UUID
+        registration = db.query(DeviceRegistration).filter(
+            DeviceRegistration.id == device_uuid
+        ).first()
+        
+        if not registration:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Device registration not found for UUID {device_uuid}"
+            )
+        
+        # Store device info for response before deletion
+        device_info = {
+            "id": str(registration.id),
+            "serial_number": registration.serial_number,
+            "device_type": registration.device_type,
+            "race_id": registration.race_id,
+            "pilot_id": registration.pilot_id,
+            "pilot_name": registration.pilot_name,
+            "was_active": registration.is_active
+        }
+        
+        # Delete the registration
+        db.delete(registration)
+        db.commit()
+        
+        logger.info(f"Deleted device {device_uuid} (serial: {device_info['serial_number']}) from race {device_info['race_id']}")
+        
+        return {
+            "success": True,
+            "message": f"Device {device_uuid} deleted successfully",
+            "deleted_device": device_info
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error deleting device by UUID: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete device: {str(e)}"
+        )
