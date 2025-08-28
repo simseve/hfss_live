@@ -9,10 +9,19 @@ import time
 import signal
 import sys
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, Set
+from typing import Optional, Dict, Any, Set, List
 from collections import defaultdict, deque
 import re
 import traceback
+
+# Import protocol handlers
+try:
+    from protocols import parse_message, create_response, get_supported_protocols
+except ImportError:
+    # Fallback if protocols module not available yet
+    parse_message = None
+    create_response = None
+    get_supported_protocols = None
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +36,7 @@ RATE_LIMIT_WINDOW = 60  # Rate limit window in seconds
 HEARTBEAT_INTERVAL = 30  # Send heartbeat every 30 seconds
 MAX_RECONNECT_ATTEMPTS = 100  # Max reconnection attempts (trackers reconnect often)
 RECONNECT_COOLDOWN = 300  # 5 min window for counting reconnections
-MIN_MESSAGE_INTERVAL = 2  # Minimum seconds between messages (reduced for reconnection bursts)
+MIN_MESSAGE_INTERVAL = 0.3  # Minimum seconds between messages (allows batch sending)
 MAX_RETRANSMISSIONS = 3  # Maximum retransmission attempts
 RETRANSMISSION_TIMEOUT = 2  # Seconds to wait for ACK
 AUTO_RESTART_ON_ERRORS = 5  # Auto restart after N consecutive errors
@@ -296,12 +305,21 @@ class GPSProtocolParser:
                 
                 # Parse coordinates with validation
                 try:
-                    lat = float(command_parts[4])
+                    # Parse latitude in DDMM.MMMM format
+                    lat_str = command_parts[4]
+                    lat_deg = float(lat_str[:2])  # First 2 digits are degrees
+                    lat_min = float(lat_str[2:])  # Rest are minutes
+                    lat = lat_deg + (lat_min / 60.0)
                     lat_dir = command_parts[5]  # N/S
-                    lon = float(command_parts[6])
+                    
+                    # Parse longitude in DDDMM.MMMM format  
+                    lon_str = command_parts[6]
+                    lon_deg = float(lon_str[:3]) if len(lon_str) > 4 else float(lon_str[:2])  # First 3 digits for longitude
+                    lon_min = float(lon_str[3:]) if len(lon_str) > 4 else float(lon_str[2:])
+                    lon = lon_deg + (lon_min / 60.0)
                     lon_dir = command_parts[7]  # E/W
                     
-                    # Convert to decimal degrees
+                    # Apply direction
                     if lat_dir == 'S':
                         lat = -lat
                     if lon_dir == 'W':
@@ -351,6 +369,81 @@ class GPSProtocolParser:
                     pass  # Optional fields, ignore errors
                     
                 return result
+                
+            # Parse UD3 (batch location) messages  
+            elif command == 'UD3':
+                # UD3 format: UD3,COUNT,RECORD1;RECORD2;...
+                # Each record: DATE,TIME,STATUS,LAT,LAT_DIR,LON,LON_DIR,SPEED,HEADING,ALT
+                if len(command_parts) < 3:
+                    return None
+                    
+                try:
+                    count = int(command_parts[1])
+                    batch_data = ','.join(command_parts[2:])  # Rejoin remaining parts
+                    records = batch_data.split(';')  # Split by semicolon
+                    
+                    if len(records) != count:
+                        logger.warning(f"UD3 count mismatch: expected {count}, got {len(records)}")
+                    
+                    results = []
+                    for record_str in records:
+                        record_parts = record_str.split(',')
+                        if len(record_parts) < 10:
+                            continue
+                            
+                        # Parse each record similar to UD2
+                        date_str = record_parts[0]
+                        time_str = record_parts[1]
+                        
+                        try:
+                            dt = datetime.strptime(f"{date_str}{time_str}", "%d%m%y%H%M%S")
+                        except ValueError:
+                            continue
+                            
+                        valid = record_parts[2] == 'A'
+                        
+                        # Parse coordinates
+                        lat_str = record_parts[3]
+                        lat_deg = float(lat_str[:2])
+                        lat_min = float(lat_str[2:])
+                        lat = lat_deg + (lat_min / 60.0)
+                        if record_parts[4] == 'S':
+                            lat = -lat
+                            
+                        lon_str = record_parts[5]
+                        lon_deg = float(lon_str[:3]) if len(lon_str) > 4 else float(lon_str[:2])
+                        lon_min = float(lon_str[3:]) if len(lon_str) > 4 else float(lon_str[2:])
+                        lon = lon_deg + (lon_min / 60.0)
+                        if record_parts[6] == 'W':
+                            lon = -lon
+                            
+                        point = {
+                            'protocol': 'watch',
+                            'device_id': device_id,
+                            'latitude': lat,
+                            'longitude': lon,
+                            'timestamp': dt,
+                            'valid': valid,
+                            'speed': float(record_parts[7]) if len(record_parts) > 7 else 0,
+                            'heading': float(record_parts[8]) if len(record_parts) > 8 else 0,
+                            'altitude': float(record_parts[9]) if len(record_parts) > 9 else 0
+                        }
+                        results.append(point)
+                    
+                    # Return batch result
+                    return {
+                        'protocol': 'watch',
+                        'device_id': device_id,
+                        'command': 'UD3',
+                        'batch': True,
+                        'count': len(results),
+                        'points': results,
+                        'raw': data
+                    }
+                    
+                except (ValueError, IndexError) as e:
+                    logger.error(f"Error parsing UD3 batch: {e}")
+                    return None
                 
             # Handle other known commands
             elif command in ['LK', 'HEART', 'AL', 'TK', 'PULSE', 'BPHRT', 'SOS']:
@@ -720,10 +813,32 @@ class GPSClientProtocol(asyncio.Protocol):
             elif parsed.get('command') == 'heartbeat':
                 await self.send_heartbeat_ack(parsed)
                 
+            # Handle batch messages
+            elif parsed.get('batch') and parsed.get('points'):
+                logger.info(f"Processing batch of {len(parsed['points'])} points from {self.device_id}")
+                for point in parsed['points']:
+                    point['device_id'] = self.device_id
+                    if point.get('valid'):
+                        await self.queue_gps_data(point)
+                        self.server.stats['valid_locations'] += 1
+                # Send response using new protocol system
+                if create_response:
+                    response = create_response(parsed, success=True)
+                    if response:
+                        self.transport.write(response.encode('utf-8'))
+                else:
+                    await self.send_response(text)
+            # Handle single location
             elif 'latitude' in parsed and 'longitude' in parsed:
                 # Queue GPS data for processing
                 await self.queue_gps_data(parsed)
-                await self.send_response(text)
+                # Send response using new protocol system  
+                if create_response:
+                    response = create_response(parsed, success=True)
+                    if response:
+                        self.transport.write(response.encode('utf-8'))
+                else:
+                    await self.send_response(text)
                 
             else:
                 # Log other message types
