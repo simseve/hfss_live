@@ -5378,3 +5378,326 @@ async def deactivate_device(
             status_code=500,
             detail=f"Failed to deactivate device: {str(e)}"
         )
+
+
+@router.patch("/tracking/api/devices/{device_uuid}/activate")
+async def activate_device_by_uuid(
+    device_uuid: UUID,
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    db: Session = Depends(get_db)
+):
+    """
+    Activate a device by UUID.
+    Automatically deactivates any other registrations with the same serial number.
+    Requires admin JWT authentication.
+    """
+    # Verify admin JWT token (same as persist endpoint)
+    try:
+        token_data = jwt.decode(
+            credentials.credentials,
+            settings.SECRET_KEY,
+            algorithms=["HS256"],
+            audience="api.hikeandfly.app",
+            issuer="hikeandfly.app",
+            verify=True
+        )
+    except (PyJWTError, jwt.ExpiredSignatureError) as e:
+        raise HTTPException(status_code=403, detail="Invalid or expired token")
+    
+    try:
+        
+        # Find the registration by UUID
+        registration = db.query(DeviceRegistration).filter(
+            DeviceRegistration.id == device_uuid
+        ).first()
+        
+        if not registration:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Device registration not found for UUID {device_uuid}"
+            )
+        
+        # Deactivate any other active registrations for this serial number
+        db.query(DeviceRegistration).filter(
+            DeviceRegistration.serial_number == registration.serial_number,
+            DeviceRegistration.id != registration.id,
+            DeviceRegistration.is_active == True
+        ).update({"is_active": False, "updated_at": datetime.now(timezone.utc)})
+        
+        # Activate this registration
+        registration.is_active = True
+        registration.updated_at = datetime.now(timezone.utc)
+        
+        db.commit()
+        
+        logger.info(f"Activated device {device_uuid} (serial: {registration.serial_number}) for race {registration.race_id}")
+        
+        return {
+            "success": True,
+            "message": f"Device {device_uuid} activated for race {registration.race_id}",
+            "registration": {
+                "id": str(registration.id),
+                "serial_number": registration.serial_number,
+                "device_type": registration.device_type,
+                "race_id": registration.race_id,
+                "pilot_id": registration.pilot_id,
+                "pilot_name": registration.pilot_name,
+                "is_active": registration.is_active,
+                "updated_at": registration.updated_at.isoformat()
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error activating device by UUID: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to activate device: {str(e)}"
+        )
+
+
+@router.patch("/tracking/api/devices/{device_uuid}/deactivate")
+async def deactivate_device_by_uuid(
+    device_uuid: UUID,
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    db: Session = Depends(get_db)
+):
+    """
+    Deactivate a device by UUID.
+    Requires admin JWT authentication.
+    """
+    # Verify admin JWT token (same as persist endpoint)
+    try:
+        token_data = jwt.decode(
+            credentials.credentials,
+            settings.SECRET_KEY,
+            algorithms=["HS256"],
+            audience="api.hikeandfly.app",
+            issuer="hikeandfly.app",
+            verify=True
+        )
+    except (PyJWTError, jwt.ExpiredSignatureError) as e:
+        raise HTTPException(status_code=403, detail="Invalid or expired token")
+    
+    try:
+        
+        # Find registration by UUID
+        registration = db.query(DeviceRegistration).filter(
+            DeviceRegistration.id == device_uuid
+        ).first()
+        
+        if not registration:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Registration not found for device {device_uuid}"
+            )
+        
+        if not registration.is_active:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Device {device_uuid} is already inactive"
+            )
+        
+        # Deactivate the registration
+        registration.is_active = False
+        registration.updated_at = datetime.now(timezone.utc)
+        
+        db.commit()
+        
+        logger.info(f"Deactivated device {device_uuid} (serial: {registration.serial_number})")
+        
+        return {
+            "success": True,
+            "message": f"Device {device_uuid} deactivated",
+            "registration": {
+                "id": str(registration.id),
+                "serial_number": registration.serial_number,
+                "device_type": registration.device_type,
+                "race_id": registration.race_id,
+                "pilot_id": registration.pilot_id,
+                "pilot_name": registration.pilot_name,
+                "is_active": registration.is_active,
+                "updated_at": registration.updated_at.isoformat()
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error deactivating device by UUID: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to deactivate device: {str(e)}"
+        )
+
+
+@router.patch("/tracking/api/races/{race_id}/devices/activate-all")
+async def activate_all_devices_for_race(
+    race_id: str,
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    db: Session = Depends(get_db)
+):
+    """
+    Activate all devices registered for a specific race.
+    This will deactivate these devices from any other races to maintain unique activation.
+    Requires admin JWT authentication.
+    """
+    # Verify admin JWT token
+    try:
+        token_data = jwt.decode(
+            credentials.credentials,
+            settings.SECRET_KEY,
+            algorithms=["HS256"],
+            audience="api.hikeandfly.app",
+            issuer="hikeandfly.app",
+            verify=True
+        )
+    except (PyJWTError, jwt.ExpiredSignatureError) as e:
+        raise HTTPException(status_code=403, detail="Invalid or expired token")
+    
+    try:
+        # Find all device registrations for this race
+        registrations = db.query(DeviceRegistration).filter(
+            DeviceRegistration.race_id == race_id
+        ).all()
+        
+        if not registrations:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No devices found for race {race_id}"
+            )
+        
+        activated_count = 0
+        already_active_count = 0
+        
+        for registration in registrations:
+            if registration.is_active:
+                already_active_count += 1
+                continue
+            
+            # Deactivate any other active registrations for this serial number (maintaining unique activation)
+            db.query(DeviceRegistration).filter(
+                DeviceRegistration.serial_number == registration.serial_number,
+                DeviceRegistration.id != registration.id,
+                DeviceRegistration.is_active == True
+            ).update({"is_active": False, "updated_at": datetime.now(timezone.utc)})
+            
+            # Activate this registration
+            registration.is_active = True
+            registration.updated_at = datetime.now(timezone.utc)
+            activated_count += 1
+        
+        db.commit()
+        
+        logger.info(f"Activated {activated_count} devices for race {race_id} ({already_active_count} were already active)")
+        
+        return {
+            "success": True,
+            "message": f"Activated all devices for race {race_id}",
+            "race_id": race_id,
+            "total_devices": len(registrations),
+            "activated": activated_count,
+            "already_active": already_active_count,
+            "device_ids": [str(reg.id) for reg in registrations]
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error activating all devices for race: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to activate devices: {str(e)}"
+        )
+
+
+@router.patch("/tracking/api/races/{race_id}/devices/deactivate-all")
+async def deactivate_all_devices_for_race(
+    race_id: str,
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    db: Session = Depends(get_db)
+):
+    """
+    Deactivate all devices registered for a specific race.
+    Requires admin JWT authentication.
+    """
+    # Verify admin JWT token
+    try:
+        token_data = jwt.decode(
+            credentials.credentials,
+            settings.SECRET_KEY,
+            algorithms=["HS256"],
+            audience="api.hikeandfly.app",
+            issuer="hikeandfly.app",
+            verify=True
+        )
+    except (PyJWTError, jwt.ExpiredSignatureError) as e:
+        raise HTTPException(status_code=403, detail="Invalid or expired token")
+    
+    try:
+        # Find all active device registrations for this race
+        registrations = db.query(DeviceRegistration).filter(
+            DeviceRegistration.race_id == race_id,
+            DeviceRegistration.is_active == True
+        ).all()
+        
+        if not registrations:
+            # Check if there are any devices at all for this race
+            total_devices = db.query(DeviceRegistration).filter(
+                DeviceRegistration.race_id == race_id
+            ).count()
+            
+            if total_devices == 0:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No devices found for race {race_id}"
+                )
+            else:
+                return {
+                    "success": True,
+                    "message": f"No active devices to deactivate for race {race_id}",
+                    "race_id": race_id,
+                    "total_devices": total_devices,
+                    "deactivated": 0,
+                    "already_inactive": total_devices
+                }
+        
+        deactivated_count = len(registrations)
+        
+        # Deactivate all active registrations
+        for registration in registrations:
+            registration.is_active = False
+            registration.updated_at = datetime.now(timezone.utc)
+        
+        db.commit()
+        
+        # Get total device count for this race
+        total_devices = db.query(DeviceRegistration).filter(
+            DeviceRegistration.race_id == race_id
+        ).count()
+        
+        logger.info(f"Deactivated {deactivated_count} devices for race {race_id}")
+        
+        return {
+            "success": True,
+            "message": f"Deactivated all devices for race {race_id}",
+            "race_id": race_id,
+            "total_devices": total_devices,
+            "deactivated": deactivated_count,
+            "already_inactive": total_devices - deactivated_count,
+            "device_ids": [str(reg.id) for reg in registrations]
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error deactivating all devices for race: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to deactivate devices: {str(e)}"
+        )
