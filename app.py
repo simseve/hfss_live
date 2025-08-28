@@ -83,6 +83,20 @@ async def lifespan(app):
         logger.error(f"Failed to initialize Firebase: {e}")
         logger.warning("FCM notifications will not be available")
 
+    # Start GPS TCP Server if enabled
+    tcp_server_task = None
+    if settings.GPS_TCP_ENABLED:
+        try:
+            from tcp_server.gps_tcp_server import GPSTrackerTCPServer
+            tcp_server = GPSTrackerTCPServer(host='0.0.0.0', port=settings.GPS_TCP_PORT)
+            tcp_server_task = asyncio.create_task(tcp_server.start())
+            logger.info(f"GPS TCP Server started on port {settings.GPS_TCP_PORT}")
+        except Exception as e:
+            logger.error(f"Failed to start GPS TCP Server: {e}")
+            logger.warning("GPS TCP Server will not be available")
+    else:
+        logger.info("GPS TCP Server is disabled in configuration")
+
     # Start the background tracking task when the application starts
     track_task = asyncio.create_task(
         periodic_tracking_update(10))  # Update every 10 seconds
@@ -90,6 +104,10 @@ async def lifespan(app):
     # Set up and start the cleanup scheduler
     scheduler = setup_scheduler()
     scheduler.start()
+    
+    # Store tcp_server reference in app state for status endpoint
+    if settings.GPS_TCP_ENABLED and 'tcp_server' in locals():
+        app.state.tcp_server = tcp_server
 
     # Yield control back to FastAPI
     yield
@@ -110,6 +128,21 @@ async def lifespan(app):
         logger.info("Redis connections closed")
     except Exception as e:
         logger.error(f"Error closing Redis connections: {e}")
+
+    # Shutdown GPS TCP Server if running
+    if tcp_server_task:
+        try:
+            if 'tcp_server' in locals():
+                await tcp_server.shutdown()
+                logger.info("GPS TCP Server stopped")
+        except Exception as e:
+            logger.error(f"Error stopping GPS TCP Server: {e}")
+        
+        tcp_server_task.cancel()
+        try:
+            await tcp_server_task
+        except asyncio.CancelledError:
+            pass
 
     # Cancel tracking task
     track_task.cancel()
@@ -279,6 +312,23 @@ async def health():
             'connection_pool': redis_pool_info
         }
     }
+    
+    # Add GPS TCP Server status if enabled
+    if settings.GPS_TCP_ENABLED:
+        try:
+            if hasattr(app.state, 'tcp_server'):
+                tcp_status = app.state.tcp_server.get_status()
+                response['gps_tcp_server'] = tcp_status
+            else:
+                response['gps_tcp_server'] = {
+                    'running': False,
+                    'message': 'Server not initialized'
+                }
+        except Exception as e:
+            response['gps_tcp_server'] = {
+                'running': False,
+                'error': str(e)
+            }
 
     logger.info(
         f"Healthcheck requested on {now}. Database status: {response['database']['status']}, Redis status: {response['redis']['status']}")
@@ -289,6 +339,33 @@ async def health():
 
     # Return the response with pre-serialized datetime values
     return JSONResponse(content=response, status_code=status_code)
+
+
+@app.get('/gps-tcp/status')
+async def gps_tcp_status():
+    """Get GPS TCP Server status"""
+    if not settings.GPS_TCP_ENABLED:
+        return JSONResponse(
+            content={"error": "GPS TCP Server is disabled in configuration"},
+            status_code=404
+        )
+    
+    try:
+        if hasattr(app.state, 'tcp_server'):
+            status = app.state.tcp_server.get_status()
+            status['timestamp'] = datetime.datetime.now().isoformat()
+            return status
+        else:
+            return JSONResponse(
+                content={"error": "GPS TCP Server not initialized"},
+                status_code=503
+            )
+    except Exception as e:
+        logger.error(f"Error getting GPS TCP status: {e}")
+        return JSONResponse(
+            content={"error": str(e)},
+            status_code=500
+        )
 
 
 @app.get('/queue/status')
