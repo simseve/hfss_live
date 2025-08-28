@@ -195,7 +195,7 @@ def update_flight_state_in_db(flight_uuid, db, force_update=False, source=None):
 
     # If source is explicitly provided, filter by it
     if source:
-        flight_query = flight_query.filter(Flight.source == source)
+        flight_query = flight_query.filter(Flight.source.contains(source))
 
     flight = flight_query.first()
 
@@ -235,7 +235,7 @@ def update_flight_state_in_db(flight_uuid, db, force_update=False, source=None):
         if source != 'live':  # Only when we're not already updating a live flight
             live_flight = db.query(Flight).filter(
                 Flight.flight_id == flight_identifier,
-                Flight.source == 'live'
+                Flight.source.contains('live')
             ).first()
 
             if live_flight:

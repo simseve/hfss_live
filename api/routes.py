@@ -279,7 +279,7 @@ async def upload_track(
             # Check for existing flight
             flight = db.query(Flight).filter(
                 Flight.flight_id == upload_data.flight_id,
-                Flight.source == 'upload'
+                Flight.source.contains('upload')
             ).first()
 
             if flight:
@@ -431,7 +431,7 @@ async def get_flights(
         if race_id:
             query = query.filter(Flight.race_id == race_id)
         if source:
-            query = query.filter(Flight.source == source)
+            query = query.filter(Flight.source.contains(source))
 
         # Order by created_at descending (newest first)
         query = query.order_by(Flight.created_at.desc())
@@ -484,7 +484,7 @@ async def get_pilot_race_tracks(
         flights = db.query(Flight).filter(
             Flight.pilot_id == pilot_id,
             Flight.race_id == race_id,
-            Flight.source == 'upload'  # Only get uploaded tracks
+            Flight.source.contains('upload')  # Get all tracks containing 'upload'
         ).order_by(Flight.created_at.desc()).all()
 
         # Format track information
@@ -823,7 +823,7 @@ async def get_live_points(
         # Get flight from database
         flight = db.query(Flight).filter(
             Flight.id == flight_uuid,
-            Flight.source == 'live'
+            Flight.source.contains('live')
         ).first()
 
         if not flight:
@@ -991,7 +991,7 @@ async def get_live_points_raw(
         # Get flight from database
         flight = db.query(Flight).filter(
             Flight.id == flight_uuid,
-            Flight.source == 'live'
+            Flight.source.contains('live')
         ).first()
 
         if not flight:
@@ -1505,8 +1505,8 @@ async def get_live_users(
 
 @router.get("/debug/points")
 async def get_debug_points(
-    source: str = Query(..., regex="^(live|upload)$",
-                        description="Track source ('live' or 'upload')"),
+    source: str = Query(..., regex="^.*(?:live|upload).*$",
+                        description="Track source (must contain 'live' or 'upload')"),
     limit: int = Query(1000, description="Maximum number of points to return"),
     flight_uuid: str = Query(None, description="Flight UUID"),
     db: Session = Depends(get_db)
@@ -1645,7 +1645,7 @@ async def websocket_tracking_endpoint(
                     utc_day_start.strftime('%Y-%m-%dT%H:%M:%SZ')) &
                 (func.json_extract_path_text(Flight.last_fix, 'datetime') <=
                     utc_day_end.strftime('%Y-%m-%dT%H:%M:%SZ')),
-                Flight.source == 'live'
+                Flight.source.contains('live')
             )
             .order_by(Flight.created_at.desc())
             .all()
@@ -2101,8 +2101,8 @@ async def get_postgis_track_tile(
     x: int,
     y: int,
     flight_id: str = Query(..., description="UUID of the flight to render"),
-    source: str = Query(..., regex="^(live|upload)$",
-                        description="Either 'live' or 'upload'"),
+    source: str = Query(..., regex="^.*(?:live|upload).*$",
+                        description="Source containing 'live' or 'upload'"),
     token_data: Dict = Depends(verify_tracking_token),
     db: Session = Depends(get_db)
 ):
@@ -2223,8 +2223,8 @@ async def get_daily_tracks_tile(
     x: int,
     y: int,
     race_id: str = Query(..., description="Race ID to filter tracks"),
-    source: str = Query("live", regex="^(live|upload)$",
-                        description="Either 'live' or 'upload'"),
+    source: str = Query("live", regex="^.*(?:live|upload).*$",
+                        description="Source containing 'live' or 'upload'"),
     date: Optional[str] = Query(
         None, description="Date in YYYY-MM-DD format. If not provided, uses today"),
     pilot_id: Optional[str] = Query(
@@ -2945,8 +2945,8 @@ async def get_track_preview_id(
     max_points: int = Query(
         1000, description="Maximum number of points to use in the polyline"),
     token_data: Dict = Depends(verify_tracking_token),
-    source: str = Query(..., regex="^(live|upload)$",
-                        description="Either 'live' or 'upload'"),
+    source: str = Query(..., regex="^.*(?:live|upload).*$",
+                        description="Source containing 'live' or 'upload'"),
     db: Session = Depends(get_db)
 ):
     """
@@ -3130,8 +3130,8 @@ async def get_track_preview_id(
 @router.get("/track-line/{flight_id}")
 async def get_track_linestring(
     flight_id: str,
-    source: str = Query(..., regex="^(live|upload)$",
-                        description="Either 'live' or 'upload'"),
+    source: str = Query(..., regex="^.*(?:live|upload).*$",
+                        description="Source containing 'live' or 'upload'"),
     simplify: bool = Query(
         False, description="Whether to simplify the track geometry. If true, provides sampled coordinates for better performance."),
     credentials: HTTPAuthorizationCredentials = Security(security),
@@ -3587,8 +3587,8 @@ async def get_flight_bounds(
 @router.get("/flight/bounds/flightid/{flight_id}")
 async def get_flight_bounds_by_id(
     flight_id: str,
-    source: str = Query(..., regex="^(live|upload)$",
-                        description="Either 'live' or 'upload'"),
+    source: str = Query(..., regex="^.*(?:live|upload).*$",
+                        description="Source containing 'live' or 'upload'"),
     token_data: Dict = Depends(verify_tracking_token),
     db: Session = Depends(get_replica_db)  # Use read replica for reads
 ):
@@ -4752,12 +4752,12 @@ async def delete_all_live_flights(
     try:
         # Count flights before deletion for response
         live_flight_count = db.query(Flight).filter(
-            Flight.source == 'live'
+            Flight.source.contains('live')
         ).count()
         
         # Delete all live flights (CASCADE will delete points automatically)
         db.query(Flight).filter(
-            Flight.source == 'live'
+            Flight.source.contains('live')
         ).delete(synchronize_session=False)
         
         db.commit()
