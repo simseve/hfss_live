@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 class GPSTestClient:
     """Simulate a GPS tracker client"""
     
-    def __init__(self, host='localhost', port=9090):
+    def __init__(self, host='89.47.162.7', port=9090):  # Production server
         self.host = host
         self.port = port
         self.reader = None
