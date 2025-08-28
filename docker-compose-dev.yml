@@ -13,6 +13,7 @@ services:
       dockerfile: ./Dockerfile
     ports:
       - 5012:8000
+      - ${GPS_TCP_PORT}:${GPS_TCP_PORT}
     command: ['uvicorn', 'app:app', '--host', '0.0.0.0', '--port', '8000']
     volumes:
       - logs:/app/logs
