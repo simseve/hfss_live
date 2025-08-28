@@ -4371,6 +4371,7 @@ async def upload_flymaster_file(
         logger.info(f"Checking registration for device {device_serial}")
         registration = db.query(DeviceRegistration).filter(
             DeviceRegistration.serial_number == device_serial,
+            DeviceRegistration.device_type == 'flymaster',
             DeviceRegistration.is_active == True
         ).first()
         
