@@ -45,7 +45,7 @@ class StandaloneGPSServer(GPSTrackerTCPServer):
         logger.info(f"Database connection successful: {message}")
         self.db_connected = True
         
-        # Initialize Redis connection
+        # Initialize Redis connection (optional - for debugging we can run without it)
         try:
             # Log Redis URL for debugging
             redis_url = settings.get_redis_url()
@@ -60,44 +60,19 @@ class StandaloneGPSServer(GPSTrackerTCPServer):
                 logger.info("Redis connection successful")
                 self.redis_queue = redis_queue
             else:
-                raise RuntimeError("Redis client not initialized after connect()")
+                logger.warning("Redis client not initialized - running without Redis queueing")
+                self.redis_queue = None
         except Exception as e:
-            logger.error(f"Failed to connect to Redis: {e}")
-            logger.error(f"Redis URL: {settings.get_redis_url()}")
-            logger.error("Make sure Redis is accessible from the Docker container")
-            logger.error("For Docker, use: REDIS_URL=redis://redis:6379/0")
-            logger.error("For host network, use: REDIS_URL=redis://host.docker.internal:6379/0")
-            raise RuntimeError(f"Redis connection failed: {e}")
+            logger.warning(f"Redis connection failed: {e}")
+            logger.warning("Running without Redis queueing - data will only be logged")
+            self.redis_queue = None
     
     async def queue_gps_data_to_redis(self, device_id: str, parsed_data: dict):
-        """Queue GPS data to Redis for processing by FastAPI workers"""
-        if not self.redis_queue:
-            logger.warning("Redis not connected, skipping data queue")
-            return
-            
-        try:
-            # Format data for Redis queue (matching FastAPI's expected format)
-            queue_data = {
-                'device_id': device_id,
-                'timestamp': parsed_data.get('timestamp'),
-                'latitude': parsed_data.get('latitude'),
-                'longitude': parsed_data.get('longitude'),
-                'altitude': parsed_data.get('altitude', 0),
-                'speed': parsed_data.get('speed', 0),
-                'heading': parsed_data.get('heading', 0),
-                'satellites': parsed_data.get('satellites', 0),
-                'battery': parsed_data.get('battery', 0),
-                'valid': parsed_data.get('valid', False),
-                'protocol': parsed_data.get('protocol', 'unknown'),
-                'raw_data': parsed_data.get('raw_data', '')
-            }
-            
-            # Add to Redis queue
-            await self.redis_queue.add_track_points([queue_data])
-            logger.debug(f"Queued GPS data for device {device_id}")
-            
-        except Exception as e:
-            logger.error(f"Failed to queue GPS data: {e}")
+        """Log GPS data for debugging - Redis queueing disabled for now"""
+        logger.info(f"GPS Data received for device {device_id}")
+        logger.debug(f"  Data: {parsed_data}")
+        # Redis queueing disabled for debugging
+        # TODO: Implement Redis queueing when ready
     
     async def start(self):
         """Start the GPS TCP server with connections initialized"""
