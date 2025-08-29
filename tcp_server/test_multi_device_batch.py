@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 class GPSDeviceSimulator:
     """Simulates a single GPS device sending batches"""
     
-    def __init__(self, device_id: str, host: str = '89.47.162.7', port: int = 5002):
+    def __init__(self, device_id: str, host: str = '84.72.81.39', port: int = 5002):
         self.device_id = device_id
         self.host = host
         self.port = port
