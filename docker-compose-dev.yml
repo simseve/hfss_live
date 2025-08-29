@@ -45,8 +45,8 @@ services:
       - GPS_TCP_HOST=0.0.0.0
       - GPS_TCP_PORT=${GPS_TCP_PORT:-9090}
       - GPS_TCP_ENABLED=true
-      # Override Redis URL to use redis service on app-network
-      - REDIS_URL=redis://redis:6379/0
+      # Override Redis URL to use redis service on app-network with authentication
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
     build:
       context: .
       dockerfile: ./tcp_server/Dockerfile
