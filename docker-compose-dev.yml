@@ -8,13 +8,13 @@ services:
       - ./.env
     environment:
       - PROD=True
-      - GPS_TCP_ENABLED=false  # Disabled - using separate GPS service
+      - GPS_TCP_ENABLED=true  # Enabled - GPS server disabled in dev, runs embedded
     build:
       context: .
       dockerfile: ./Dockerfile
     ports:
       - 5012:8000
-      # GPS port handled by separate gps-tcp-server service
+      - "${GPS_TCP_PORT}:${GPS_TCP_PORT}"  # GPS port for embedded server
     command: ['uvicorn', 'app:app', '--host', '0.0.0.0', '--port', '8000']
     volumes:
       - logs:/app/logs
@@ -32,42 +32,42 @@ services:
         compress: "true"        # Compress rotated files
   
   # Separate GPS TCP Server service
-  # ACTIVATED: GPS TCP server runs as separate service
-  # Remember to set GPS_TCP_ENABLED=false in .env for hfsslive service
+  # DISABLED in dev - only one instance in production
+  # To enable: uncomment below and set GPS_TCP_ENABLED=false in .env for hfsslive
   
-  gps-tcp-server:
-    container_name: gps-tcp-server
-    image: gps-tcp-server:latest
-    env_file:
-      - ./.env
-    environment:
-      - PROD=True
-      - GPS_TCP_HOST=0.0.0.0
-      - GPS_TCP_PORT=${GPS_TCP_PORT:-9090}
-      - GPS_TCP_ENABLED=true
-      # With host network, Redis is on localhost
-      - REDIS_URL=redis://:${REDIS_PASSWORD}@localhost:6379/0
-    build:
-      context: .
-      dockerfile: ./tcp_server/Dockerfile
-    # Use host network to see real client IPs
-    network_mode: host
-    volumes:
-      - gps-logs:/app/logs
-    restart: unless-stopped
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "50m"
-        max-file: "3"
-        compress: "true"
+  # gps-tcp-server:
+  #   container_name: gps-tcp-server
+  #   image: gps-tcp-server:latest
+  #   env_file:
+  #     - ./.env
+  #   environment:
+  #     - PROD=True
+  #     - GPS_TCP_HOST=0.0.0.0
+  #     - GPS_TCP_PORT=${GPS_TCP_PORT:-9090}
+  #     - GPS_TCP_ENABLED=true
+  #     # With host network, Redis is on localhost
+  #     - REDIS_URL=redis://:${REDIS_PASSWORD}@localhost:6379/0
+  #   build:
+  #     context: .
+  #     dockerfile: ./tcp_server/Dockerfile
+  #   # Use host network to see real client IPs
+  #   network_mode: host
+  #   volumes:
+  #     - gps-logs:/app/logs
+  #   restart: unless-stopped
+  #   extra_hosts:
+  #     - "host.docker.internal:host-gateway"
+  #   logging:
+  #     driver: "json-file"
+  #     options:
+  #       max-size: "50m"
+  #       max-file: "3"
+  #       compress: "true"
 
 volumes:
   logs:
   static:
-  gps-logs:  # Volume for separate GPS service logs
+  # gps-logs:  # Uncomment if using separate GPS service
 
 networks:
   app-network:
