@@ -47,12 +47,26 @@ class StandaloneGPSServer(GPSTrackerTCPServer):
         
         # Initialize Redis connection
         try:
-            # Test Redis connection
-            await redis_queue.ping()
-            logger.info("Redis connection successful")
-            self.redis_queue = redis_queue
+            # Log Redis URL for debugging
+            redis_url = settings.get_redis_url()
+            logger.info(f"Attempting to connect to Redis at: {redis_url}")
+            
+            # Connect to Redis
+            await redis_queue.connect()
+            
+            # Test the connection
+            if redis_queue.redis_client:
+                await redis_queue.redis_client.ping()
+                logger.info("Redis connection successful")
+                self.redis_queue = redis_queue
+            else:
+                raise RuntimeError("Redis client not initialized after connect()")
         except Exception as e:
             logger.error(f"Failed to connect to Redis: {e}")
+            logger.error(f"Redis URL: {settings.get_redis_url()}")
+            logger.error("Make sure Redis is accessible from the Docker container")
+            logger.error("For Docker, use: REDIS_URL=redis://redis:6379/0")
+            logger.error("For host network, use: REDIS_URL=redis://host.docker.internal:6379/0")
             raise RuntimeError(f"Redis connection failed: {e}")
     
     async def queue_gps_data_to_redis(self, device_id: str, parsed_data: dict):
