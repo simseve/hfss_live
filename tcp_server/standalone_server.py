@@ -103,6 +103,9 @@ class StandaloneGPSServer(GPSTrackerTCPServer):
         """Start the GPS TCP server with connections initialized"""
         await self.initialize_connections()
         
+        # Import GPSClientProtocol first
+        from gps_tcp_server import GPSClientProtocol
+        
         # Override the queue_gps_data method in client protocol
         original_queue_method = GPSClientProtocol.queue_gps_data
         
@@ -115,7 +118,6 @@ class StandaloneGPSServer(GPSTrackerTCPServer):
                 await self.queue_gps_data_to_redis(client_self.device_id, parsed)
         
         # Monkey patch the method
-        from gps_tcp_server import GPSClientProtocol
         GPSClientProtocol.queue_gps_data = enhanced_queue_gps_data
         
         # Start the server
