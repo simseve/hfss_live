@@ -6,6 +6,8 @@ import logging
 from .base import BaseProtocolHandler
 from .tk905b import TK905BProtocolHandler
 from .tk103 import TK103ProtocolHandler
+from .binary_gps import BinaryGPSProtocolHandler
+from .jt808_production import JT808ProductionHandler
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +17,8 @@ class ProtocolFactory:
     
     # Register available protocol handlers
     HANDLERS: List[Type[BaseProtocolHandler]] = [
+        JT808ProductionHandler,  # Production JT808 handler (most specific)
+        BinaryGPSProtocolHandler,  # Fallback binary handler
         TK905BProtocolHandler,
         TK103ProtocolHandler,
     ]
@@ -133,6 +137,8 @@ __all__ = [
     'BaseProtocolHandler',
     'TK905BProtocolHandler', 
     'TK103ProtocolHandler',
+    'BinaryGPSProtocolHandler',
+    'JT808ProductionHandler',
     'ProtocolFactory',
     'protocol_factory',
     'parse_message',
