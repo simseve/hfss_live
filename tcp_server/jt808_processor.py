@@ -8,8 +8,12 @@ import json
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 from sqlalchemy.orm import Session
-from database.models import DeviceRegistration, Flight
+from database.models import DeviceRegistration, Flight, Race
 from database.db_conf import get_db
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.flight_separator import FlightSeparator
 from redis_queue_system.redis_queue import redis_queue, QUEUE_NAMES
 from config import settings
 
@@ -139,8 +143,16 @@ class JT808Processor:
                 logger.warning("Location report missing GPS coordinates")
                 return False
             
-            # Get or create flight ID
-            flight_info = await self._get_or_create_flight(registration)
+            # Prepare current point info for flight separator
+            current_point = {
+                'datetime': datetime.now(timezone.utc),
+                'lat': parsed_data['latitude'],
+                'lon': parsed_data['longitude'],
+                'elevation': parsed_data.get('altitude', 0)
+            }
+            
+            # Get or create flight ID (may create new flight based on separation logic)
+            flight_info = await self._get_or_create_flight(registration, current_point)
             if not flight_info:
                 logger.error(f"Could not get flight ID for device {registration['device_id']}")
                 return False
@@ -190,7 +202,7 @@ class JT808Processor:
             logger.error(f"Error queueing GPS data: {e}")
             return False
     
-    async def _get_or_create_flight(self, registration: Dict[str, Any]) -> Optional[str]:
+    async def _get_or_create_flight(self, registration: Dict[str, Any], current_point: Optional[Dict] = None) -> Optional[str]:
         """
         Get existing flight or create new one for device
         """
@@ -205,33 +217,77 @@ class JT808Processor:
         
         db = next(get_db())
         try:
-            # Create flight ID using same pattern as Flymaster
-            # Format: {source}-{pilot_id}-{race_id}-{device_id}
             device_type = registration.get('device_type', 'tk905b')
             source_type = f"{device_type}_live"  # Add _live suffix for WebSocket filtering
-            flight_id = f"{device_type}-{registration['pilot_id']}-{registration['race_id']}-{device_id}"
+            base_flight_id = f"{device_type}-{registration['pilot_id']}-{registration['race_id']}-{device_id}"
             
-            # Check if we already have this flight
-            flight = db.query(Flight).filter(
-                Flight.flight_id == flight_id,
-                Flight.source == source_type
-            ).first()
+            # Get the most recent flight for this device
+            latest_flight = db.query(Flight).filter(
+                Flight.device_id == device_id,
+                Flight.source == source_type,
+                Flight.race_id == registration['race_id']
+            ).order_by(Flight.created_at.desc()).first()
             
-            if not flight:
-                # Create new flight using registration data (same as Flymaster)
-                flight = Flight(
-                    flight_id=flight_id,
-                    race_uuid=registration['race_uuid'],
-                    race_id=registration['race_id'],
-                    pilot_id=registration['pilot_id'],
-                    pilot_name=registration['pilot_name'],
-                    source=source_type,
-                    device_id=device_id,
-                    created_at=datetime.now(timezone.utc)
-                )
-                db.add(flight)
-                db.commit()
-                logger.info(f"Created new flight for device {device_id}: {flight.id}")
+            # Check if we need a new flight
+            should_create_new = False
+            separation_reason = "no_previous_flight"
+            
+            if latest_flight:
+                # Convert latest flight to dict format for separator
+                last_flight_info = {
+                    'last_fix': latest_flight.last_fix,
+                    'created_at': latest_flight.created_at,
+                    'flight_state': latest_flight.flight_state
+                }
+                
+                # Get race timezone if available
+                race = db.query(Race).filter(Race.race_id == registration['race_id']).first()
+                race_timezone = race.timezone if race and race.timezone else "UTC"
+                
+                # Check if we should create a new flight
+                if current_point:
+                    should_create_new, separation_reason = FlightSeparator.should_create_new_flight(
+                        device_id=device_id,
+                        current_point=current_point,
+                        last_flight=last_flight_info,
+                        race_timezone=race_timezone
+                    )
+                else:
+                    # If no current point provided, continue with existing flight
+                    should_create_new = False
+            else:
+                should_create_new = True
+            
+            if should_create_new:
+                # Generate new flight_id with suffix based on reason
+                suffix = FlightSeparator.get_flight_id_suffix(separation_reason)
+                flight_id = f"{base_flight_id}-{suffix}"
+                
+                # Check if this specific flight_id already exists (shouldn't happen but just in case)
+                existing = db.query(Flight).filter(Flight.flight_id == flight_id).first()
+                if existing:
+                    flight = existing
+                    logger.info(f"Using existing flight with ID {flight_id}")
+                else:
+                    # Create new flight using registration data (same as Flymaster)
+                    flight = Flight(
+                        flight_id=flight_id,
+                        race_uuid=registration['race_uuid'],
+                        race_id=registration['race_id'],
+                        pilot_id=registration['pilot_id'],
+                        pilot_name=registration['pilot_name'],
+                        source=source_type,
+                        device_id=device_id,
+                        created_at=datetime.now(timezone.utc)
+                    )
+                    db.add(flight)
+                    db.commit()
+                    logger.info(f"Created new flight for device {device_id}: {flight.id} (reason: {separation_reason})")
+            else:
+                # Use existing flight
+                flight = latest_flight
+                flight_id = latest_flight.flight_id
+                logger.debug(f"Continuing with existing flight {flight_id} for device {device_id}")
             
             flight_uuid = str(flight.id)
             
