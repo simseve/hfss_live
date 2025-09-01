@@ -9,7 +9,11 @@ from datetime import datetime, timezone
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.dialects.postgresql import insert
 from database.db_replica import PrimarySession as Session  # Use primary for writes
-from database.models import LiveTrackPoint, UploadedTrackPoint, ScoringTracks
+from database.models import LiveTrackPoint, UploadedTrackPoint, ScoringTracks, Flight, Race
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.flight_separator import FlightSeparator
 from geoalchemy2.functions import ST_SetSRID, ST_MakePoint
 from redis_queue_system.redis_queue import redis_queue, QUEUE_NAMES
 
@@ -287,38 +291,81 @@ class PointProcessor:
                 logger.error(f"Race {race_id} not found for device {device_id}")
                 return None
             
-            # Create flight ID using same pattern as live/upload
-            # TODO: When end-of-flight signal is implemented, add timestamp suffix
-            flight_id = f"flymaster-{pilot_id}-{race_id}-{device_id}"
+            # Base flight ID pattern
+            base_flight_id = f"flymaster-{pilot_id}-{race_id}-{device_id}"
             
-            # Check if we already have this flight
-            existing_flight = db.query(Flight).filter(
-                Flight.flight_id == flight_id,
-                Flight.source == 'flymaster_live'
-            ).first()
+            # Get the most recent flight for this device
+            latest_flight = db.query(Flight).filter(
+                Flight.device_id == str(device_id),
+                Flight.source == 'flymaster_live',
+                Flight.race_id == race_id
+            ).order_by(Flight.created_at.desc()).first()
             
-            if existing_flight:
-                logger.debug(f"Using existing Flymaster flight: {flight_id}")
-                return existing_flight
+            # Check if we need a new flight
+            should_create_new = False
+            separation_reason = "no_previous_flight"
             
-            # Create new flight using registration data (same as live/upload)
-            flight = Flight(
-                flight_id=flight_id,
-                race_uuid=race.id,  # Use race UUID from database
-                race_id=race_id,
-                pilot_id=pilot_id,
-                pilot_name=pilot_name,
-                created_at=datetime.now(timezone.utc),
-                source='flymaster_live',  # Mark as Flymaster live data
-                device_id=str(device_id)
-                # first_fix and last_fix will be handled by database triggers
-            )
-            db.add(flight)
-            db.commit()
-            db.refresh(flight)
+            if latest_flight:
+                # Convert latest flight to dict format for separator
+                last_flight_info = {
+                    'last_fix': latest_flight.last_fix,
+                    'created_at': latest_flight.created_at,
+                    'flight_state': latest_flight.flight_state
+                }
+                
+                # Get race timezone
+                race_timezone = race.timezone if race and race.timezone else "UTC"
+                
+                # Use first point as current point for separation check
+                current_point = {
+                    'datetime': first_point.get('datetime'),
+                    'lat': first_point.get('lat'),
+                    'lon': first_point.get('lon'),
+                    'elevation': first_point.get('elevation')
+                }
+                
+                should_create_new, separation_reason = FlightSeparator.should_create_new_flight(
+                    device_id=str(device_id),
+                    current_point=current_point,
+                    last_flight=last_flight_info,
+                    race_timezone=race_timezone
+                )
+            else:
+                should_create_new = True
             
-            logger.info(f"Created Flymaster flight {flight_id} for {pilot_name} in race {race_id}")
-            return flight
+            if should_create_new:
+                # Generate new flight_id with suffix based on reason
+                suffix = FlightSeparator.get_flight_id_suffix(separation_reason)
+                flight_id = f"{base_flight_id}-{suffix}"
+                
+                # Check if this specific flight_id already exists
+                existing = db.query(Flight).filter(Flight.flight_id == flight_id).first()
+                if existing:
+                    logger.debug(f"Using existing Flymaster flight: {flight_id}")
+                    return existing
+                
+                # Create new flight
+                flight = Flight(
+                    flight_id=flight_id,
+                    race_uuid=race.id,  # Use race UUID from database
+                    race_id=race_id,
+                    pilot_id=pilot_id,
+                    pilot_name=pilot_name,
+                    created_at=datetime.now(timezone.utc),
+                    source='flymaster_live',  # Mark as Flymaster live data
+                    device_id=str(device_id)
+                    # first_fix and last_fix will be handled by database triggers
+                )
+                db.add(flight)
+                db.commit()
+                db.refresh(flight)
+                
+                logger.info(f"Created Flymaster flight {flight_id} for {pilot_name} in race {race_id} (reason: {separation_reason})")
+                return flight
+            else:
+                # Use existing flight
+                logger.debug(f"Continuing with existing Flymaster flight {latest_flight.flight_id}")
+                return latest_flight
             
         except Exception as e:
             logger.error(f"Error managing Flymaster flight: {e}")
