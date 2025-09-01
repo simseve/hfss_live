@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Standalone GPS TCP Server with database and Redis integration
+Standalone GPS TCP Server with raw data logging and debugging
 This runs as a separate Docker service but shares database and Redis with FastAPI
 """
 import asyncio
@@ -8,31 +8,116 @@ import logging
 import os
 import sys
 from pathlib import Path
+import time
+from datetime import datetime
+import binascii
 
 # Add parent directory to path to import shared modules
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from gps_tcp_server import GPSTrackerTCPServer
+from gps_tcp_server import GPSTrackerTCPServer, GPSClientProtocol
 from database.db_conf import engine, test_db_connection
 from redis_queue_system.redis_queue import redis_queue
 from config import settings
 import signal
 
-# Configure logging
+# Configure logging with DEBUG level for raw data inspection
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('gps_tcp_raw.log', mode='a')
+    ]
 )
 logger = logging.getLogger(__name__)
 
 
+class RawLoggingProtocol(GPSClientProtocol):
+    """Enhanced protocol with raw data logging"""
+    
+    def connection_made(self, transport):
+        """Log raw connection details"""
+        peername = transport.get_extra_info('peername')
+        logger.info("=" * 60)
+        logger.info(f"🔌 NEW CONNECTION ESTABLISHED")
+        logger.info(f"  Source IP: {peername[0] if peername else 'unknown'}")
+        logger.info(f"  Source Port: {peername[1] if peername else 'unknown'}")
+        logger.info(f"  Timestamp: {datetime.now().isoformat()}")
+        logger.info(f"  Transport: {transport}")
+        logger.info("=" * 60)
+        
+        # Call parent implementation
+        super().connection_made(transport)
+    
+    def data_received(self, data):
+        """Log raw data at byte level before processing"""
+        try:
+            # Log raw bytes
+            logger.info("=" * 60)
+            logger.info(f"📨 RAW DATA RECEIVED from {self.peername}")
+            logger.info(f"  Timestamp: {datetime.now().isoformat()}")
+            logger.info(f"  Size: {len(data)} bytes")
+            logger.info(f"  Raw bytes: {data}")
+            logger.info(f"  Hex dump: {binascii.hexlify(data).decode('ascii')}")
+            
+            # Try to decode as various encodings
+            for encoding in ['utf-8', 'ascii', 'latin-1', 'cp1252']:
+                try:
+                    decoded = data.decode(encoding)
+                    logger.info(f"  Decoded ({encoding}): {repr(decoded)}")
+                    # Show printable version
+                    printable = ''.join(c if c.isprintable() or c in '\r\n\t' else f'\\x{ord(c):02x}' for c in decoded)
+                    logger.info(f"  Printable: {printable}")
+                    break
+                except Exception as e:
+                    logger.debug(f"  Could not decode as {encoding}: {e}")
+            
+            # Show ASCII representation with non-printable as dots
+            ascii_repr = ''.join(chr(b) if 32 <= b < 127 else '.' for b in data)
+            logger.info(f"  ASCII view: {ascii_repr}")
+            
+            # Hex dump in traditional format (16 bytes per line)
+            hex_lines = []
+            for i in range(0, len(data), 16):
+                chunk = data[i:i+16]
+                hex_part = ' '.join(f'{b:02x}' for b in chunk)
+                ascii_part = ''.join(chr(b) if 32 <= b < 127 else '.' for b in chunk)
+                hex_lines.append(f"  {i:04x}: {hex_part:<48} {ascii_part}")
+            if hex_lines:
+                logger.info("  Hex dump (formatted):")
+                for line in hex_lines:
+                    logger.info(line)
+            
+            logger.info("=" * 60)
+            
+        except Exception as e:
+            logger.error(f"Error logging raw data: {e}")
+        
+        # Call parent implementation to process the data
+        super().data_received(data)
+    
+    def connection_lost(self, exc):
+        """Log connection closure"""
+        logger.info("=" * 60)
+        logger.info(f"🔌 CONNECTION CLOSED from {self.peername}")
+        logger.info(f"  Reason: {exc if exc else 'Normal closure'}")
+        logger.info(f"  Duration: {time.time() - self.last_activity:.2f} seconds")
+        logger.info(f"  Messages received: {self.message_count}")
+        logger.info("=" * 60)
+        
+        # Call parent implementation
+        super().connection_lost(exc)
+
+
 class StandaloneGPSServer(GPSTrackerTCPServer):
-    """Extended GPS server with database and Redis integration"""
+    """Extended GPS server with raw data logging and database/Redis integration"""
     
     def __init__(self, host='0.0.0.0', port=None):
         super().__init__(host, port or settings.GPS_TCP_PORT)
         self.redis_queue = None
         self.db_connected = False
+        self.raw_data_file = None
         
     async def initialize_connections(self):
         """Initialize database and Redis connections"""
@@ -68,35 +153,84 @@ class StandaloneGPSServer(GPSTrackerTCPServer):
             self.redis_queue = None
     
     async def queue_gps_data_to_redis(self, device_id: str, parsed_data: dict):
-        """Log GPS data for debugging - Redis queueing disabled for now"""
-        logger.info(f"GPS Data received for device {device_id}")
-        logger.debug(f"  Data: {parsed_data}")
+        """Log GPS data with enhanced debugging"""
+        logger.info("=" * 60)
+        logger.info(f"🗺️  PARSED GPS DATA")
+        logger.info(f"  Device ID: {device_id}")
+        logger.info(f"  Timestamp: {datetime.now().isoformat()}")
+        logger.info(f"  Parsed data:")
+        for key, value in parsed_data.items():
+            logger.info(f"    {key}: {value}")
+        logger.info("=" * 60)
+        
+        # Save to raw data file
+        if self.raw_data_file:
+            self.raw_data_file.write(f"{datetime.now().isoformat()} | Device: {device_id} | Data: {parsed_data}\n")
+            self.raw_data_file.flush()
+        
         # Redis queueing disabled for debugging
         # TODO: Implement Redis queueing when ready
     
     async def start(self):
-        """Start the GPS TCP server with connections initialized"""
+        """Start the GPS TCP server with raw logging protocol"""
         await self.initialize_connections()
         
-        # Import GPSClientProtocol first
-        from gps_tcp_server import GPSClientProtocol
+        # Open raw data file for logging
+        self.raw_data_file = open('gps_raw_data.txt', 'a')
+        logger.info(f"Raw data logging to: gps_raw_data.txt")
         
-        # Override the queue_gps_data method in client protocol
-        original_queue_method = GPSClientProtocol.queue_gps_data
+        # Override the protocol factory to use our enhanced logging version
+        loop = asyncio.get_running_loop()
+        
+        # Create the server with our custom protocol
+        server = await loop.create_server(
+            lambda: RawLoggingProtocol(self),
+            self.host,
+            self.port,
+            reuse_address=True,
+            reuse_port=True
+        )
+        
+        self.server = server
+        
+        # Log server startup
+        logger.info("=" * 60)
+        logger.info(f"🚀 GPS TCP SERVER STARTED")
+        logger.info(f"  Host: {self.host}")
+        logger.info(f"  Port: {self.port}")
+        logger.info(f"  Protocol: Enhanced with raw logging")
+        logger.info(f"  Accepting: ANY data format")
+        logger.info(f"  Log files:")
+        logger.info(f"    - Console: STDOUT")
+        logger.info(f"    - Raw logs: gps_tcp_raw.log")
+        logger.info(f"    - GPS data: gps_tcp_data.log")
+        logger.info(f"    - Raw data: gps_raw_data.txt")
+        logger.info("=" * 60)
+        
+        # Hook up the queue method
+        original_queue_method = RawLoggingProtocol.queue_gps_data
         
         async def enhanced_queue_gps_data(client_self, parsed):
             # Call original logging method
             await original_queue_method(client_self, parsed)
             
-            # Add Redis queueing
-            if client_self.device_id and parsed.get('valid'):
+            # Add our enhanced logging
+            if client_self.device_id:
                 await self.queue_gps_data_to_redis(client_self.device_id, parsed)
         
         # Monkey patch the method
-        GPSClientProtocol.queue_gps_data = enhanced_queue_gps_data
+        RawLoggingProtocol.queue_gps_data = enhanced_queue_gps_data
         
-        # Start the server
-        await super().start()
+        # Keep server running
+        async with server:
+            await server.serve_forever()
+    
+    async def shutdown(self):
+        """Clean shutdown"""
+        logger.info("Shutting down GPS TCP server...")
+        if self.raw_data_file:
+            self.raw_data_file.close()
+        await super().shutdown()
 
 
 async def main():
@@ -110,7 +244,15 @@ async def main():
             port=int(os.getenv('GPS_TCP_PORT', settings.GPS_TCP_PORT))
         )
         
-        logger.info(f"Starting GPS TCP Server on {server.host}:{server.port}")
+        logger.info("\n" + "=" * 60)
+        logger.info("🚀 INITIALIZING STANDALONE GPS TCP SERVER")
+        logger.info(f"  Configuration:")
+        logger.info(f"    Host: {server.host}")
+        logger.info(f"    Port: {server.port}")
+        logger.info(f"    Database: {os.getenv('DATABASE_URL', 'Not configured')}")
+        logger.info(f"    Redis: {settings.get_redis_url()}")
+        logger.info(f"    Raw logging: ENABLED")
+        logger.info("=" * 60 + "\n")
         
         # Setup signal handlers for graceful shutdown
         loop = asyncio.get_running_loop()
