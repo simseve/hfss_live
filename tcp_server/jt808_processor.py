@@ -10,9 +10,6 @@ from typing import Optional, Dict, Any
 from sqlalchemy.orm import Session
 from database.models import DeviceRegistration, Flight, Race
 from database.db_conf import get_db
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.flight_separator import FlightSeparator
 from redis_queue_system.redis_queue import redis_queue, QUEUE_NAMES
 from config import settings
