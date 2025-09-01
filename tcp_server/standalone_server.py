@@ -16,6 +16,7 @@ import binascii
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from gps_tcp_server import GPSTrackerTCPServer, GPSClientProtocol
+from protocols import parse_message, create_response
 from database.db_conf import engine, test_db_connection
 from redis_queue_system.redis_queue import redis_queue
 from config import settings
@@ -34,18 +35,33 @@ logger = logging.getLogger(__name__)
 
 
 class RawLoggingProtocol(GPSClientProtocol):
-    """Enhanced protocol with raw data logging"""
+    """Enhanced protocol with raw data logging and JT808 support"""
+    
+    def __init__(self, server):
+        super().__init__(server)
+        self.last_parsed = None
     
     def connection_made(self, transport):
         """Log raw connection details"""
         peername = transport.get_extra_info('peername')
-        logger.info("=" * 60)
-        logger.info(f"🔌 NEW CONNECTION ESTABLISHED")
-        logger.info(f"  Source IP: {peername[0] if peername else 'unknown'}")
-        logger.info(f"  Source Port: {peername[1] if peername else 'unknown'}")
-        logger.info(f"  Timestamp: {datetime.now().isoformat()}")
-        logger.info(f"  Transport: {transport}")
-        logger.info("=" * 60)
+        
+        # Skip verbose logging for localhost health checks
+        is_localhost = peername and peername[0] in ('127.0.0.1', 'localhost', '::1')
+        
+        if not is_localhost:
+            logger.info("=" * 60)
+            logger.info(f"🔌 NEW CONNECTION ESTABLISHED")
+            logger.info(f"  Source IP: {peername[0] if peername else 'unknown'}")
+            logger.info(f"  Source Port: {peername[1] if peername else 'unknown'}")
+            logger.info(f"  Timestamp: {datetime.now().isoformat()}")
+            logger.info(f"  Transport: {transport}")
+            logger.info("=" * 60)
+        else:
+            # Simple log for health checks
+            logger.debug(f"Health check from {peername}")
+        
+        # Store flag for later use
+        self.is_localhost = is_localhost
         
         # Call parent implementation
         super().connection_made(transport)
@@ -53,13 +69,20 @@ class RawLoggingProtocol(GPSClientProtocol):
     def data_received(self, data):
         """Log raw data at byte level before processing"""
         try:
-            # Log raw bytes
+            # Skip verbose logging for localhost
+            if hasattr(self, 'is_localhost') and self.is_localhost:
+                logger.debug(f"Health check data from {self.peername}: {len(data)} bytes")
+                super().data_received(data)
+                return
+            
+            # Log raw bytes for real connections
             logger.info("=" * 60)
             logger.info(f"📨 RAW DATA RECEIVED from {self.peername}")
             logger.info(f"  Timestamp: {datetime.now().isoformat()}")
             logger.info(f"  Size: {len(data)} bytes")
             logger.info(f"  Raw bytes: {data}")
-            logger.info(f"  Hex dump: {binascii.hexlify(data).decode('ascii')}")
+            hex_data = binascii.hexlify(data).decode('ascii')
+            logger.info(f"  Hex dump: {hex_data}")
             
             # Try to decode as various encodings
             for encoding in ['utf-8', 'ascii', 'latin-1', 'cp1252']:
@@ -89,22 +112,67 @@ class RawLoggingProtocol(GPSClientProtocol):
                 for line in hex_lines:
                     logger.info(line)
             
+            # Try to parse with JT808 protocol handler
+            parsed = None
+            response = None
+            
+            if parse_message:
+                # Try parsing with protocol handlers
+                parsed = parse_message(hex_data)
+                if parsed:
+                    logger.info("  ✅ PROTOCOL PARSED:")
+                    logger.info(f"    Protocol: {parsed.get('protocol')}")
+                    logger.info(f"    Message: {parsed.get('message')}")
+                    logger.info(f"    Device ID: {parsed.get('device_id')}")
+                    
+                    # Create and send response
+                    if create_response:
+                        response = create_response(parsed, success=True)
+                        if response:
+                            # Convert hex response to bytes
+                            response_bytes = bytes.fromhex(response)
+                            logger.info(f"  📤 SENDING ACK RESPONSE:")
+                            logger.info(f"    Message Type: {parsed.get('message', 'Unknown')}")
+                            logger.info(f"    Response Hex: {response}")
+                            logger.info(f"    Response Bytes: {response_bytes}")
+                            
+                            # Identify response type
+                            if len(response_bytes) > 2:
+                                msg_id = (response_bytes[1] << 8) | response_bytes[2] if response_bytes[0] == 0x7E else 0
+                                if msg_id == 0x8100:
+                                    logger.info(f"    ✅ Registration ACK (0x8100) sent to {self.peername}!")
+                                elif msg_id == 0x8001:
+                                    logger.info(f"    ✅ General ACK (0x8001) sent to {self.peername}!")
+                                else:
+                                    logger.info(f"    ✅ ACK sent to {self.peername}!")
+                            
+                            self.transport.write(response_bytes)
+                            logger.info(f"    ✅ ACK DELIVERED successfully!")
+            
             logger.info("=" * 60)
             
+            # Store parsed data for parent class
+            self.last_parsed = parsed
+            
         except Exception as e:
-            logger.error(f"Error logging raw data: {e}")
+            logger.error(f"Error in data_received: {e}")
         
-        # Call parent implementation to process the data
-        super().data_received(data)
+        # Don't call parent if we already handled it
+        if not parsed:
+            super().data_received(data)
     
     def connection_lost(self, exc):
         """Log connection closure"""
-        logger.info("=" * 60)
-        logger.info(f"🔌 CONNECTION CLOSED from {self.peername}")
-        logger.info(f"  Reason: {exc if exc else 'Normal closure'}")
-        logger.info(f"  Duration: {time.time() - self.last_activity:.2f} seconds")
-        logger.info(f"  Messages received: {self.message_count}")
-        logger.info("=" * 60)
+        # Skip verbose logging for localhost
+        if hasattr(self, 'is_localhost') and self.is_localhost:
+            logger.debug(f"Health check disconnected from {self.peername}")
+        else:
+            logger.info("=" * 60)
+            logger.info(f"🔌 CONNECTION CLOSED from {self.peername}")
+            logger.info(f"  Reason: {exc if exc else 'Normal closure'}")
+            logger.info(f"  Duration: {time.time() - self.last_activity:.2f} seconds")
+            logger.info(f"  Messages received: {self.message_count}")
+            logger.info("=" * 60)
         
         # Call parent implementation
         super().connection_lost(exc)
