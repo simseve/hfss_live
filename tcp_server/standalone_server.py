@@ -16,7 +16,8 @@ import binascii
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from gps_tcp_server import GPSTrackerTCPServer, GPSClientProtocol
-from protocols import parse_message, create_response
+from tcp_server.protocols import parse_message, create_response
+from tcp_server.jt808_processor import jt808_processor
 from database.db_conf import engine, test_db_connection
 from redis_queue_system.redis_queue import redis_queue
 from config import settings
@@ -69,11 +70,16 @@ class RawLoggingProtocol(GPSClientProtocol):
     def data_received(self, data):
         """Log raw data at byte level before processing"""
         try:
-            # Skip verbose logging for localhost
+            # Process localhost connections normally if they contain JT808 data
             if hasattr(self, 'is_localhost') and self.is_localhost:
-                logger.debug(f"Health check data from {self.peername}: {len(data)} bytes")
-                super().data_received(data)
-                return
+                # Check if this might be JT808 test data (starts with 0x7E)
+                if data[0:1] == b'\x7E':
+                    logger.info(f"JT808 test data from localhost: {len(data)} bytes")
+                    # Continue processing below
+                else:
+                    logger.debug(f"Health check data from {self.peername}: {len(data)} bytes")
+                    super().data_received(data)
+                    return
             
             # Log raw bytes for real connections
             logger.info("=" * 60)
@@ -116,19 +122,42 @@ class RawLoggingProtocol(GPSClientProtocol):
             parsed = None
             response = None
             
-            if parse_message:
-                # Try parsing with protocol handlers
-                parsed = parse_message(hex_data)
+            # Check if this is JT808 binary protocol (starts with 0x7E)
+            if data[0:1] == b'\x7E':
+                logger.info("  🔍 Detected JT808 binary protocol (0x7E frame)")
+                from tcp_server.protocols.jt808_production import JT808ProductionHandler
+                jt808_handler = JT808ProductionHandler()
+                parsed = jt808_handler.parse_message(hex_data)
                 if parsed:
+                    logger.info("  ✅ JT808 MESSAGE PARSED:")
+                    logger.info(f"    Message ID: 0x{parsed.get('msg_id', 0):04X}")
+                    logger.info(f"    Device ID: {parsed.get('device_id')}")
+                    logger.info(f"    Message Type: {parsed.get('message')}")
+            elif parse_message:
+                # Try parsing with other protocol handlers
+                parsed = parse_message(hex_data)
+            
+            if parsed:
                     logger.info("  ✅ PROTOCOL PARSED:")
                     logger.info(f"    Protocol: {parsed.get('protocol')}")
                     logger.info(f"    Message: {parsed.get('message')}")
                     logger.info(f"    Device ID: {parsed.get('device_id')}")
                     
+                    # Process GPS data through JT808 processor
+                    if parsed.get('protocol') == 'JT808' and parsed.get('msg_id') == 0x0200:
+                        # Location report - process through validator and queue
+                        asyncio.create_task(self._process_location_data(parsed))
+                    
                     # Create and send response
-                    if create_response:
+                    if parsed.get('protocol') == 'JT808':
+                        # Use JT808 handler to create response
+                        from tcp_server.protocols.jt808_production import JT808ProductionHandler
+                        jt808_handler = JT808ProductionHandler()
+                        response = jt808_handler.create_response(parsed, success=True)
+                    elif create_response:
                         response = create_response(parsed, success=True)
-                        if response:
+                    
+                    if response:
                             # Convert hex response to bytes
                             response_bytes = bytes.fromhex(response)
                             logger.info(f"  📤 SENDING ACK RESPONSE:")
@@ -160,6 +189,17 @@ class RawLoggingProtocol(GPSClientProtocol):
         # Don't call parent if we already handled it
         if not parsed:
             super().data_received(data)
+    
+    async def _process_location_data(self, parsed_data):
+        """Process location data through JT808 processor"""
+        try:
+            queued = await jt808_processor.process_gps_data(parsed_data)
+            if queued:
+                logger.info(f"    ✅ GPS data queued to Redis for device {parsed_data.get('device_id')}")
+            else:
+                logger.warning(f"    ⚠️ GPS data not queued - device {parsed_data.get('device_id')} may not be registered")
+        except Exception as e:
+            logger.error(f"Error processing location data: {e}")
     
     def connection_lost(self, exc):
         """Log connection closure"""

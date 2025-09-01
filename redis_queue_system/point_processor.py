@@ -135,6 +135,12 @@ class PointProcessor:
     async def _process_live_points(self, points: List[Dict]) -> bool:
         """Process live tracking points"""
         try:
+            # Debug logging to see what we're actually getting
+            if points:
+                logger.info(f"Processing {len(points)} live points")
+                logger.info(f"First point keys: {list(points[0].keys()) if points else 'empty'}")
+                logger.info(f"First point data: {points[0] if points else 'empty'}")
+            
             with Session() as db:
                 # Use the dictionaries directly for batch insert
                 # Batch insert with conflict handling
@@ -228,7 +234,7 @@ class PointProcessor:
                             'datetime': point_datetime,
                             'lat': point['lat'],
                             'lon': point['lon'],
-                            'alt': point['gps_alt'],
+                            'elevation': point['gps_alt'],  # Changed from 'alt' to 'elevation'
                             'speed': point.get('speed'),
                             'heading': point.get('heading')
                         }
