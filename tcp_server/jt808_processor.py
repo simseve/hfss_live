@@ -140,8 +140,8 @@ class JT808Processor:
                 return False
             
             # Get or create flight ID
-            flight_id = await self._get_or_create_flight(registration)
-            if not flight_id:
+            flight_info = await self._get_or_create_flight(registration)
+            if not flight_info:
                 logger.error(f"Could not get flight ID for device {registration['device_id']}")
                 return False
             
@@ -162,8 +162,8 @@ class JT808Processor:
             # The processor expects these exact field names
             track_point = {
                 'datetime': timestamp,
-                'flight_uuid': flight_id,  # UUID as string
-                'flight_id': flight_id,     # Same as flight_uuid for now
+                'flight_uuid': flight_info['uuid'],  # UUID as string
+                'flight_id': flight_info['id'],       # String identifier for triggers
                 'lat': parsed_data['latitude'],
                 'lon': parsed_data['longitude'],
                 'elevation': parsed_data.get('altitude', 0),
@@ -201,14 +201,15 @@ class JT808Processor:
             cached = self.flight_cache[device_id]
             # Use cached flight if less than 1 hour old
             if (datetime.now(timezone.utc) - cached['timestamp']).seconds < 3600:
-                return cached['flight_id']
+                return {'uuid': cached.get('flight_uuid'), 'id': cached.get('flight_id')}
         
         db = next(get_db())
         try:
             # Create flight ID using same pattern as Flymaster
             # Format: {source}-{pilot_id}-{race_id}-{device_id}
-            source_type = registration.get('device_type', 'tk905b')
-            flight_id = f"{source_type}-{registration['pilot_id']}-{registration['race_id']}-{device_id}"
+            device_type = registration.get('device_type', 'tk905b')
+            source_type = f"{device_type}_live"  # Add _live suffix for WebSocket filtering
+            flight_id = f"{device_type}-{registration['pilot_id']}-{registration['race_id']}-{device_id}"
             
             # Check if we already have this flight
             flight = db.query(Flight).filter(
@@ -232,15 +233,16 @@ class JT808Processor:
                 db.commit()
                 logger.info(f"Created new flight for device {device_id}: {flight.id}")
             
-            flight_id = str(flight.id)
+            flight_uuid = str(flight.id)
             
-            # Cache the flight ID
+            # Cache both the UUID and the string flight_id
             self.flight_cache[device_id] = {
-                'flight_id': flight_id,
+                'flight_id': flight_id,  # String identifier
+                'flight_uuid': flight_uuid,  # UUID
                 'timestamp': datetime.now(timezone.utc)
             }
             
-            return flight_id
+            return {'uuid': flight_uuid, 'id': flight_id}
             
         except Exception as e:
             logger.error(f"Error getting/creating flight: {e}")
