@@ -20,6 +20,45 @@
         "args": ["app:app", "--host", "0.0.0.0", "--port", "8000"],
         "module": "uvicorn"
       }
+    },
+    {
+      "label": "Start GPS TCP Server",
+      "type": "shell",
+      "command": "python",
+      "args": [
+        "${workspaceFolder}/tcp_server/standalone_server.py"
+      ],
+      "isBackground": true,
+      "problemMatcher": {
+        "pattern": {
+          "regexp": ".",
+          "file": 1,
+          "location": 2,
+          "message": 3
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^.*INITIALIZING STANDALONE GPS TCP SERVER.*$",
+          "endsPattern": "^.*GPS TCP SERVER STARTED.*$"
+        }
+      },
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": false,
+        "panel": "dedicated",
+        "showReuseMessage": false,
+        "clear": false
+      }
+    },
+    {
+      "label": "echo",
+      "type": "shell",
+      "command": "echo",
+      "args": ["Starting HFSS Platform..."],
+      "presentation": {
+        "reveal": "silent"
+      }
     }
   ]
 }
