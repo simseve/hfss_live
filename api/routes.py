@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from database.schemas import LiveTrackingRequest, LiveTrackPointCreate, FlightResponse, TrackUploadRequest, NotificationCommand, SubscriptionRequest, UnsubscriptionRequest, NotificationRequest, SentNotificationResponse
 from database.models import UploadedTrackPoint, Flight, LiveTrackPoint, Race, NotificationTokenDB, SentNotification, DeviceRegistration
 from typing import Dict, Optional, List
-from database.db_replica import get_db, get_replica_db
+from database.db_replica import get_db, get_replica_db, get_read_db_with_fallback, get_replica_health
 import logging
 from api.auth import verify_tracking_token
 from sqlalchemy.exc import SQLAlchemyError
@@ -1571,10 +1571,11 @@ async def websocket_tracking_endpoint(
     websocket: WebSocket,
     race_id: str,
     client_id: str = Query(...),
-    token: str = Query(...),
-    db: Session = Depends(get_replica_db)  # Use read replica for WebSocket reads
+    token: str = Query(...)
 ):
     """WebSocket endpoint for real-time tracking updates"""
+    # Don't use Depends for database in WebSocket - manage session manually
+    db = None
     try:
         # Verify token
         try:
@@ -1608,6 +1609,10 @@ async def websocket_tracking_endpoint(
         # Current server time in UTC
         current_time = datetime.now(timezone.utc)
 
+        # Get database session manually for WebSocket
+        # This avoids the "generator didn't stop" error with Depends
+        db = next(get_read_db_with_fallback())
+        
         # Get race information including timezone
         race = db.query(Race).filter(Race.race_id == race_id).first()
         if not race or not race.timezone:
@@ -1837,6 +1842,13 @@ async def websocket_tracking_endpoint(
         except:
             pass
         await manager.disconnect(websocket, client_id)
+    finally:
+        # Always close the database session
+        if db:
+            try:
+                db.close()
+            except:
+                pass
 
 
 @router.post("/command/{race_id}")
