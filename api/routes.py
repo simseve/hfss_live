@@ -4388,8 +4388,8 @@ async def upload_flymaster_file(
         ).first()
         
         if not registration:
-            logger.warning(f"Device {device_serial} not registered or inactive - rejecting points")
-            return PlainTextResponse("NOK", status_code=403)
+            logger.warning(f"Device {device_serial} not registered or inactive - returning OK but discarding data")
+            return PlainTextResponse("OK", status_code=200)
         else:
             logger.info(f"Found registration for device {device_serial}: pilot={registration.pilot_name}, race={registration.race_id}")
         
