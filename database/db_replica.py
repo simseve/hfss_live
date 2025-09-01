@@ -9,6 +9,14 @@ import os
 
 logger = logging.getLogger(__name__)
 
+# Track replica health status
+replica_health_status = {
+    'healthy': True,
+    'last_check': None,
+    'consecutive_failures': 0,
+    'last_error': None
+}
+
 # Get database URIs from environment
 primary_database_uri = settings.DATABASE_URI
 
@@ -140,20 +148,65 @@ def get_db():
             raise
 
 def get_replica_db():
-    """Get replica database session for read operations"""
+    """Get replica database session for read operations with fallback to primary"""
     from sqlalchemy.exc import OperationalError, DBAPIError, DisconnectionError
+    import uuid
     
     max_retries = 3
     retry_delay = 0.5
+    session_id = str(uuid.uuid4())[:8]
     
+    # First try replica if it's configured and different from primary
+    if primary_database_uri != replica_database_uri:
+        for attempt in range(max_retries):
+            try:
+                session = ReplicaSession()
+                # Pre-ping the connection
+                session.execute(text("SELECT 1"))
+                logger.debug(f"[SESSION_ID: {session_id}] Replica connection successful")
+                try:
+                    yield session
+                    # No commit needed for read-only operations
+                except Exception as error:
+                    session.rollback()
+                    raise error
+                finally:
+                    session.close()
+                return
+                
+            except (OperationalError, DBAPIError, DisconnectionError) as e:
+                error_msg = str(e)
+                if "SSL connection has been closed unexpectedly" in error_msg:
+                    logger.warning(f"[SESSION_ID: {session_id}] SSL connection error in replica DB, attempt {attempt + 1}/{max_retries}")
+                else:
+                    logger.warning(f"[SESSION_ID: {session_id}] Replica connection error, attempt {attempt + 1}/{max_retries}: {error_msg[:100]}")
+                
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 2, 5)
+                    try:
+                        replica_engine.dispose()
+                    except Exception:
+                        pass
+                    continue
+                else:
+                    # All replica attempts failed, fall back to primary
+                    logger.warning(f"[SESSION_ID: {session_id}] Replica failed after {max_retries} attempts, falling back to primary")
+                    break
+            except Exception as e:
+                logger.error(f"[SESSION_ID: {session_id}] Unexpected replica error: {str(e)[:100]}")
+                break
+    
+    # Fallback to primary database for reads
+    logger.info(f"[SESSION_ID: {session_id}] Using primary database for read operation (replica unavailable or same as primary)")
     for attempt in range(max_retries):
         try:
-            session = ReplicaSession()
+            session = PrimarySession()
             # Pre-ping the connection
             session.execute(text("SELECT 1"))
             try:
                 yield session
-                # No commit needed for read-only operations
+                # No commit for read operations on primary
             except Exception as error:
                 session.rollback()
                 raise error
@@ -163,11 +216,11 @@ def get_replica_db():
             
         except (OperationalError, DBAPIError, DisconnectionError) as e:
             if "SSL connection has been closed unexpectedly" in str(e):
-                logger.warning(f"SSL connection error in replica DB, attempt {attempt + 1}/{max_retries}")
+                logger.error(f"[SESSION_ID: {session_id}] SSL connection error in primary DB (fallback), attempt {attempt + 1}/{max_retries}")
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay)
                     retry_delay = min(retry_delay * 2, 5)
-                    replica_engine.dispose()
+                    primary_engine.dispose()
                     continue
             raise
         except Exception:
@@ -222,6 +275,59 @@ def test_replica_connection(max_retries=3):
             return False, f"Unexpected error testing replica connection: {str(e)}"
     
     return False, "Replica connection failed with an unknown error"
+
+def get_read_db_with_fallback():
+    """
+    Smart read database session that handles replica failures gracefully.
+    Returns replica session if available, otherwise falls back to primary.
+    """
+    global replica_health_status
+    from datetime import datetime, timedelta
+    import uuid
+    
+    session_id = str(uuid.uuid4())[:8]
+    
+    # Check if we should skip replica (if it's been failing recently)
+    if not replica_health_status['healthy']:
+        if replica_health_status['last_check']:
+            time_since_last_check = datetime.now() - replica_health_status['last_check']
+            # Try replica again after 30 seconds
+            if time_since_last_check < timedelta(seconds=30):
+                logger.debug(f"[SESSION_ID: {session_id}] Skipping replica due to recent failures")
+                return get_db()  # Use primary directly
+    
+    # Try to use replica
+    try:
+        for session in get_replica_db():
+            # If we got here, replica is working
+            if not replica_health_status['healthy']:
+                logger.info(f"[SESSION_ID: {session_id}] Replica recovered after {replica_health_status['consecutive_failures']} failures")
+                replica_health_status['healthy'] = True
+                replica_health_status['consecutive_failures'] = 0
+                replica_health_status['last_error'] = None
+            yield session
+            return
+    except Exception as e:
+        # Track replica failures
+        replica_health_status['healthy'] = False
+        replica_health_status['consecutive_failures'] += 1
+        replica_health_status['last_check'] = datetime.now()
+        replica_health_status['last_error'] = str(e)[:200]
+        
+        logger.warning(f"[SESSION_ID: {session_id}] Replica failed (consecutive failures: {replica_health_status['consecutive_failures']})")
+        
+        # Fall back to primary
+        for session in get_db():
+            yield session
+
+def get_replica_health():
+    """Get the current health status of the replica database"""
+    return {
+        **replica_health_status,
+        'primary_uri_masked': primary_database_uri.split('@')[1].split('/')[0] if '@' in primary_database_uri else 'configured',
+        'replica_uri_masked': replica_database_uri.split('@')[1].split('/')[0] if '@' in replica_database_uri else 'configured',
+        'using_same_db': primary_database_uri == replica_database_uri
+    }
 
 # Backward compatibility - export Session for read operations that should use replica
 Session = ReplicaSession
