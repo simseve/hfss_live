@@ -560,7 +560,7 @@ async def get_pilot_race_tracks(
                 'flight_id': flight.flight_id,
                 'created_at': flight.created_at.strftime('%Y-%m-%dT%H:%M:%SZ') if flight.created_at else None,
                 'type': flight.source,
-                'collection': 'uploads' if flight.source == 'upload' else 'live',
+                'collection': 'uploads' if 'upload' in flight.source else 'live',
                 'start_time': first_datetime.strftime('%Y-%m-%dT%H:%M:%SZ'),
                 'end_time': last_datetime.strftime('%Y-%m-%dT%H:%M:%SZ'),
                 'duration': duration,
@@ -1409,7 +1409,7 @@ async def get_live_users(
         for flight in flights:
             pilot_id = str(flight.pilot_id)
             # Only consider live flights for lastLoc
-            if flight.source == 'live' and flight.last_fix:
+            if 'live' in flight.source and flight.last_fix:  # Includes tk905b_live, flymaster_live
                 current_fix_time = datetime.fromisoformat(
                     flight.last_fix['datetime'].replace('Z', '+00:00'))
 
@@ -1465,7 +1465,7 @@ async def get_live_users(
             }
 
             # Add lastLoc only for live flights
-            if flight.source == 'live':
+            if 'live' in flight.source:  # Includes tk905b_live, flymaster_live
                 flight_info["lastLoc"] = {
                     "type": "Feature",
                     "geometry": {
@@ -2649,7 +2649,7 @@ async def get_track_preview(
             )
 
         # Get the encoded polyline for the flight with simplification
-        if flight.source == 'live':
+        if 'live' in flight.source:  # Handles 'live', 'tk905b_live', 'flymaster_live'
             func_name = 'generate_live_track_linestring'
             table_name = 'live_track_points'
         else:  # source == 'upload'
@@ -2988,7 +2988,7 @@ async def get_track_preview_id(
             )
 
         # Get the encoded polyline for the flight with simplification
-        if flight.source == 'live':
+        if 'live' in flight.source:  # Handles 'live', 'tk905b_live', 'flymaster_live'
             func_name = 'generate_live_track_linestring'
         else:  # source == 'upload'
             func_name = 'generate_uploaded_track_linestring'
@@ -3199,7 +3199,7 @@ async def get_track_linestring(
         flight_uuid = str(flight.id)
 
         # Build query to get LineString
-        if flight.source == 'live':
+        if 'live' in flight.source:  # Handles 'live', 'tk905b_live', 'flymaster_live'
             func_name = 'generate_live_track_linestring'
         else:  # source == 'upload'
             func_name = 'generate_uploaded_track_linestring'
@@ -3526,7 +3526,7 @@ async def get_flight_bounds(
             )
 
         # Determine which function to use based on flight source
-        if flight.source == 'live':
+        if 'live' in flight.source:  # Handles 'live', 'tk905b_live', 'flymaster_live'
             func_name = 'generate_live_track_linestring'
         else:  # source == 'upload'
             func_name = 'generate_uploaded_track_linestring'
@@ -3628,7 +3628,7 @@ async def get_flight_bounds_by_id(
         flight_uuid = str(flight.id)
 
         # Determine which function to use based on flight source
-        if flight.source == 'live':
+        if 'live' in flight.source:  # Handles 'live', 'tk905b_live', 'flymaster_live'
             func_name = 'generate_live_track_linestring'
         else:  # source == 'upload'
             func_name = 'generate_uploaded_track_linestring'

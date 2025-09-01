@@ -131,7 +131,7 @@ async def periodic_tracking_update(interval_seconds: int = 30):
                         should_add_to_updates = False
 
                         # Only for live tracks, include most recent points
-                        if flight.source == 'live':
+                        if 'live' in flight.source:  # Includes tk905b_live, flymaster_live
                             # Get latest points
                             latest_time = datetime.fromisoformat(
                                 flight.last_fix['datetime'].replace('Z', '+00:00')).astimezone(timezone.utc)
