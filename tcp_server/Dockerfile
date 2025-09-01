@@ -17,6 +17,7 @@ COPY config.py .
 COPY database/ ./database/
 COPY redis_queue_system/ ./redis_queue_system/
 COPY tcp_server/ ./tcp_server/
+COPY utils/ ./utils/
 
 # Set Python path to include app directory
 ENV PYTHONPATH=/app
