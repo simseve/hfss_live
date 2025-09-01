@@ -254,7 +254,7 @@ def update_flight_state_in_db(flight_uuid, db, force_update=False, source=None):
         return 'uploaded', state_info
 
     # For live flights, check for inactivity
-    if source == 'live' or (flight and flight.source == 'live'):
+    if source == 'live' or (flight and 'live' in flight.source):
         # Check if the last fix is older than the inactivity threshold
         if flight.last_fix and 'datetime' in flight.last_fix:
             try:
@@ -300,7 +300,7 @@ def detect_flight_state_from_db(flight_uuid, db, recent_points_limit=20):
         return 'unknown', {'confidence': 'low', 'reason': 'flight_not_found'}
 
     # Get the most recent track points for this flight based on the source
-    if flight.source == 'live':
+    if 'live' in flight.source:  # Handles 'live', 'tk905b_live', 'flymaster_live'
         recent_points = db.query(LiveTrackPoint).filter(
             LiveTrackPoint.flight_uuid == flight_uuid
         ).order_by(LiveTrackPoint.datetime.desc()).limit(recent_points_limit).all()
