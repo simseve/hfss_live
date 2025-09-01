@@ -665,7 +665,11 @@ class GPSClientProtocol(asyncio.Protocol):
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 
-            logger.info(f"GPS tracker connected from {self.peername} (total: {len(self.server.active_connections)})")
+            # Only log non-localhost connections
+            if self.peername and self.peername[0] not in ('127.0.0.1', 'localhost', '::1'):
+                logger.info(f"GPS tracker connected from {self.peername} (total: {len(self.server.active_connections)})")
+            else:
+                logger.debug(f"Health check connected from {self.peername}")
             
             # Start timeout monitor
             self.timeout_task = asyncio.create_task(self._monitor_timeout())
@@ -678,10 +682,14 @@ class GPSClientProtocol(asyncio.Protocol):
     def connection_lost(self, exc):
         """Handle connection loss"""
         try:
-            if exc:
-                logger.info(f"GPS tracker disconnected from {self.peername}: {exc}")
+            # Only log non-localhost disconnections
+            if self.peername and self.peername[0] not in ('127.0.0.1', 'localhost', '::1'):
+                if exc:
+                    logger.info(f"GPS tracker disconnected from {self.peername}: {exc}")
+                else:
+                    logger.info(f"GPS tracker disconnected from {self.peername}")
             else:
-                logger.info(f"GPS tracker disconnected from {self.peername}")
+                logger.debug(f"Health check disconnected from {self.peername}")
                 
             # Cancel tasks
             if self.heartbeat_task:
