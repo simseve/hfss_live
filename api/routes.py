@@ -5000,12 +5000,13 @@ async def persist_live_flight(
             if not live_points:
                 continue
             
-            # Delete any existing upload points for this flight to ensure 100% sync
-            db.query(UploadedTrackPoint).filter(
+            # ALWAYS delete ALL existing upload points for this flight first
+            # This ensures a full replacement every time, regardless of date filters
+            deleted_count = db.query(UploadedTrackPoint).filter(
                 UploadedTrackPoint.flight_uuid == upload_flight.id
             ).delete(synchronize_session=False)
             db.commit()
-            logger.info(f"Cleared existing upload points for flight {upload_flight.flight_id}")
+            logger.info(f"Cleared {deleted_count} existing upload points for flight {upload_flight.flight_id} to ensure full replacement")
             
             # Convert live points to upload points format with the upload flight UUID
             upload_points = []
@@ -5020,6 +5021,8 @@ async def persist_live_flight(
                     'barometric_altitude': point.barometric_altitude
                 }
                 upload_points.append(upload_point)
+            
+            # Note: first_fix, last_fix, and total_points are automatically updated by database triggers
             
             # Queue upload points using Redis queue for batch processing
             if upload_points:
