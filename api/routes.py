@@ -4867,24 +4867,20 @@ async def delete_all_upload_flights(
         )
 
 
-@router.post("/admin/persist-live-flights")
-async def persist_live_flights(
+@router.post("/admin/persist-live-flight")
+async def persist_live_flight(
+    flight_uuid: str,
     credentials: HTTPAuthorizationCredentials = Security(security),
-    db: Session = Depends(get_db),
-    start_datetime: Optional[datetime] = None,
-    end_datetime: Optional[datetime] = None,
-    source_type: Optional[str] = None
+    db: Session = Depends(get_db)
 ):
     """
-    Convert live tracking points to upload points for permanent storage.
+    Convert a specific live tracking flight to upload points for permanent storage.
     Creates a duplicate flight record with source='[device]_upload' to distinguish from live data.
     This prevents live data from being deleted after 2 days by the hypertable retention policy.
     The original live flight and points are preserved.
     
     Parameters:
-    - start_datetime: Optional filter for flights created after this time
-    - end_datetime: Optional filter for flights created before this time
-    - source_type: Optional specific source type (e.g., 'flymaster_live', 'tk905b_live'). If not provided, all live sources are processed.
+    - flight_uuid: Required - The UUID of the specific flight to persist
     """
     # Verify JWT token
     try:
@@ -4900,37 +4896,45 @@ async def persist_live_flights(
         raise HTTPException(status_code=403, detail="Invalid or expired token")
     
     try:
-        # Build query for live flights
-        query = db.query(Flight)
+        # Parse and validate the flight UUID
+        try:
+            import uuid
+            flight_uuid_obj = uuid.UUID(flight_uuid)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid flight UUID format")
         
-        # Filter by source type
-        if source_type:
-            query = query.filter(Flight.source == source_type)
-        else:
-            # Get all live tracking sources
-            query = query.filter(
-                Flight.source.in_(['live', 'flymaster_live', 'tk905b_live'])
-            )
+        # Get the specific flight
+        flight = db.query(Flight).filter(Flight.id == flight_uuid_obj).first()
         
-        # Apply datetime filters if provided
-        if start_datetime:
-            query = query.filter(Flight.created_at >= start_datetime)
-        if end_datetime:
-            query = query.filter(Flight.created_at <= end_datetime)
-        
-        live_flights = query.all()
-        
-        if not live_flights:
-            source_desc = source_type if source_type else "live tracking"
-            date_range = ""
-            if start_datetime or end_datetime:
-                date_range = f" in range {start_datetime or 'start'} to {end_datetime or 'end'}"
+        if not flight:
             return {
-                "success": True,
-                "message": f"No {source_desc} flights found to persist{date_range}",
+                "success": False,
+                "message": f"Flight with UUID {flight_uuid} not found",
                 "flights_processed": 0,
                 "points_copied": 0
             }
+        
+        # Check if it's already persisted (contains 'upload' in source)
+        if 'upload' in flight.source:
+            return {
+                "success": True,
+                "message": f"Flight {flight_uuid} is already persisted (source: {flight.source})",
+                "flights_processed": 0,
+                "points_copied": 0
+            }
+        
+        # Check if it's a device-specific live flight (contains '_live')
+        # We don't persist standard 'live' flights, only device-specific ones
+        if '_live' not in flight.source:
+            return {
+                "success": False,
+                "message": f"Flight {flight_uuid} cannot be persisted (source: {flight.source}). Only device-specific live flights (e.g., flymaster_live, tk905b_live) can be persisted.",
+                "flights_processed": 0,
+                "points_copied": 0
+            }
+        
+        # Process single flight
+        live_flights = [flight]
         
         total_points_copied = 0
         flights_processed = 0
@@ -5032,12 +5036,12 @@ async def persist_live_flights(
         
         db.commit()
         
-        source_desc = source_type if source_type else "live"
-        logger.warning(f"Admin persisted {source_desc} flights. Flights: {flights_processed}, Points: {total_points_copied}")
+        logger.warning(f"Admin persisted flight {flight_uuid}. Points: {total_points_copied}")
         
         return {
             "success": True,
-            "message": f"Successfully queued {flights_processed} {source_desc} flights for persistence",
+            "message": f"Successfully queued flight {flight_uuid} for persistence",
+            "flight_uuid": flight_uuid,
             "flights_processed": flights_processed,
             "points_queued": total_points_copied,
             "note": "Points are processed asynchronously via Redis queue. Duplicates are skipped automatically.",
@@ -5046,11 +5050,10 @@ async def persist_live_flights(
         
     except Exception as e:
         db.rollback()
-        source_desc = source_type if source_type else "live"
-        logger.error(f"Error persisting {source_desc} flights: {e}")
+        logger.error(f"Error persisting flight {flight_uuid}: {e}")
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to persist {source_desc} flights: {str(e)}"
+            detail=f"Failed to persist flight {flight_uuid}: {str(e)}"
         )
 
 
