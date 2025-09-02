@@ -4871,7 +4871,9 @@ async def delete_all_upload_flights(
 async def persist_live_flight(
     flight_uuid: str,
     credentials: HTTPAuthorizationCredentials = Security(security),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    start_datetime: Optional[datetime] = None,
+    end_datetime: Optional[datetime] = None
 ):
     """
     Convert a specific live tracking flight to upload points for permanent storage.
@@ -4881,6 +4883,8 @@ async def persist_live_flight(
     
     Parameters:
     - flight_uuid: Required - The UUID of the specific flight to persist
+    - start_datetime: Optional - Only persist points after this time
+    - end_datetime: Optional - Only persist points before this time
     """
     # Verify JWT token
     try:
@@ -4980,10 +4984,18 @@ async def persist_live_flight(
                 upload_flight = existing_upload_flight
                 logger.info(f"Using existing upload flight {upload_flight_id}")
             
-            # Get all live points for this flight
-            live_points = db.query(LiveTrackPoint).filter(
+            # Get live points for this flight with optional datetime filters
+            points_query = db.query(LiveTrackPoint).filter(
                 LiveTrackPoint.flight_uuid == flight.id
-            ).all()
+            )
+            
+            # Apply datetime filters if provided
+            if start_datetime:
+                points_query = points_query.filter(LiveTrackPoint.datetime >= start_datetime)
+            if end_datetime:
+                points_query = points_query.filter(LiveTrackPoint.datetime <= end_datetime)
+            
+            live_points = points_query.all()
             
             if not live_points:
                 continue
@@ -5036,14 +5048,22 @@ async def persist_live_flight(
         
         db.commit()
         
-        logger.warning(f"Admin persisted flight {flight_uuid}. Points: {total_points_copied}")
+        date_range_msg = ""
+        if start_datetime or end_datetime:
+            date_range_msg = f" (filtered: {start_datetime or 'start'} to {end_datetime or 'end'})"
+        
+        logger.warning(f"Admin persisted flight {flight_uuid}{date_range_msg}. Points: {total_points_copied}")
         
         return {
             "success": True,
-            "message": f"Successfully queued flight {flight_uuid} for persistence",
+            "message": f"Successfully queued flight {flight_uuid} for persistence{date_range_msg}",
             "flight_uuid": flight_uuid,
             "flights_processed": flights_processed,
             "points_queued": total_points_copied,
+            "date_filter": {
+                "start": start_datetime.isoformat() if start_datetime else None,
+                "end": end_datetime.isoformat() if end_datetime else None
+            } if (start_datetime or end_datetime) else None,
             "note": "Points are processed asynchronously via Redis queue. Duplicates are skipped automatically.",
             "flight_details": flight_details
         }
