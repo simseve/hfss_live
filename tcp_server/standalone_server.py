@@ -150,10 +150,31 @@ class RawLoggingProtocol(GPSClientProtocol):
                     
                     # Create and send response
                     if parsed.get('protocol') == 'JT808':
+                        # Check if device is registered for registration and location messages
+                        success = True
+                        device_id = parsed.get('device_id')
+                        
+                        if parsed.get('msg_id') == 0x0100:  # Terminal Registration
+                            # Validate device registration
+                            if device_id:
+                                registration = jt808_processor._validate_device(device_id)
+                                success = registration is not None
+                                if not success:
+                                    logger.warning(f"    ⚠️ Device {device_id} not registered - sending failure response")
+                                else:
+                                    logger.info(f"    ✅ Device {device_id} is registered - sending success response")
+                        elif parsed.get('msg_id') == 0x0200:  # Location Report
+                            # Also validate for location reports - don't ACK if not registered
+                            if device_id:
+                                registration = jt808_processor._validate_device(device_id)
+                                success = registration is not None
+                                if not success:
+                                    logger.warning(f"    ⚠️ Device {device_id} not registered - rejecting location report")
+                        
                         # Use JT808 handler to create response
                         from tcp_server.protocols.jt808_production import JT808ProductionHandler
                         jt808_handler = JT808ProductionHandler()
-                        response = jt808_handler.create_response(parsed, success=True)
+                        response = jt808_handler.create_response(parsed, success=success)
                     elif create_response:
                         response = create_response(parsed, success=True)
                     

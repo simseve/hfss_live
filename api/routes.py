@@ -4867,16 +4867,24 @@ async def delete_all_upload_flights(
         )
 
 
-@router.post("/admin/persist-flymaster-flights")
-async def persist_flymaster_flights(
+@router.post("/admin/persist-live-flights")
+async def persist_live_flights(
     credentials: HTTPAuthorizationCredentials = Security(security),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    start_datetime: Optional[datetime] = None,
+    end_datetime: Optional[datetime] = None,
+    source_type: Optional[str] = None
 ):
     """
-    Convert Flymaster live tracking points to upload points for permanent storage.
-    Creates a duplicate flight record with source='flymaster_upload' to distinguish from live data.
-    This prevents Flymaster data from being deleted after 2 days by the hypertable retention policy.
+    Convert live tracking points to upload points for permanent storage.
+    Creates a duplicate flight record with source='[device]_upload' to distinguish from live data.
+    This prevents live data from being deleted after 2 days by the hypertable retention policy.
     The original live flight and points are preserved.
+    
+    Parameters:
+    - start_datetime: Optional filter for flights created after this time
+    - end_datetime: Optional filter for flights created before this time
+    - source_type: Optional specific source type (e.g., 'flymaster_live', 'tk905b_live'). If not provided, all live sources are processed.
     """
     # Verify JWT token
     try:
@@ -4892,15 +4900,34 @@ async def persist_flymaster_flights(
         raise HTTPException(status_code=403, detail="Invalid or expired token")
     
     try:
-        # Get all Flymaster flights that are still in live (not yet persisted)
-        flymaster_flights = db.query(Flight).filter(
-            Flight.source == 'flymaster_live'
-        ).all()
+        # Build query for live flights
+        query = db.query(Flight)
         
-        if not flymaster_flights:
+        # Filter by source type
+        if source_type:
+            query = query.filter(Flight.source == source_type)
+        else:
+            # Get all live tracking sources
+            query = query.filter(
+                Flight.source.in_(['live', 'flymaster_live', 'tk905b_live'])
+            )
+        
+        # Apply datetime filters if provided
+        if start_datetime:
+            query = query.filter(Flight.created_at >= start_datetime)
+        if end_datetime:
+            query = query.filter(Flight.created_at <= end_datetime)
+        
+        live_flights = query.all()
+        
+        if not live_flights:
+            source_desc = source_type if source_type else "live tracking"
+            date_range = ""
+            if start_datetime or end_datetime:
+                date_range = f" in range {start_datetime or 'start'} to {end_datetime or 'end'}"
             return {
                 "success": True,
-                "message": "No Flymaster flights found to persist",
+                "message": f"No {source_desc} flights found to persist{date_range}",
                 "flights_processed": 0,
                 "points_copied": 0
             }
@@ -4909,12 +4936,21 @@ async def persist_flymaster_flights(
         flights_processed = 0
         flight_details = []
         
-        for flight in flymaster_flights:
+        for flight in live_flights:
             # Check if we already have a corresponding upload flight
             upload_flight_id = f"{flight.flight_id}-upload"
+            
+            # Determine the upload source type based on the live source
+            if flight.source == 'flymaster_live':
+                upload_source = 'flymaster_upload'
+            elif flight.source == 'tk905b_live':
+                upload_source = 'tk905b_upload'
+            else:
+                upload_source = 'upload'  # Default for standard 'live' source
+            
             existing_upload_flight = db.query(Flight).filter(
                 Flight.flight_id == upload_flight_id,
-                Flight.source == 'flymaster_upload'
+                Flight.source == upload_source
             ).first()
             
             if not existing_upload_flight:
@@ -4926,7 +4962,7 @@ async def persist_flymaster_flights(
                     pilot_id=flight.pilot_id,
                     pilot_name=flight.pilot_name,
                     created_at=flight.created_at,
-                    source='flymaster_upload',  # Mark as upload version
+                    source=upload_source,  # Mark as appropriate upload version
                     device_id=flight.device_id,
                     first_fix=flight.first_fix,
                     last_fix=flight.last_fix,
@@ -4992,15 +5028,16 @@ async def persist_flymaster_flights(
                     "total_live_points": len(live_points)
                 })
                 
-                logger.info(f"Queued {points_added} points for persistence from Flymaster flight {flight.flight_id}")
+                logger.info(f"Queued {points_added} points for persistence from {flight.source} flight {flight.flight_id}")
         
         db.commit()
         
-        logger.warning(f"Admin persisted Flymaster flights. Flights: {flights_processed}, Points: {total_points_copied}")
+        source_desc = source_type if source_type else "live"
+        logger.warning(f"Admin persisted {source_desc} flights. Flights: {flights_processed}, Points: {total_points_copied}")
         
         return {
             "success": True,
-            "message": f"Successfully queued {flights_processed} Flymaster flights for persistence",
+            "message": f"Successfully queued {flights_processed} {source_desc} flights for persistence",
             "flights_processed": flights_processed,
             "points_queued": total_points_copied,
             "note": "Points are processed asynchronously via Redis queue. Duplicates are skipped automatically.",
@@ -5009,10 +5046,11 @@ async def persist_flymaster_flights(
         
     except Exception as e:
         db.rollback()
-        logger.error(f"Error persisting Flymaster flights: {e}")
+        source_desc = source_type if source_type else "live"
+        logger.error(f"Error persisting {source_desc} flights: {e}")
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to persist Flymaster flights: {str(e)}"
+            detail=f"Failed to persist {source_desc} flights: {str(e)}"
         )
 
 
