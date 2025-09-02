@@ -23,7 +23,20 @@ class JT808Processor:
     def __init__(self):
         self.device_cache = {}  # Cache validated devices
         self.flight_cache = {}  # Cache flight IDs for devices
+        self.device_pilot_cache = {}  # Cache pilot_id to detect reassignments
         
+    def _invalidate_device_caches(self, device_id: str):
+        """Invalidate all caches for a device when reassignment is detected"""
+        if device_id in self.device_cache:
+            del self.device_cache[device_id]
+            logger.info(f"Invalidated device cache for {device_id}")
+        if device_id in self.flight_cache:
+            del self.flight_cache[device_id]
+            logger.info(f"Invalidated flight cache for {device_id}")
+        if device_id in self.device_pilot_cache:
+            del self.device_pilot_cache[device_id]
+            logger.info(f"Invalidated pilot cache for {device_id}")
+    
     async def process_gps_data(self, parsed_data: Dict[str, Any]) -> bool:
         """
         Process GPS data from JT808 device
@@ -41,6 +54,31 @@ class JT808Processor:
                 cached = self.device_cache[device_id]
                 # Check if cache is still valid (15 minutes)
                 if (datetime.now(timezone.utc) - cached['timestamp']).seconds < 900:
+                    # Periodically re-validate to detect reassignments (every 5 minutes)
+                    if (datetime.now(timezone.utc) - cached['timestamp']).seconds > 300:
+                        # Re-validate from database
+                        fresh_registration = self._validate_device(device_id)
+                        if not fresh_registration:
+                            # Device no longer valid
+                            self._invalidate_device_caches(device_id)
+                            return False
+                        
+                        # Check if pilot changed
+                        old_pilot = cached['registration'].get('pilot_id')
+                        new_pilot = fresh_registration.get('pilot_id')
+                        if old_pilot != new_pilot:
+                            logger.warning(f"Device {device_id} reassigned from pilot {old_pilot} to {new_pilot} - creating new flight")
+                            self._invalidate_device_caches(device_id)
+                        
+                        # Update cache with fresh data
+                        self.device_cache[device_id] = {
+                            'registration': fresh_registration,
+                            'timestamp': datetime.now(timezone.utc)
+                        }
+                        self.device_pilot_cache[device_id] = new_pilot
+                        return await self._queue_data(parsed_data, fresh_registration)
+                    
+                    # Use cached registration
                     return await self._queue_data(parsed_data, cached['registration'])
             
             # Validate device registration
@@ -54,6 +92,7 @@ class JT808Processor:
                 'registration': registration,
                 'timestamp': datetime.now(timezone.utc)
             }
+            self.device_pilot_cache[device_id] = registration.get('pilot_id')
             
             # Queue the data
             return await self._queue_data(parsed_data, registration)
