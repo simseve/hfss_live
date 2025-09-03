@@ -169,9 +169,15 @@ def get_replica_db():
                     # No commit needed for read-only operations
                 except Exception as error:
                     session.rollback()
+                    # Let HTTPException pass through without interfering
+                    from fastapi import HTTPException
+                    if isinstance(error, HTTPException):
+                        session.close()
+                        raise
                     raise error
                 finally:
-                    session.close()
+                    if session:
+                        session.close()
                 return
                 
             except (OperationalError, DBAPIError, DisconnectionError) as e:
@@ -209,9 +215,15 @@ def get_replica_db():
                 # No commit for read operations on primary
             except Exception as error:
                 session.rollback()
+                # Let HTTPException pass through without interfering
+                from fastapi import HTTPException
+                if isinstance(error, HTTPException):
+                    session.close()
+                    raise
                 raise error
             finally:
-                session.close()
+                if session:
+                    session.close()
             return
             
         except (OperationalError, DBAPIError, DisconnectionError) as e:
