@@ -5080,6 +5080,69 @@ async def persist_live_flight(
         )
 
 
+# ============== Cache Management Endpoints ==============
+
+@router.post("/admin/invalidate-device-cache/{device_id}")
+async def invalidate_device_cache(
+    device_id: str,
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    db: Session = Depends(get_db)
+):
+    """
+    Invalidate all caches for a specific device.
+    Useful when a device is reassigned to a new user.
+    """
+    # Verify JWT token
+    try:
+        token_data = jwt.decode(
+            credentials.credentials,
+            settings.SECRET_KEY,
+            algorithms=["HS256"],
+            audience="api.hikeandfly.app",
+            issuer="hikeandfly.app",
+            verify=True
+        )
+    except (PyJWTError, jwt.ExpiredSignatureError) as e:
+        raise HTTPException(status_code=403, detail="Invalid or expired token")
+    
+    try:
+        # Connect to Redis and invalidate caches
+        import redis.asyncio as redis
+        redis_url = settings.get_redis_url()
+        redis_client = redis.from_url(redis_url, decode_responses=False)
+        
+        # Delete all cache keys for this device
+        keys_to_delete = [
+            f"jt808:device:{device_id}",
+            f"jt808:device:{device_id}:timestamp",
+            f"jt808:flight:{device_id}",
+            f"jt808:pilot:{device_id}"
+        ]
+        
+        deleted_count = 0
+        for key in keys_to_delete:
+            result = await redis_client.delete(key)
+            if result:
+                deleted_count += 1
+        
+        await redis_client.close()
+        
+        logger.warning(f"Admin invalidated cache for device {device_id}. Deleted {deleted_count} cache entries.")
+        
+        return {
+            "success": True,
+            "message": f"Cache invalidated for device {device_id}",
+            "device_id": device_id,
+            "cache_entries_deleted": deleted_count
+        }
+        
+    except Exception as e:
+        logger.error(f"Error invalidating cache for device {device_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to invalidate cache: {str(e)}"
+        )
+
 # ============== Device Registration Endpoints ==============
 
 @router.post("/api/devices/register")

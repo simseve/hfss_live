@@ -13,29 +13,158 @@ from database.db_conf import get_db
 from utils.flight_separator import FlightSeparator
 from redis_queue_system.redis_queue import redis_queue, QUEUE_NAMES
 from config import settings
+import redis.asyncio as redis
+import pickle
 
 logger = logging.getLogger(__name__)
 
 
 class JT808Processor:
-    """Process JT808 GPS data with device validation and queueing"""
+    """Process JT808 GPS data with device validation and Redis caching"""
+    
+    # Redis cache key prefixes and TTLs
+    CACHE_PREFIX_DEVICE = "jt808:device:"
+    CACHE_PREFIX_FLIGHT = "jt808:flight:"
+    CACHE_PREFIX_PILOT = "jt808:pilot:"
+    CACHE_TTL_DEVICE = 900  # 15 minutes
+    CACHE_TTL_FLIGHT = 3600  # 1 hour
+    CACHE_TTL_PILOT = 900  # 15 minutes
+    REVALIDATE_INTERVAL = 300  # Re-validate every 5 minutes
     
     def __init__(self):
-        self.device_cache = {}  # Cache validated devices
-        self.flight_cache = {}  # Cache flight IDs for devices
-        self.device_pilot_cache = {}  # Cache pilot_id to detect reassignments
+        self.redis_client = None
+        self._init_redis()
         
-    def _invalidate_device_caches(self, device_id: str):
-        """Invalidate all caches for a device when reassignment is detected"""
-        if device_id in self.device_cache:
-            del self.device_cache[device_id]
-            logger.info(f"Invalidated device cache for {device_id}")
-        if device_id in self.flight_cache:
-            del self.flight_cache[device_id]
-            logger.info(f"Invalidated flight cache for {device_id}")
-        if device_id in self.device_pilot_cache:
-            del self.device_pilot_cache[device_id]
-            logger.info(f"Invalidated pilot cache for {device_id}")
+    def _init_redis(self):
+        """Initialize Redis connection"""
+        try:
+            redis_url = settings.get_redis_url()
+            self.redis_client = redis.from_url(redis_url, decode_responses=False)
+            logger.info(f"JT808 processor connected to Redis at {redis_url}")
+        except Exception as e:
+            logger.error(f"Failed to connect to Redis: {e}")
+            # Fall back to in-memory cache if Redis fails
+            self.fallback_cache = {}
+    
+    async def _get_cached_registration(self, device_id: str) -> Optional[Dict]:
+        """Get cached device registration from Redis"""
+        if not self.redis_client:
+            return None
+            
+        try:
+            cache_key = f"{self.CACHE_PREFIX_DEVICE}{device_id}"
+            cached_data = await self.redis_client.get(cache_key)
+            if cached_data:
+                # Also get the timestamp to calculate age
+                timestamp_key = f"{cache_key}:timestamp"
+                timestamp_data = await self.redis_client.get(timestamp_key)
+                
+                registration = pickle.loads(cached_data)
+                cache_age = 0
+                if timestamp_data:
+                    cached_time = float(timestamp_data)
+                    cache_age = (datetime.now(timezone.utc).timestamp() - cached_time)
+                
+                return {
+                    'registration': registration,
+                    'cache_age': cache_age
+                }
+        except Exception as e:
+            logger.error(f"Error getting cached registration for {device_id}: {e}")
+        return None
+    
+    async def _get_cached_flight(self, device_id: str) -> Optional[Dict]:
+        """Get cached flight info from Redis"""
+        if not self.redis_client:
+            return None
+            
+        try:
+            cache_key = f"{self.CACHE_PREFIX_FLIGHT}{device_id}"
+            cached_data = await self.redis_client.get(cache_key)
+            if cached_data:
+                return pickle.loads(cached_data)
+        except Exception as e:
+            logger.error(f"Error getting cached flight for {device_id}: {e}")
+        return None
+    
+    async def _cache_flight(self, device_id: str, flight_id: str, flight_uuid: str):
+        """Cache flight info in Redis"""
+        if not self.redis_client:
+            return
+            
+        try:
+            cache_key = f"{self.CACHE_PREFIX_FLIGHT}{device_id}"
+            flight_data = {
+                'flight_id': flight_id,
+                'flight_uuid': flight_uuid,
+                'id': flight_id,
+                'uuid': flight_uuid
+            }
+            
+            await self.redis_client.setex(
+                cache_key,
+                self.CACHE_TTL_FLIGHT,
+                pickle.dumps(flight_data)
+            )
+            logger.debug(f"Cached flight {flight_id} for device {device_id} in Redis")
+        except Exception as e:
+            logger.error(f"Error caching flight for {device_id}: {e}")
+    
+    async def _cache_registration(self, device_id: str, registration: Dict):
+        """Cache device registration in Redis"""
+        if not self.redis_client:
+            return
+            
+        try:
+            cache_key = f"{self.CACHE_PREFIX_DEVICE}{device_id}"
+            timestamp_key = f"{cache_key}:timestamp"
+            pilot_key = f"{self.CACHE_PREFIX_PILOT}{device_id}"
+            
+            # Store registration with TTL
+            await self.redis_client.setex(
+                cache_key,
+                self.CACHE_TTL_DEVICE,
+                pickle.dumps(registration)
+            )
+            
+            # Store timestamp
+            await self.redis_client.setex(
+                timestamp_key,
+                self.CACHE_TTL_DEVICE,
+                str(datetime.now(timezone.utc).timestamp())
+            )
+            
+            # Store pilot ID for change detection
+            if registration.get('pilot_id'):
+                await self.redis_client.setex(
+                    pilot_key,
+                    self.CACHE_TTL_PILOT,
+                    registration['pilot_id']
+                )
+            
+            logger.debug(f"Cached registration for device {device_id} in Redis")
+        except Exception as e:
+            logger.error(f"Error caching registration for {device_id}: {e}")
+    
+    async def _invalidate_device_caches(self, device_id: str):
+        """Invalidate all Redis caches for a device when reassignment is detected"""
+        if not self.redis_client:
+            # Fallback to clearing in-memory cache
+            if device_id in self.fallback_cache:
+                del self.fallback_cache[device_id]
+            return
+            
+        try:
+            keys_to_delete = [
+                f"{self.CACHE_PREFIX_DEVICE}{device_id}",
+                f"{self.CACHE_PREFIX_FLIGHT}{device_id}",
+                f"{self.CACHE_PREFIX_PILOT}{device_id}"
+            ]
+            if keys_to_delete:
+                await self.redis_client.delete(*keys_to_delete)
+                logger.info(f"Invalidated all Redis caches for device {device_id}")
+        except Exception as e:
+            logger.error(f"Error invalidating Redis cache for {device_id}: {e}")
     
     async def process_gps_data(self, parsed_data: Dict[str, Any]) -> bool:
         """
@@ -49,37 +178,32 @@ class JT808Processor:
                 logger.warning("No device ID in parsed data")
                 return False
                 
-            # Check if we have cached validation
-            if device_id in self.device_cache:
-                cached = self.device_cache[device_id]
-                # Check if cache is still valid (15 minutes)
-                if (datetime.now(timezone.utc) - cached['timestamp']).seconds < 900:
-                    # Periodically re-validate to detect reassignments (every 5 minutes)
-                    if (datetime.now(timezone.utc) - cached['timestamp']).seconds > 300:
-                        # Re-validate from database
-                        fresh_registration = self._validate_device(device_id)
-                        if not fresh_registration:
-                            # Device no longer valid
-                            self._invalidate_device_caches(device_id)
-                            return False
-                        
-                        # Check if pilot changed
-                        old_pilot = cached['registration'].get('pilot_id')
-                        new_pilot = fresh_registration.get('pilot_id')
-                        if old_pilot != new_pilot:
-                            logger.warning(f"Device {device_id} reassigned from pilot {old_pilot} to {new_pilot} - creating new flight")
-                            self._invalidate_device_caches(device_id)
-                        
-                        # Update cache with fresh data
-                        self.device_cache[device_id] = {
-                            'registration': fresh_registration,
-                            'timestamp': datetime.now(timezone.utc)
-                        }
-                        self.device_pilot_cache[device_id] = new_pilot
-                        return await self._queue_data(parsed_data, fresh_registration)
+            # Check Redis cache for device registration
+            cached_registration = await self._get_cached_registration(device_id)
+            if cached_registration:
+                # Check if we should revalidate (every 5 minutes)
+                cache_age = cached_registration.get('cache_age', 0)
+                if cache_age > self.REVALIDATE_INTERVAL:
+                    # Re-validate from database
+                    fresh_registration = self._validate_device(device_id)
+                    if not fresh_registration:
+                        # Device no longer valid
+                        await self._invalidate_device_caches(device_id)
+                        return False
                     
-                    # Use cached registration
-                    return await self._queue_data(parsed_data, cached['registration'])
+                    # Check if pilot changed
+                    old_pilot = cached_registration['registration'].get('pilot_id')
+                    new_pilot = fresh_registration.get('pilot_id')
+                    if old_pilot != new_pilot:
+                        logger.warning(f"Device {device_id} reassigned from pilot {old_pilot} to {new_pilot} - creating new flight")
+                        await self._invalidate_device_caches(device_id)
+                    
+                    # Update cache with fresh data
+                    await self._cache_registration(device_id, fresh_registration)
+                    return await self._queue_data(parsed_data, fresh_registration)
+                
+                # Use cached registration
+                return await self._queue_data(parsed_data, cached_registration['registration'])
             
             # Validate device registration
             registration = self._validate_device(device_id)
@@ -87,12 +211,8 @@ class JT808Processor:
                 logger.warning(f"Device {device_id} not registered or inactive")
                 return False
                 
-            # Cache the validation
-            self.device_cache[device_id] = {
-                'registration': registration,
-                'timestamp': datetime.now(timezone.utc)
-            }
-            self.device_pilot_cache[device_id] = registration.get('pilot_id')
+            # Cache the validation in Redis
+            await self._cache_registration(device_id, registration)
             
             # Queue the data
             return await self._queue_data(parsed_data, registration)
@@ -244,12 +364,10 @@ class JT808Processor:
         """
         device_id = registration['device_id']
         
-        # Check cache first
-        if device_id in self.flight_cache:
-            cached = self.flight_cache[device_id]
-            # Use cached flight if less than 1 hour old
-            if (datetime.now(timezone.utc) - cached['timestamp']).seconds < 3600:
-                return {'uuid': cached.get('flight_uuid'), 'id': cached.get('flight_id')}
+        # Check Redis cache first
+        cached_flight = await self._get_cached_flight(device_id)
+        if cached_flight:
+            return cached_flight
         
         db = next(get_db())
         try:
@@ -327,12 +445,8 @@ class JT808Processor:
             
             flight_uuid = str(flight.id)
             
-            # Cache both the UUID and the string flight_id
-            self.flight_cache[device_id] = {
-                'flight_id': flight_id,  # String identifier
-                'flight_uuid': flight_uuid,  # UUID
-                'timestamp': datetime.now(timezone.utc)
-            }
+            # Cache flight info in Redis
+            await self._cache_flight(device_id, flight_id, flight_uuid)
             
             return {'uuid': flight_uuid, 'id': flight_id}
             
