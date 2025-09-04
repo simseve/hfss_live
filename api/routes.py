@@ -3327,6 +3327,188 @@ async def get_track_linestring(
         )
 
 
+@router.get("/track-line-uuid/{flight_uuid}")
+async def get_track_linestring_by_uuid(
+    flight_uuid: str,
+    simplify: bool = Query(
+        False, description="Whether to simplify the track geometry. If true, provides sampled coordinates for better performance."),
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    db: Session = Depends(get_db)
+):
+    """
+    Return the complete flight track as a GeoJSON LineString using flight UUID directly.
+    Uses the PostGIS functions to generate the geometry.
+
+    Parameters:
+    - flight_uuid: UUID of the flight
+    - simplify: Optional parameter to simplify the line geometry (useful for large tracks)
+    """
+    try:
+        # Verify token
+        token = credentials.credentials
+        try:
+            token_data = jwt.decode(
+                token,
+                settings.SECRET_KEY,
+                algorithms=["HS256"],
+                audience="api.hikeandfly.app",
+                issuer="hikeandfly.app",
+                verify=True
+            )
+
+            if not token_data.get("sub", "").startswith("contest:"):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Invalid token subject - must be contest-specific"
+                )
+
+        except jwt.ExpiredSignatureError:
+            raise HTTPException(status_code=401, detail="Token expired")
+        except PyJWTError as e:
+            raise HTTPException(
+                status_code=401, detail=f"Invalid token: {str(e)}"
+            )
+
+        # Check if flight exists by UUID
+        flight = db.query(Flight).filter(
+            Flight.id == flight_uuid
+        ).first()
+
+        if not flight:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Flight not found with UUID {flight_uuid}"
+            )
+
+        # Build query to get LineString
+        if 'live' in flight.source:  # Handles 'live', 'tk905b_live', 'flymaster_live'
+            func_name = 'generate_live_track_linestring'
+        else:  # source == 'upload'
+            func_name = 'generate_uploaded_track_linestring'
+
+        # Handle simplification - treat simplify as a boolean flag
+        if simplify:
+            # Use a default moderate value for simplification
+            simplify_value = 0.0001
+
+            # Use a simpler, more reliable approach with ST_SimplifyPreserveTopology
+            query = f"""
+            WITH original AS (
+                SELECT {func_name}('{flight_uuid}'::uuid) AS geom
+            )
+            SELECT 
+                CASE 
+                    -- Check if the simplified geometry has enough points to be useful
+                    WHEN ST_NPoints(ST_SimplifyPreserveTopology(geom, {simplify_value})) >= 10 
+                        THEN ST_AsGeoJSON(ST_SimplifyPreserveTopology(geom, {simplify_value}))
+                    -- Otherwise return the original geometry
+                    ELSE ST_AsGeoJSON(geom) 
+                END as geojson,
+                CASE 
+                    WHEN ST_NPoints(ST_SimplifyPreserveTopology(geom, {simplify_value})) >= 10 
+                        THEN ST_AsEncodedPolyline(ST_SimplifyPreserveTopology(geom, {simplify_value}))
+                    ELSE ST_AsEncodedPolyline(geom) 
+                END as encoded_polyline
+            FROM original;
+            """
+        else:
+            # No simplification, return all points
+            query = f"""
+            SELECT 
+                ST_AsGeoJSON({func_name}('{flight_uuid}'::uuid)) as geojson,
+                ST_AsEncodedPolyline({func_name}('{flight_uuid}'::uuid)) as encoded_polyline;
+            """
+
+        # Execute query
+        result = db.execute(text(query)).fetchone()
+
+        if not result or not result[0]:
+            # If no tracking points, return empty LineString
+            return {
+                "type": "Feature",
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": []
+                },
+                "properties": {
+                    "flight_id": flight.flight_id,
+                    "flight_uuid": str(flight.id),
+                    "pilot_name": flight.pilot_name,
+                    "source": flight.source,
+                    "total_points": flight.total_points,
+                    "empty": True,
+                    "encoded_polyline": ""
+                }
+            }
+
+        # Build GeoJSON response
+        linestring_geojson = result[0]
+        encoded_polyline = result[1] if result[1] else ""
+
+        # Parse the GeoJSON
+        geometry = json.loads(linestring_geojson)
+
+        # Handle sampling of coordinates for response when simplify=true
+        sampled_coords = []
+        if geometry and geometry.get('coordinates') and len(geometry['coordinates']) > 0:
+            coords = geometry['coordinates']
+
+            # Sample coordinates if needed for response
+            if len(coords) > 50 and simplify:
+                # Always include first and last points
+                first_point = coords[0]
+                last_point = coords[-1]
+
+                # Sample middle points - take about 48 points evenly distributed
+                sample_step = len(coords) // 48
+                sampled_coords = [coords[i]
+                                  for i in range(0, len(coords), sample_step)]
+
+                # Ensure we include the last point if it wasn't included in sampling
+                if sampled_coords[-1] != last_point:
+                    sampled_coords.append(last_point)
+            else:
+                sampled_coords = coords
+
+        # Use sampled coordinates for the response geometry if simplify=true
+        response_geometry = None
+        if simplify and len(sampled_coords) > 0:
+            response_geometry = {
+                "type": "LineString",
+                "coordinates": sampled_coords
+            }
+        else:
+            response_geometry = json.loads(linestring_geojson)
+
+        # Return formatted response
+        return {
+            "type": "Feature",
+            "geometry": response_geometry,
+            "properties": {
+                "flight_id": flight.flight_id,
+                "flight_uuid": str(flight.id),
+                "pilot_name": flight.pilot_name,
+                "pilot_id": flight.pilot_id,
+                "source": flight.source,
+                "total_points": flight.total_points,
+                "first_fix": flight.first_fix,
+                "last_fix": flight.last_fix,
+                "simplified": simplify,
+                "sampled": simplify and len(sampled_coords) > 0,
+                "encoded_polyline": encoded_polyline
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating track linestring: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate track linestring: {str(e)}"
+        )
+
+
 @router.get("/flight-state/{flight_uuid}", response_model=Dict)
 async def get_flight_state_endpoint(
     flight_uuid: str,
