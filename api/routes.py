@@ -5326,14 +5326,10 @@ async def persist_live_flight(
                 UploadedTrackPoint.flight_uuid == upload_flight.id
             ).delete(synchronize_session=False)
             
-            # Reset flight statistics to NULL/0 so triggers can properly recalculate
-            # This fixes the issue where first_fix would remain from old data
-            upload_flight.first_fix = None
-            upload_flight.last_fix = None
-            upload_flight.total_points = 0
-            
+            # Don't reset flight statistics here - let the trigger handle it
+            # We'll update them after queueing the points
             db.commit()
-            logger.info(f"Cleared {deleted_count} existing upload points for flight {upload_flight.flight_id} and reset flight statistics")
+            logger.info(f"Cleared {deleted_count} existing upload points for flight {upload_flight.flight_id}")
             
             # Convert live points to upload points format with the upload flight UUID
             upload_points = []
@@ -5376,29 +5372,38 @@ async def persist_live_flight(
                 
                 logger.info(f"Queued {points_added} points for persistence from {flight.source} flight {flight.flight_id}")
                 
-                # Manually set first_fix since the trigger isn't working properly
-                # Use the first point from the live_points we just queued
-                if upload_points and upload_flight.first_fix is None:
-                    first_point_data = upload_points[0]  # First point in the list we queued
+                # After queueing points, update flight statistics
+                # The trigger will update these as points are inserted, but we set initial values
+                # to ensure consistency, especially for first_fix which should be from the earliest point
+                if upload_points:
+                    # Sort points by datetime to ensure we get the correct first and last
+                    sorted_points = sorted(upload_points, key=lambda x: x['datetime'])
+                    
+                    first_point_data = sorted_points[0]  # Earliest point
+                    last_point_data = sorted_points[-1]  # Latest point
+                    
+                    # Always update first_fix and last_fix based on the sorted points
                     upload_flight.first_fix = {
                         'lat': first_point_data['lat'],
                         'lon': first_point_data['lon'],
                         'elevation': first_point_data['elevation'],
                         'datetime': first_point_data['datetime']
                     }
-                    logger.info(f"Manually set first_fix for upload flight {upload_flight.flight_id}")
                     
-                # Also update last_fix with the last point
-                if upload_points:
-                    last_point_data = upload_points[-1]  # Last point in the list
                     upload_flight.last_fix = {
                         'lat': last_point_data['lat'],
                         'lon': last_point_data['lon'],
                         'elevation': last_point_data['elevation'],
                         'datetime': last_point_data['datetime']
                     }
+                    
                     # Update total_points to match what we queued
                     upload_flight.total_points = len(upload_points)
+                    
+                    logger.info(f"Updated flight statistics for {upload_flight.flight_id}: "
+                              f"first_fix={first_point_data['datetime']}, "
+                              f"last_fix={last_point_data['datetime']}, "
+                              f"total_points={len(upload_points)}")
         
         db.commit()
         
