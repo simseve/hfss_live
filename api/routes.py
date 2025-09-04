@@ -1279,10 +1279,24 @@ async def get_uploaded_points_raw(
 
 def get_flight_state(flight_uuid, db, recent_points_limit=20):
     """Get the current flight state for a specific flight"""
-    # Get the most recent track points for this flight
-    recent_points = db.query(LiveTrackPoint).filter(
-        LiveTrackPoint.flight_uuid == flight_uuid
-    ).order_by(LiveTrackPoint.datetime.desc()).limit(recent_points_limit).all()
+    # First check if this is a live or upload flight
+    from database.models import Flight, UploadedTrackPoint
+    
+    flight = db.query(Flight).filter(Flight.id == flight_uuid).first()
+    if not flight:
+        return 'unknown', {'confidence': 'low', 'reason': 'flight_not_found'}
+    
+    # Query the appropriate table based on flight source
+    if 'upload' in flight.source:
+        # For upload flights, query UploadedTrackPoint
+        recent_points = db.query(UploadedTrackPoint).filter(
+            UploadedTrackPoint.flight_uuid == flight_uuid
+        ).order_by(UploadedTrackPoint.datetime.desc()).limit(recent_points_limit).all()
+    else:
+        # For live flights, query LiveTrackPoint
+        recent_points = db.query(LiveTrackPoint).filter(
+            LiveTrackPoint.flight_uuid == flight_uuid
+        ).order_by(LiveTrackPoint.datetime.desc()).limit(recent_points_limit).all()
 
     if not recent_points:
         return 'unknown', {'confidence': 'low', 'reason': 'no_track_points'}
@@ -5303,6 +5317,7 @@ async def persist_live_flight(
             live_points = points_query.all()
             
             if not live_points:
+                logger.warning(f"No live points found for flight {flight.flight_id} with date filter - skipping")
                 continue
             
             # ALWAYS delete ALL existing upload points for this flight first
