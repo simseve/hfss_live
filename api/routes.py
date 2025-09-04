@@ -5310,8 +5310,15 @@ async def persist_live_flight(
             deleted_count = db.query(UploadedTrackPoint).filter(
                 UploadedTrackPoint.flight_uuid == upload_flight.id
             ).delete(synchronize_session=False)
+            
+            # Reset flight statistics to NULL/0 so triggers can properly recalculate
+            # This fixes the issue where first_fix would remain from old data
+            upload_flight.first_fix = None
+            upload_flight.last_fix = None
+            upload_flight.total_points = 0
+            
             db.commit()
-            logger.info(f"Cleared {deleted_count} existing upload points for flight {upload_flight.flight_id} to ensure full replacement")
+            logger.info(f"Cleared {deleted_count} existing upload points for flight {upload_flight.flight_id} and reset flight statistics")
             
             # Convert live points to upload points format with the upload flight UUID
             upload_points = []
