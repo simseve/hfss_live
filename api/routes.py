@@ -1279,10 +1279,24 @@ async def get_uploaded_points_raw(
 
 def get_flight_state(flight_uuid, db, recent_points_limit=20):
     """Get the current flight state for a specific flight"""
-    # Get the most recent track points for this flight
-    recent_points = db.query(LiveTrackPoint).filter(
-        LiveTrackPoint.flight_uuid == flight_uuid
-    ).order_by(LiveTrackPoint.datetime.desc()).limit(recent_points_limit).all()
+    # First check if this is a live or upload flight
+    from database.models import Flight, UploadedTrackPoint
+    
+    flight = db.query(Flight).filter(Flight.id == flight_uuid).first()
+    if not flight:
+        return 'unknown', {'confidence': 'low', 'reason': 'flight_not_found'}
+    
+    # Query the appropriate table based on flight source
+    if 'upload' in flight.source:
+        # For upload flights, query UploadedTrackPoint
+        recent_points = db.query(UploadedTrackPoint).filter(
+            UploadedTrackPoint.flight_uuid == flight_uuid
+        ).order_by(UploadedTrackPoint.datetime.desc()).limit(recent_points_limit).all()
+    else:
+        # For live flights, query LiveTrackPoint
+        recent_points = db.query(LiveTrackPoint).filter(
+            LiveTrackPoint.flight_uuid == flight_uuid
+        ).order_by(LiveTrackPoint.datetime.desc()).limit(recent_points_limit).all()
 
     if not recent_points:
         return 'unknown', {'confidence': 'low', 'reason': 'no_track_points'}
@@ -5303,6 +5317,7 @@ async def persist_live_flight(
             live_points = points_query.all()
             
             if not live_points:
+                logger.warning(f"No live points found for flight {flight.flight_id} with date filter - skipping")
                 continue
             
             # ALWAYS delete ALL existing upload points for this flight first
@@ -5310,8 +5325,15 @@ async def persist_live_flight(
             deleted_count = db.query(UploadedTrackPoint).filter(
                 UploadedTrackPoint.flight_uuid == upload_flight.id
             ).delete(synchronize_session=False)
+            
+            # Reset flight statistics to NULL/0 so triggers can properly recalculate
+            # This fixes the issue where first_fix would remain from old data
+            upload_flight.first_fix = None
+            upload_flight.last_fix = None
+            upload_flight.total_points = 0
+            
             db.commit()
-            logger.info(f"Cleared {deleted_count} existing upload points for flight {upload_flight.flight_id} to ensure full replacement")
+            logger.info(f"Cleared {deleted_count} existing upload points for flight {upload_flight.flight_id} and reset flight statistics")
             
             # Convert live points to upload points format with the upload flight UUID
             upload_points = []
@@ -5353,6 +5375,30 @@ async def persist_live_flight(
                 })
                 
                 logger.info(f"Queued {points_added} points for persistence from {flight.source} flight {flight.flight_id}")
+                
+                # Manually set first_fix since the trigger isn't working properly
+                # Use the first point from the live_points we just queued
+                if upload_points and upload_flight.first_fix is None:
+                    first_point_data = upload_points[0]  # First point in the list we queued
+                    upload_flight.first_fix = {
+                        'lat': first_point_data['lat'],
+                        'lon': first_point_data['lon'],
+                        'elevation': first_point_data['elevation'],
+                        'datetime': first_point_data['datetime']
+                    }
+                    logger.info(f"Manually set first_fix for upload flight {upload_flight.flight_id}")
+                    
+                # Also update last_fix with the last point
+                if upload_points:
+                    last_point_data = upload_points[-1]  # Last point in the list
+                    upload_flight.last_fix = {
+                        'lat': last_point_data['lat'],
+                        'lon': last_point_data['lon'],
+                        'elevation': last_point_data['elevation'],
+                        'datetime': last_point_data['datetime']
+                    }
+                    # Update total_points to match what we queued
+                    upload_flight.total_points = len(upload_points)
         
         db.commit()
         
