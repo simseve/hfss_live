@@ -5375,6 +5375,30 @@ async def persist_live_flight(
                 })
                 
                 logger.info(f"Queued {points_added} points for persistence from {flight.source} flight {flight.flight_id}")
+                
+                # Manually set first_fix since the trigger isn't working properly
+                # Use the first point from the live_points we just queued
+                if upload_points and upload_flight.first_fix is None:
+                    first_point_data = upload_points[0]  # First point in the list we queued
+                    upload_flight.first_fix = {
+                        'lat': first_point_data['lat'],
+                        'lon': first_point_data['lon'],
+                        'elevation': first_point_data['elevation'],
+                        'datetime': first_point_data['datetime']
+                    }
+                    logger.info(f"Manually set first_fix for upload flight {upload_flight.flight_id}")
+                    
+                # Also update last_fix with the last point
+                if upload_points:
+                    last_point_data = upload_points[-1]  # Last point in the list
+                    upload_flight.last_fix = {
+                        'lat': last_point_data['lat'],
+                        'lon': last_point_data['lon'],
+                        'elevation': last_point_data['elevation'],
+                        'datetime': last_point_data['datetime']
+                    }
+                    # Update total_points to match what we queued
+                    upload_flight.total_points = len(upload_points)
         
         db.commit()
         
