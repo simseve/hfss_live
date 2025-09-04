@@ -20,7 +20,7 @@ import hashlib
 from config import settings
 from math import radians, sin, cos, sqrt, atan2
 from uuid import UUID
-from sqlalchemy import func
+from sqlalchemy import func, or_
 import aiohttp
 from aiohttp import ClientSession
 from jwt.exceptions import PyJWTError
@@ -5052,15 +5052,21 @@ async def delete_all_upload_flights(
 @router.delete("/admin/delete-pilot-flights/{pilot_id}")
 async def delete_pilot_flights(
     pilot_id: str,
+    source_type: str = Query("all", description="Type of flights to delete: 'all', 'live', 'upload', or 'live_and_upload'"),
     credentials: HTTPAuthorizationCredentials = Security(security),
     db: Session = Depends(get_db)
 ):
     """
-    Delete all flights (both live and upload) for a specific pilot_id.
+    Delete flights for a specific pilot_id based on source type.
     This includes all associated track points from live_track_points and uploaded_track_points tables.
     
     Parameters:
     - pilot_id: The pilot ID whose flights should be deleted
+    - source_type: Type of flights to delete:
+        - 'all': Delete all flights regardless of source
+        - 'live': Delete only flights with 'live' in source (e.g., 'live', 'flymaster_live', 'tk905b_live')
+        - 'upload': Delete only flights with 'upload' in source (e.g., 'upload', 'flymaster_upload', 'tk905b_upload')
+        - 'live_and_upload': Delete flights with either 'live' OR 'upload' in source (default behavior)
     
     Returns:
     - Details about the deleted flights including counts for live and upload flights
@@ -5079,15 +5085,39 @@ async def delete_pilot_flights(
         raise HTTPException(status_code=403, detail="Invalid or expired token")
     
     try:
-        # Query all flights for this pilot
-        flights = db.query(Flight).filter(
-            Flight.pilot_id == pilot_id
-        ).all()
+        # Validate source_type parameter
+        valid_source_types = ['all', 'live', 'upload', 'live_and_upload']
+        if source_type not in valid_source_types:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid source_type: {source_type}. Must be one of: {', '.join(valid_source_types)}"
+            )
+        
+        # Build query based on source_type
+        query = db.query(Flight).filter(Flight.pilot_id == pilot_id)
+        
+        if source_type == 'live':
+            # Only flights with 'live' in source
+            query = query.filter(Flight.source.ilike('%live%'))
+        elif source_type == 'upload':
+            # Only flights with 'upload' in source
+            query = query.filter(Flight.source.ilike('%upload%'))
+        elif source_type == 'live_and_upload':
+            # Flights with either 'live' OR 'upload' in source
+            query = query.filter(
+                or_(
+                    Flight.source.ilike('%live%'),
+                    Flight.source.ilike('%upload%')
+                )
+            )
+        # else: source_type == 'all' - no additional filter needed
+        
+        flights = query.all()
         
         if not flights:
             return {
                 "success": False,
-                "message": f"No flights found for pilot_id: {pilot_id}",
+                "message": f"No {source_type} flights found for pilot_id: {pilot_id}",
                 "deleted_live_flights": 0,
                 "deleted_upload_flights": 0,
                 "total_live_points": 0,
@@ -5117,14 +5147,14 @@ async def delete_pilot_flights(
         db.commit()
         
         logger.warning(
-            f"Admin deleted all flights for pilot_id: {pilot_id}. "
+            f"Admin deleted {source_type} flights for pilot_id: {pilot_id}. "
             f"Live flights: {len(live_flights)}, Upload flights: {len(upload_flights)}, "
             f"Total points deleted: {total_live_points + total_upload_points}"
         )
         
         return {
             "success": True,
-            "message": f"Successfully deleted all flights for pilot_id: {pilot_id}",
+            "message": f"Successfully deleted {source_type} flights for pilot_id: {pilot_id}",
             "deleted_live_flights": len(live_flights),
             "deleted_upload_flights": len(upload_flights),
             "total_live_points": total_live_points,
