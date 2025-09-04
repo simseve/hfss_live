@@ -5049,6 +5049,99 @@ async def delete_all_upload_flights(
         )
 
 
+@router.delete("/admin/delete-pilot-flights/{pilot_id}")
+async def delete_pilot_flights(
+    pilot_id: str,
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    db: Session = Depends(get_db)
+):
+    """
+    Delete all flights (both live and upload) for a specific pilot_id.
+    This includes all associated track points from live_track_points and uploaded_track_points tables.
+    
+    Parameters:
+    - pilot_id: The pilot ID whose flights should be deleted
+    
+    Returns:
+    - Details about the deleted flights including counts for live and upload flights
+    """
+    # Verify JWT token
+    try:
+        token_data = jwt.decode(
+            credentials.credentials,
+            settings.SECRET_KEY,
+            algorithms=["HS256"],
+            audience="api.hikeandfly.app",
+            issuer="hikeandfly.app",
+            verify=True
+        )
+    except (PyJWTError, jwt.ExpiredSignatureError) as e:
+        raise HTTPException(status_code=403, detail="Invalid or expired token")
+    
+    try:
+        # Query all flights for this pilot
+        flights = db.query(Flight).filter(
+            Flight.pilot_id == pilot_id
+        ).all()
+        
+        if not flights:
+            return {
+                "success": False,
+                "message": f"No flights found for pilot_id: {pilot_id}",
+                "deleted_live_flights": 0,
+                "deleted_upload_flights": 0,
+                "total_live_points": 0,
+                "total_upload_points": 0
+            }
+        
+        # Track deletion statistics
+        live_flights = []
+        upload_flights = []
+        total_live_points = 0
+        total_upload_points = 0
+        
+        # Categorize flights and count points
+        for flight in flights:
+            if 'live' in flight.source.lower():
+                live_flights.append(flight)
+                total_live_points += flight.total_points
+            elif 'upload' in flight.source.lower():
+                upload_flights.append(flight)
+                total_upload_points += flight.total_points
+        
+        # Delete all flights (cascade deletes will handle track points)
+        for flight in flights:
+            db.delete(flight)
+        
+        # Commit the transaction
+        db.commit()
+        
+        logger.warning(
+            f"Admin deleted all flights for pilot_id: {pilot_id}. "
+            f"Live flights: {len(live_flights)}, Upload flights: {len(upload_flights)}, "
+            f"Total points deleted: {total_live_points + total_upload_points}"
+        )
+        
+        return {
+            "success": True,
+            "message": f"Successfully deleted all flights for pilot_id: {pilot_id}",
+            "deleted_live_flights": len(live_flights),
+            "deleted_upload_flights": len(upload_flights),
+            "total_live_points": total_live_points,
+            "total_upload_points": total_upload_points,
+            "total_flights_deleted": len(flights),
+            "total_points_deleted": total_live_points + total_upload_points
+        }
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error deleting flights for pilot_id {pilot_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete flights for pilot_id {pilot_id}: {str(e)}"
+        )
+
+
 @router.post("/admin/persist-live-flight")
 async def persist_live_flight(
     flight_uuid: str,
