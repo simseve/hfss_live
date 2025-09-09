@@ -8,7 +8,7 @@ from typing import Optional
 from datetime import datetime
 from datadog import DogStatsd
 from sqlalchemy.orm import Session
-from database.database_config import get_db
+from database.db_conf import get_db
 from config import settings
 
 logger = logging.getLogger(__name__)
