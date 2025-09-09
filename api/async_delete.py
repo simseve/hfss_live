@@ -24,6 +24,84 @@ security = HTTPBearer()
 # Store deletion status in Redis
 deletion_status = {}
 
+async def delete_single_flight_background(
+    flight_uuid: str,
+    race_id: str,
+    source: str,
+    deletion_id: str
+):
+    """Background task to delete a single flight with potentially thousands of points"""
+    try:
+        # Get a new database session for background task
+        from database.db_conf import SessionLocal
+        db = SessionLocal()
+        
+        # Update status
+        await redis_queue.redis.hset(
+            f"deletion:{deletion_id}",
+            mapping={
+                "status": "processing",
+                "started_at": datetime.utcnow().isoformat()
+            }
+        )
+        
+        # Find the flight
+        flight = db.query(Flight).filter(
+            Flight.id == flight_uuid,
+            Flight.race_id == race_id,
+            Flight.source == source
+        ).first()
+        
+        if not flight:
+            await redis_queue.redis.hset(
+                f"deletion:{deletion_id}",
+                mapping={
+                    "status": "failed",
+                    "error": "Flight not found",
+                    "failed_at": datetime.utcnow().isoformat()
+                }
+            )
+            return
+        
+        # Track statistics
+        total_points = flight.total_points or 0
+        pilot_name = flight.pilot_name or "Unknown"
+        
+        # Delete the flight (cascade will delete all track points)
+        db.delete(flight)
+        db.commit()
+        
+        # Update final status
+        await redis_queue.redis.hset(
+            f"deletion:{deletion_id}",
+            mapping={
+                "status": "completed",
+                "completed_at": datetime.utcnow().isoformat(),
+                "deleted_flights": "1",
+                "deleted_points": str(total_points),
+                "pilot_name": pilot_name,
+                "flight_uuid": flight_uuid
+            }
+        )
+        
+        # Set expiry for status (1 hour)
+        await redis_queue.redis.expire(f"deletion:{deletion_id}", 3600)
+        
+        logger.info(f"Background deletion completed: flight {flight_uuid} with {total_points} points")
+        
+    except Exception as e:
+        logger.error(f"Background flight deletion failed: {e}")
+        await redis_queue.redis.hset(
+            f"deletion:{deletion_id}",
+            mapping={
+                "status": "failed",
+                "error": str(e),
+                "failed_at": datetime.utcnow().isoformat()
+            }
+        )
+    finally:
+        db.close()
+
 async def delete_pilot_flights_background(
     pilot_id: str,
     source_type: str,
@@ -111,6 +189,93 @@ async def delete_pilot_flights_background(
         )
     finally:
         db.close()
+
+@router.delete("/tracks/fuuid-async/{flight_uuid}")
+async def delete_single_flight_async(
+    flight_uuid: str,
+    background_tasks: BackgroundTasks,
+    source: str = Query(..., regex="^.*(?:live|upload).*$",
+                        description="Track source (must contain 'live' or 'upload')"),
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    db: Session = Depends(get_db)
+):
+    """
+    Asynchronously delete a single flight with potentially thousands of points.
+    Returns 202 Accepted immediately and processes deletion in background.
+    
+    Perfect for deleting flights with many track points without blocking the UI.
+    Check status via GET /deletion-status/{deletion_id}
+    """
+    try:
+        # Verify JWT token
+        token = credentials.credentials
+        token_data = jwt.decode(
+            token,
+            settings.SECRET_KEY,
+            algorithms=["HS256"],
+            audience="api.hikeandfly.app",
+            issuer="hikeandfly.app",
+            verify=True
+        )
+        
+        if not token_data.get("sub", "").startswith("contest:"):
+            raise HTTPException(
+                status_code=403,
+                detail="Invalid token subject - must be contest-specific"
+            )
+        
+        race_id = token_data["sub"].split(":")[1]
+        
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token has expired")
+    except Exception:
+        raise HTTPException(status_code=403, detail="Invalid or expired token")
+    
+    # Quick check if flight exists
+    flight = db.query(Flight).filter(
+        Flight.id == flight_uuid,
+        Flight.race_id == race_id,
+        Flight.source == source
+    ).first()
+    
+    if not flight:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Flight not found with id {flight_uuid} and source {source}"
+        )
+    
+    # Generate deletion ID
+    deletion_id = str(uuid4())
+    
+    # Initialize status in Redis
+    await redis_queue.redis.hset(
+        f"deletion:{deletion_id}",
+        mapping={
+            "status": "accepted",
+            "flight_uuid": flight_uuid,
+            "source": source,
+            "pilot_name": flight.pilot_name or "Unknown",
+            "total_points": str(flight.total_points or 0),
+            "created_at": datetime.utcnow().isoformat()
+        }
+    )
+    
+    # Add background task
+    background_tasks.add_task(
+        delete_single_flight_background,
+        flight_uuid,
+        race_id,
+        source,
+        deletion_id
+    )
+    
+    # Return 202 Accepted immediately
+    return {
+        "status_code": status.HTTP_202_ACCEPTED,
+        "deletion_id": deletion_id,
+        "message": f"Flight deletion accepted (contains {flight.total_points or 0} points)",
+        "status_url": f"/tracking/deletion-status/{deletion_id}"
+    }
 
 @router.delete("/admin/delete-pilot-flights-async/{pilot_id}")
 async def delete_pilot_flights_async(

@@ -62,7 +62,9 @@ New optimized endpoints to fix slow page loads and timeouts in HFSS tracker.
 
 ---
 
-### 3. Async Delete Endpoint
+### 3. Async Delete Endpoints
+
+#### Delete All Pilot Flights
 **DELETE** `/tracking/admin/delete-pilot-flights-async/{pilot_id}`
 
 **Response Time:** Immediate (202 Accepted)
@@ -77,18 +79,35 @@ New optimized endpoints to fix slow page loads and timeouts in HFSS tracker.
 }
 ```
 
-**Then check status:**
+#### Delete Single Flight (NEW)
+**DELETE** `/tracking/tracks/fuuid-async/{flight_uuid}?source=live`
+
+**Response Time:** Immediate (202 Accepted)
+
+**Returns:**
+```json
+{
+  "status_code": 202,
+  "deletion_id": "abc-123",
+  "message": "Flight deletion accepted (contains 5000 points)",
+  "status_url": "/tracking/deletion-status/abc-123"
+}
+```
+
+**Then check status for both:**
 **GET** `/tracking/deletion-status/{deletion_id}`
 
 ```json
 {
   "status": "completed",
-  "deleted_flights": 45,
-  "deleted_points": 15000
+  "deleted_flights": 1,
+  "deleted_points": 5000,
+  "pilot_name": "John Doe",
+  "flight_uuid": "abc-def-ghi"
 }
 ```
 
-**Use for:** Delete operations without blocking UI
+**Use for:** Delete operations without blocking UI (especially for flights with thousands of points)
 
 ---
 
