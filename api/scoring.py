@@ -1033,18 +1033,18 @@ async def get_daily_tracks_tile(
             WHERE 1=1
             -- Apply appropriate spatial filtering based on zoom level
             {
-            "" if z == 0 else  # No spatial filtering for level 0
+            "" if z == 0 else
             "AND (np.lat BETWEEN -85 AND 85 AND np.lon BETWEEN -180 AND 180)" if z <= 2 else
             "AND ST_Intersects(ST_Transform(ST_SetSRID(ST_MakePoint(np.lon, np.lat), 4326), 3857), (SELECT geom FROM bounds))"
         }
             -- Apply sampling based on zoom level and point number
             AND (
                 {
-            "1=1" if z == 0 else  # For zoom level 0, include ALL points for proper lines
+            "1=1" if z == 0 else
             "np.point_num % 60 = 0" if z < 3 else
             "np.point_num % 30 = 0" if z < 7 else
             "np.point_num % 10 = 0" if z < 10 else
-            "1=1"  # Include all points for high zoom levels
+            "1=1"
         }
                 -- Always include the last point of each flight
                 OR EXISTS (
@@ -1173,11 +1173,11 @@ async def get_daily_tracks_tile(
                 FROM numbered_points np
                 WHERE (
                     {
-                "1=1" if z == 0 else  # For zoom level 0, include ALL points for proper lines
+                "1=1" if z == 0 else
                 "np.point_num % 60 = 0" if z < 3 else
                 "np.point_num % 30 = 0" if z < 7 else
                 "np.point_num % 10 = 0" if z < 10 else
-                "1=1"  # Include all points for high zoom levels
+                "1=1"
             }
                 )
             ),
@@ -1240,18 +1240,18 @@ async def get_daily_tracks_tile(
                 WHERE 1=1
                 -- Apply appropriate spatial filtering based on zoom level
                 {
-                "" if z == 0 else  # No spatial filtering for level 0
+                "" if z == 0 else
                 "AND (np.lat BETWEEN -85 AND 85 AND np.lon BETWEEN -180 AND 180)" if z <= 2 else
                 "AND ST_Intersects(ST_Transform(ST_SetSRID(ST_MakePoint(np.lon, np.lat), 4326), 3857), (SELECT geom FROM bounds))"
             }
                 -- Apply sampling based on zoom level and point number
                 AND (
                     {
-                "1=1" if z == 0 else  # For zoom level 0, include ALL points for proper lines
+                "1=1" if z == 0 else
                 "np.point_num % 60 = 0" if z < 3 else
                 "np.point_num % 30 = 0" if z < 7 else
                 "np.point_num % 10 = 0" if z < 10 else
-                "1=1"  # Include all points for high zoom levels
+                "1=1"
             }
                     -- Always include the last point of each flight
                     OR EXISTS (

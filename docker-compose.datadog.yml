@@ -1,0 +1,53 @@
+# Datadog monitoring overlay for production
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.datadog.yml up -d
+
+version: '3.8'
+
+services:
+  datadog-agent:
+    image: datadog/agent:latest
+    container_name: datadog-agent
+    environment:
+      - DD_API_KEY=${DD_API_KEY}
+      - DD_SITE=datadoghq.eu  # EU site
+      - DD_LOGS_ENABLED=true
+      - DD_LOGS_CONFIG_CONTAINER_COLLECT_ALL=true
+      - DD_CONTAINER_EXCLUDE="image:datadog/agent"
+      - DD_APM_ENABLED=true
+      - DD_APM_NON_LOCAL_TRAFFIC=true
+      - DD_DOGSTATSD_NON_LOCAL_TRAFFIC=true
+      - DD_DOGSTATSD_SOCKET=/var/run/datadog/datadog.sock
+      - DD_TAGS=env:${DD_ENV:-production} service:hfss-live
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /proc/:/host/proc/:ro
+      - /sys/fs/cgroup/:/host/sys/fs/cgroup:ro
+      - datadog-socket:/var/run/datadog
+    ports:
+      - "8125:8125/udp"  # DogStatsD
+      - "8126:8126/tcp"  # APM
+    networks:
+      - hfss-network
+    restart: unless-stopped
+
+  # Update your app service to use Datadog
+  app:
+    environment:
+      - DD_AGENT_HOST=datadog-agent  # Point to Datadog container
+      - DD_DOGSTATSD_PORT=8125
+      - DD_ENV=${DD_ENV:-production}
+      - DD_VERSION=${DD_VERSION:-1.0.0}
+      - DD_TRACE_ENABLED=true
+    volumes:
+      - datadog-socket:/var/run/datadog
+    depends_on:
+      - datadog-agent
+    labels:
+      com.datadoghq.ad.logs: '[{"source": "fastapi", "service": "hfss-live"}]'
+
+volumes:
+  datadog-socket:
+
+networks:
+  hfss-network:
+    external: true
