@@ -41,6 +41,8 @@ async def get_live_summary(
     Full flight data should be loaded separately per pilot when expanded.
     """
     try:
+        logger.info(f"Summary endpoint called with opentime={opentime}, closetime={closetime}, source={source}")
+        
         # Parse times
         opentime_dt = datetime.fromisoformat(
             opentime.strip().replace('Z', '+00:00'))
@@ -133,17 +135,23 @@ async def get_live_summary(
             func.max(Flight.created_at).desc()
         ).limit(100).all()  # Limit to 100 pilots for performance
         
+        # Log query results for debugging
+        logger.info(f"Summary stats for race_id={race_id}, time={opentime_dt} to {closetime_dt}: "
+                   f"flights={stats_result.total_flights if stats_result else 0}, "
+                   f"pilots={stats_result.total_pilots if stats_result else 0}")
+        logger.info(f"Found {len(pilot_summary)} pilots with flights")
+        
         # Build response
         response = {
             "summary": {
-                "total_flights": stats_result.total_flights or 0,
-                "total_pilots": stats_result.total_pilots or 0,
+                "total_flights": stats_result.total_flights or 0 if stats_result else 0,
+                "total_pilots": stats_result.total_pilots or 0 if stats_result else 0,
                 "time_range": {
                     "start": opentime_dt.isoformat(),
                     "end": closetime_dt.isoformat()
                 },
-                "earliest_activity": stats_result.earliest_flight.isoformat() if stats_result.earliest_flight else None,
-                "latest_activity": stats_result.latest_flight.isoformat() if stats_result.latest_flight else None
+                "earliest_activity": stats_result.earliest_flight.isoformat() if stats_result and stats_result.earliest_flight else None,
+                "latest_activity": stats_result.latest_flight.isoformat() if stats_result and stats_result.latest_flight else None
             },
             "pilots": [
                 {
