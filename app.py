@@ -243,6 +243,14 @@ try:
     logger.info("Tracker summary endpoints registered")
 except ImportError:
     logger.warning("Tracker summary endpoints not available")
+
+# Async delete endpoints
+try:
+    from api.async_delete import router as async_delete_router
+    app.include_router(async_delete_router, tags=['Async Operations'])
+    logger.info("Async delete endpoints registered")
+except ImportError:
+    logger.warning("Async delete endpoints not available")
 app.include_router(queue_admin_router, tags=['Queue Admin'])
 
 # TK905B GPS Tracker endpoint (learning mode)
