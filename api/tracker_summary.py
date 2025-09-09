@@ -141,8 +141,18 @@ async def get_live_summary(
                    f"pilots={stats_result.total_pilots if stats_result else 0}")
         logger.info(f"Found {len(pilot_summary)} pilots with flights")
         
-        # Build response
+        # Build response - keep backward compatibility with "users" field
         response = {
+            "users": [
+                {
+                    "pilot_id": str(pilot.pilot_id),
+                    "pilot_name": pilot.pilot_name or "Unknown",
+                    "flights": [],  # Empty array for backward compatibility
+                    "flight_count": pilot.flight_count,
+                    "last_activity": pilot.last_activity.isoformat() if pilot.last_activity else None
+                }
+                for pilot in pilot_summary
+            ],
             "summary": {
                 "total_flights": stats_result.total_flights or 0 if stats_result else 0,
                 "total_pilots": stats_result.total_pilots or 0 if stats_result else 0,
@@ -152,16 +162,7 @@ async def get_live_summary(
                 },
                 "earliest_activity": stats_result.earliest_flight.isoformat() if stats_result and stats_result.earliest_flight else None,
                 "latest_activity": stats_result.latest_flight.isoformat() if stats_result and stats_result.latest_flight else None
-            },
-            "pilots": [
-                {
-                    "pilot_id": str(pilot.pilot_id),
-                    "pilot_name": pilot.pilot_name or "Unknown",
-                    "flight_count": pilot.flight_count,
-                    "last_activity": pilot.last_activity.isoformat() if pilot.last_activity else None
-                }
-                for pilot in pilot_summary
-            ]
+            }
         }
         
         # Cache the response
