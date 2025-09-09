@@ -44,11 +44,13 @@ class PlatformMonitor:
         try:
             live_metrics = await self.get_live_tracking_metrics(db)
             upload_metrics = await self.get_upload_metrics(db)
-            scoring_metrics = await self.get_scoring_metrics(db)
-            gps_metrics = await self.get_gps_tcp_metrics()
-            queue_metrics = await self.get_queue_metrics()
+            scoring_metrics = await self.get_scoring_metrics()  # No db param
+            gps_metrics = await self.get_gps_tcp_metrics()  # No db param
+            queue_metrics = await self.get_queue_health()  # Use existing method
             db_metrics = await self.get_database_metrics(db)
-            platform_health = await self.get_platform_health(
+            
+            # Calculate platform health based on metrics
+            platform_health = self._calculate_platform_health(
                 live_metrics, upload_metrics, queue_metrics, db_metrics
             )
             
@@ -65,6 +67,38 @@ class PlatformMonitor:
         except Exception as e:
             logger.error(f"Error getting comprehensive metrics: {e}")
             raise
+    
+    def _calculate_platform_health(self, live_metrics: Dict, upload_metrics: Dict, 
+                                  queue_metrics: Dict, db_metrics: Dict) -> Dict[str, Any]:
+        """Calculate overall platform health based on metrics"""
+        issues = []
+        status = 'healthy'
+        
+        # Check queue health
+        if queue_metrics.get('summary', {}).get('total_dlq', 0) > 100:
+            issues.append('Critical: High DLQ count')
+            status = 'critical'
+        elif queue_metrics.get('summary', {}).get('total_dlq', 0) > 10:
+            issues.append('Warning: DLQ items present')
+            status = 'degraded' if status == 'healthy' else status
+            
+        # Check database connections
+        active = db_metrics.get('connections_active', 0)
+        total = db_metrics.get('connections_total', 1)
+        if total > 0 and (active / total) > 0.9:
+            issues.append('High database connection usage')
+            status = 'degraded' if status == 'healthy' else status
+            
+        # Check for stalled queues
+        if queue_metrics.get('summary', {}).get('total_pending', 0) > 1000:
+            issues.append('High queue backlog')
+            status = 'degraded' if status == 'healthy' else status
+            
+        return {
+            'status': status,
+            'issues': issues,
+            'components_checked': 6
+        }
     
     async def get_live_tracking_metrics(self, db: Session) -> Dict[str, Any]:
         """Get metrics for live tracking system"""
