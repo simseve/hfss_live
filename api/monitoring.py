@@ -21,6 +21,14 @@ from config import settings
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/monitoring", tags=["Monitoring"])
 
+async def get_platform_metrics(db: Session) -> Dict[str, Any]:
+    """
+    Get comprehensive platform metrics for internal use.
+    This function is used by the metrics pusher background task.
+    """
+    monitor = PlatformMonitor()
+    return await monitor.get_comprehensive_metrics(db)
+
 
 class PlatformMonitor:
     """Central monitoring service for all platform components"""
@@ -30,6 +38,33 @@ class PlatformMonitor:
         self.last_update = time.time()
         self.metrics_history = []  # Store last N metric snapshots
         self.max_history = 60  # Keep 60 data points (1 hour at 1-minute intervals)
+    
+    async def get_comprehensive_metrics(self, db: Session) -> Dict[str, Any]:
+        """Get all platform metrics for dashboard and metrics pusher"""
+        try:
+            live_metrics = await self.get_live_tracking_metrics(db)
+            upload_metrics = await self.get_upload_metrics(db)
+            scoring_metrics = await self.get_scoring_metrics(db)
+            gps_metrics = await self.get_gps_tcp_metrics()
+            queue_metrics = await self.get_queue_metrics()
+            db_metrics = await self.get_database_metrics(db)
+            platform_health = await self.get_platform_health(
+                live_metrics, upload_metrics, queue_metrics, db_metrics
+            )
+            
+            return {
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'live_tracking': live_metrics,
+                'uploads': upload_metrics,
+                'scoring': scoring_metrics,
+                'gps_tcp_server': gps_metrics,
+                'database': db_metrics,
+                'queues': queue_metrics,
+                'platform_health': platform_health
+            }
+        except Exception as e:
+            logger.error(f"Error getting comprehensive metrics: {e}")
+            raise
     
     async def get_live_tracking_metrics(self, db: Session) -> Dict[str, Any]:
         """Get metrics for live tracking system"""
