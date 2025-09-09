@@ -190,7 +190,7 @@ async def delete_pilot_flights_background(
     finally:
         db.close()
 
-@router.delete("/tracks/fuuid-async/{flight_uuid}")
+@router.delete("/tracks/fuuid-async/{flight_uuid}", status_code=status.HTTP_202_ACCEPTED)
 async def delete_single_flight_async(
     flight_uuid: str,
     background_tasks: BackgroundTasks,
@@ -271,13 +271,12 @@ async def delete_single_flight_async(
     
     # Return 202 Accepted immediately
     return {
-        "status_code": status.HTTP_202_ACCEPTED,
         "deletion_id": deletion_id,
         "message": f"Flight deletion accepted (contains {flight.total_points or 0} points)",
         "status_url": f"/tracking/deletion-status/{deletion_id}"
     }
 
-@router.delete("/admin/delete-pilot-flights-async/{pilot_id}")
+@router.delete("/admin/delete-pilot-flights-async/{pilot_id}", status_code=status.HTTP_202_ACCEPTED)
 async def delete_pilot_flights_async(
     pilot_id: str,
     background_tasks: BackgroundTasks,
@@ -346,7 +345,6 @@ async def delete_pilot_flights_async(
     
     # Return 202 Accepted immediately
     return {
-        "status_code": status.HTTP_202_ACCEPTED,
         "deletion_id": deletion_id,
         "message": "Deletion request accepted and processing in background",
         "status_url": f"/tracking/deletion-status/{deletion_id}"
