@@ -91,6 +91,11 @@ async def lifespan(app):
         from monitoring.datadog_integration import initialize_datadog
         await initialize_datadog()
         logger.info("Datadog monitoring initialized")
+        
+        # Start metrics pusher background task
+        from monitoring.metrics_pusher import start_metrics_pusher
+        await start_metrics_pusher()
+        logger.info("Datadog metrics pusher started (60s interval)")
     except Exception as e:
         logger.warning(f"Failed to initialize Datadog monitoring: {e}")
         logger.warning("Metrics will be logged locally only")
@@ -133,6 +138,14 @@ async def lifespan(app):
         logger.info("Background processors stopped")
     except Exception as e:
         logger.error(f"Error stopping background processors: {e}")
+    
+    # Stop metrics pusher
+    try:
+        from monitoring.metrics_pusher import stop_metrics_pusher
+        await stop_metrics_pusher()
+        logger.info("Metrics pusher stopped")
+    except Exception as e:
+        logger.error(f"Error stopping metrics pusher: {e}")
 
     # Close Redis connections
     try:
@@ -238,6 +251,14 @@ except ImportError:
 app.state.limiter = rate_limiter
 app.add_middleware(SlowAPIMiddleware)
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# Add Datadog middleware for automatic metrics collection
+try:
+    from middleware.datadog_middleware import DatadogMiddleware
+    app.add_middleware(DatadogMiddleware)
+    logger.info("Datadog middleware added for automatic metrics collection")
+except Exception as e:
+    logger.warning(f"Failed to add Datadog middleware: {e}")
 
 
 class DateTimeEncoder(json.JSONEncoder):
