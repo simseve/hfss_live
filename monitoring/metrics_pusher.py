@@ -147,8 +147,8 @@ class MetricsPusher:
             # Send event if platform is degraded
             if health.get('status') != 'healthy' and health.get('issues'):
                 self.statsd_client.event(
-                    title='Platform Health Degraded',
-                    text=f"Status: {health.get('status')}. Issues: {', '.join(health.get('issues', []))}",
+                    'Platform Health Degraded',
+                    f"Status: {health.get('status')}. Issues: {', '.join(health.get('issues', []))}",
                     alert_type='warning',
                     tags=['service:hfss-live']
                 )
