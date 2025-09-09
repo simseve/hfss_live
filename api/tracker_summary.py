@@ -13,7 +13,7 @@ import logging
 from cachetools import TTLCache
 from threading import Lock
 
-from database.db_conf import get_replica_db
+from database.db_conf import get_db
 from database.models import Flight, LiveTrackPoint, UploadedTrackPoint
 from config import settings
 
@@ -33,7 +33,7 @@ async def get_live_summary(
         None, description="End time for tracking window (ISO 8601 format)"),
     source: Optional[str] = Query(None, regex="^.*(?:live|upload).*$"),
     credentials: HTTPAuthorizationCredentials = Security(security),
-    db: Session = Depends(get_replica_db)
+    db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """
     Optimized summary endpoint for tracker page initial load.
@@ -178,7 +178,7 @@ async def get_pilot_flights(
     closetime: Optional[str] = Query(None, description="End time"),
     source: Optional[str] = Query(None),
     credentials: HTTPAuthorizationCredentials = Security(security),
-    db: Session = Depends(get_replica_db)
+    db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """
     Get flights for a specific pilot - called when pilot accordion is expanded.
