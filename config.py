@@ -45,6 +45,25 @@ class Settings(BaseSettings):
     REDIS_DB: int = 0
     REDIS_PASSWORD: Optional[str] = None
     REDIS_MAX_CONNECTIONS: int = 20
+    
+    # Datadog configuration (optional)
+    DD_API_KEY: Optional[str] = None
+    DD_APP_KEY: Optional[str] = None
+    DD_AGENT_HOST: str = "localhost"
+    DD_DOGSTATSD_PORT: int = 8125
+    DD_ENV: str = "development"
+    DD_VERSION: str = "1.0.0"
+    
+    # Alert thresholds
+    ALERT_QUEUE_PENDING_WARN: int = 1000
+    ALERT_QUEUE_PENDING_CRIT: int = 5000
+    ALERT_DLQ_WARN: int = 10
+    ALERT_DLQ_CRIT: int = 100
+    ALERT_PROCESSING_LAG: int = 300
+    ALERT_NO_DATA_MINUTES: int = 5
+    ALERT_ERROR_RATE: float = 5.0
+    ALERT_LATENCY_WARN: int = 1000
+    ALERT_LATENCY_CRIT: int = 5000
 
     def get_redis_url(self) -> str:
         """Get Redis URL from environment or construct from individual settings"""

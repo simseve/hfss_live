@@ -56,8 +56,9 @@ jobs:
           cd ${{ env.DEPLOY_PATH }}
           git pull origin ${{ env.BRANCH }}
           docker compose down
-          docker compose up -d --build
-          echo "Deployed successfully to production on host $HOSTNAME"
+          # Production deployment includes monitoring profile for Datadog
+          docker compose --profile monitoring up -d --build
+          echo "Deployed successfully to production with monitoring on host $HOSTNAME"
     
     # For development environment with Cloudflare Access
     - name: Setup cloudflared (for development)

@@ -19,6 +19,8 @@ from fastapi.security import HTTPBasic
 import api.routes as routes
 import api.scoring as scoring
 from api.gps_tcp_status import router as gps_tcp_status_router
+from api.monitoring import router as monitoring_router
+from api.queue_admin import router as queue_admin_router
 from background_tracking import periodic_tracking_update
 from db_cleanup import setup_scheduler
 from contextlib import asynccontextmanager
@@ -83,6 +85,15 @@ async def lifespan(app):
     except Exception as e:
         logger.error(f"Failed to initialize Firebase: {e}")
         logger.warning("FCM notifications will not be available")
+    
+    # Initialize Datadog monitoring
+    try:
+        from monitoring.datadog_integration import initialize_datadog
+        await initialize_datadog()
+        logger.info("Datadog monitoring initialized")
+    except Exception as e:
+        logger.warning(f"Failed to initialize Datadog monitoring: {e}")
+        logger.warning("Metrics will be logged locally only")
 
     # Start GPS TCP Server if enabled
     tcp_server_task = None
@@ -210,6 +221,8 @@ async def log_request(request: Request, call_next):
 app.include_router(routes.router, tags=['Tracking'], prefix='/tracking')
 app.include_router(scoring.router, tags=['Scoring'], prefix='/scoring')
 app.include_router(gps_tcp_status_router, tags=['GPS TCP Server'])
+app.include_router(monitoring_router, tags=['Monitoring'])
+app.include_router(queue_admin_router, tags=['Queue Admin'])
 
 # TK905B GPS Tracker endpoint (learning mode)
 try:
@@ -219,12 +232,6 @@ try:
 except ImportError:
     logger.warning("TK905B endpoint not available")
 
-# Admin endpoints for queue management
-try:
-    from api.queue_admin import router as queue_admin_router
-    app.include_router(queue_admin_router, tags=['Queue Admin'])
-except ImportError:
-    logger.warning("Queue admin endpoints not available")
 
 
 # Attach the rate limiter as a middleware
