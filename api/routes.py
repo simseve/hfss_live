@@ -160,8 +160,7 @@ async def live_tracking(
             }
             track_points_data.append(point_data)
 
-        logger.info(data)
-        logger.info(track_points_data)
+        # Log summary only, not full data
         logger.info(
             f"Saving {len(track_points_data)} track points for flight {data.flight_id}")
 
@@ -272,8 +271,7 @@ async def upload_track(
             )
 
         logger.info(
-            f"Received track upload from pilot {pilot_id} for race {race_id}")
-        logger.info(f"Total points: {len(upload_data.track_points)}")
+            f"Received track upload from pilot {pilot_id} for race {race_id} with {len(upload_data.track_points)} points")
 
         try:
             # Check for existing flight
@@ -337,7 +335,7 @@ async def upload_track(
                 # Increased chunk size since the system can handle it
                 max_points_per_chunk = 1000
                 if len(points_data) > max_points_per_chunk:
-                    logger.info(f"Large upload detected ({len(points_data)} points), splitting into chunks")
+                    logger.debug(f"Large upload detected ({len(points_data)} points), splitting into chunks")
                     chunks = [points_data[i:i+max_points_per_chunk] 
                              for i in range(0, len(points_data), max_points_per_chunk)]
                     
@@ -353,7 +351,7 @@ async def upload_track(
                             all_queued = False
                             break
                         else:
-                            logger.info(f"Queued chunk {i+1}/{len(chunks)} with {len(chunk)} points")
+                            logger.debug(f"Queued chunk {i+1}/{len(chunks)} with {len(chunk)} points")
                     
                     queued = all_queued
                 else:
@@ -5162,7 +5160,7 @@ async def persist_live_flight(
                     "total_live_points": len(live_points)
                 })
                 
-                logger.info(f"Queued {points_added} points for persistence from {flight.source} flight {flight.flight_id}")
+                logger.debug(f"Queued {points_added} points for persistence from {flight.source} flight {flight.flight_id}")
                 
                 # After queueing points, update flight statistics
                 # The trigger will update these as points are inserted, but we set initial values
@@ -5192,10 +5190,10 @@ async def persist_live_flight(
                     # Update total_points to match what we queued
                     upload_flight.total_points = len(upload_points)
                     
-                    logger.info(f"Updated flight statistics for {upload_flight.flight_id}: "
-                              f"first_fix={first_point_data['datetime']}, "
-                              f"last_fix={last_point_data['datetime']}, "
-                              f"total_points={len(upload_points)}")
+                    logger.debug(f"Updated flight statistics for {upload_flight.flight_id}: "
+                               f"first_fix={first_point_data['datetime']}, "
+                               f"last_fix={last_point_data['datetime']}, "
+                               f"total_points={len(upload_points)}")
         
         db.commit()
         

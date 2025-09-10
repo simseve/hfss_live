@@ -87,7 +87,7 @@ class MetricsPusher:
     async def _push_metrics(self):
         """Push current platform metrics to Datadog"""
         if not self.statsd_client:
-            logger.debug("MetricsPusher: StatsD client not available")
+            # Silent when disabled in development
             return
         
         try:
