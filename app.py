@@ -21,7 +21,13 @@ import api.scoring as scoring
 from api.gps_tcp_status import router as gps_tcp_status_router
 from api.monitoring import router as monitoring_router
 from api.queue_admin import router as queue_admin_router
+from api.tile_routes import router as tile_router
+from api.production_tile_routes import router as production_tile_router
 from background_tracking import periodic_tracking_update
+from background_tile_tracking import tile_based_tracking_update, tile_cache_cleanup, tile_pregenerator
+from background_production_tiles import production_tile_updates
+from services.tile_generation_service import tile_service
+from services.production_tile_service import production_tile_service
 from db_cleanup import setup_scheduler
 from contextlib import asynccontextmanager
 from database.db_conf import engine, test_db_connection
@@ -118,6 +124,34 @@ async def lifespan(app):
     track_task = asyncio.create_task(
         periodic_tracking_update(10))  # Update every 10 seconds
 
+    # Start production tile system for live tracking
+    production_tasks = []
+    try:
+        # Initialize production tile service
+        await production_tile_service.initialize()
+        logger.info("Production tile service initialized")
+        
+        # Start production tile background tasks
+        production_task = asyncio.create_task(production_tile_updates())
+        production_tasks = [production_task]
+        logger.info("Production tile system started (optimized for hundreds of users)")
+        
+    except Exception as e:
+        logger.error(f"Failed to start production tile system: {e}")
+        logger.warning("Production tile system will not be available")
+    
+    # Keep old tile system for backwards compatibility (can be removed later)
+    tile_tasks = []
+    if False:  # Disabled - using production system instead
+        try:
+            await tile_service.initialize()
+            tile_update_task = asyncio.create_task(tile_based_tracking_update(10))
+            tile_cleanup_task = asyncio.create_task(tile_cache_cleanup(300))
+            tile_pregen_task = asyncio.create_task(tile_pregenerator(60))
+            tile_tasks = [tile_update_task, tile_cleanup_task, tile_pregen_task]
+        except Exception as e:
+            logger.error(f"Failed to start tile-based tracking: {e}")
+
     # Set up and start the cleanup scheduler
     scheduler = setup_scheduler()
     scheduler.start()
@@ -177,6 +211,21 @@ async def lifespan(app):
         # Task was successfully cancelled
         pass
 
+    # Cancel tile tracking tasks
+    for task in tile_tasks:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    
+    # Close tile service
+    try:
+        await tile_service.close()
+        logger.info("Tile service closed")
+    except Exception as e:
+        logger.error(f"Error closing tile service: {e}")
+
     # Shut down the scheduler
     scheduler.shutdown()
     logger.info("Application shutdown completed")
@@ -233,6 +282,8 @@ async def log_request(request: Request, call_next):
 
 app.include_router(routes.router, tags=['Tracking'], prefix='/tracking')
 app.include_router(scoring.router, tags=['Scoring'], prefix='/scoring')
+app.include_router(tile_router, tags=['Tile Tracking'], prefix='/tracking')
+app.include_router(production_tile_router, tags=['Production Live'], prefix='/live')
 app.include_router(gps_tcp_status_router, tags=['GPS TCP Server'])
 app.include_router(monitoring_router, tags=['Monitoring'])
 
