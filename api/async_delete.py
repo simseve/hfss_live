@@ -37,7 +37,7 @@ async def delete_single_flight_background(
         db = SessionLocal()
         
         # Update status
-        await redis_queue.redis.hset(
+        await redis_queue.redis_client.hset(
             f"deletion:{deletion_id}",
             mapping={
                 "status": "processing",
@@ -53,7 +53,7 @@ async def delete_single_flight_background(
         ).first()
         
         if not flight:
-            await redis_queue.redis.hset(
+            await redis_queue.redis_client.hset(
                 f"deletion:{deletion_id}",
                 mapping={
                     "status": "failed",
@@ -72,7 +72,7 @@ async def delete_single_flight_background(
         db.commit()
         
         # Update final status
-        await redis_queue.redis.hset(
+        await redis_queue.redis_client.hset(
             f"deletion:{deletion_id}",
             mapping={
                 "status": "completed",
@@ -85,13 +85,13 @@ async def delete_single_flight_background(
         )
         
         # Set expiry for status (1 hour)
-        await redis_queue.redis.expire(f"deletion:{deletion_id}", 3600)
+        await redis_queue.redis_client.expire(f"deletion:{deletion_id}", 3600)
         
         logger.info(f"Background deletion completed: flight {flight_uuid} with {total_points} points")
         
     except Exception as e:
         logger.error(f"Background flight deletion failed: {e}")
-        await redis_queue.redis.hset(
+        await redis_queue.redis_client.hset(
             f"deletion:{deletion_id}",
             mapping={
                 "status": "failed",
@@ -114,7 +114,7 @@ async def delete_pilot_flights_background(
         db = SessionLocal()
         
         # Update status
-        await redis_queue.redis.hset(
+        await redis_queue.redis_client.hset(
             f"deletion:{deletion_id}",
             mapping={
                 "status": "processing",
@@ -153,7 +153,7 @@ async def delete_pilot_flights_background(
             if deleted_count % 10 == 0:
                 db.commit()
                 # Update progress
-                await redis_queue.redis.hset(
+                await redis_queue.redis_client.hset(
                     f"deletion:{deletion_id}",
                     "progress", f"{deleted_count}/{len(flights)}"
                 )
@@ -162,7 +162,7 @@ async def delete_pilot_flights_background(
         db.commit()
         
         # Update final status
-        await redis_queue.redis.hset(
+        await redis_queue.redis_client.hset(
             f"deletion:{deletion_id}",
             mapping={
                 "status": "completed",
@@ -173,13 +173,13 @@ async def delete_pilot_flights_background(
         )
         
         # Set expiry for status (1 hour)
-        await redis_queue.redis.expire(f"deletion:{deletion_id}", 3600)
+        await redis_queue.redis_client.expire(f"deletion:{deletion_id}", 3600)
         
         logger.info(f"Background deletion completed: {deleted_count} flights for pilot {pilot_id}")
         
     except Exception as e:
         logger.error(f"Background deletion failed: {e}")
-        await redis_queue.redis.hset(
+        await redis_queue.redis_client.hset(
             f"deletion:{deletion_id}",
             mapping={
                 "status": "failed",
@@ -248,7 +248,7 @@ async def delete_single_flight_async(
     deletion_id = str(uuid4())
     
     # Initialize status in Redis
-    await redis_queue.redis.hset(
+    await redis_queue.redis_client.hset(
         f"deletion:{deletion_id}",
         mapping={
             "status": "accepted",
@@ -325,7 +325,7 @@ async def delete_pilot_flights_async(
     deletion_id = str(uuid4())
     
     # Initialize status in Redis
-    await redis_queue.redis.hset(
+    await redis_queue.redis_client.hset(
         f"deletion:{deletion_id}",
         mapping={
             "status": "accepted",
@@ -355,7 +355,7 @@ async def get_deletion_status(deletion_id: str):
     """Check the status of an async deletion"""
     
     # Get status from Redis
-    status_data = await redis_queue.redis.hgetall(f"deletion:{deletion_id}")
+    status_data = await redis_queue.redis_client.hgetall(f"deletion:{deletion_id}")
     
     if not status_data:
         raise HTTPException(
