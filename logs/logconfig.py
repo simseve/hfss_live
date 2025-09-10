@@ -7,7 +7,13 @@ from logs.async_logging import AsyncLoggingManager, create_async_rotating_file_h
 
 def configure_logging(session_id_run, enable_db_logging=False, use_async=True):
     # Set the default logging level
-    log_level = logging.INFO if settings.PROD else logging.DEBUG
+    # Allow DEBUG override via environment variable even in production
+    if settings.FORCE_DEBUG_LOGGING:
+        log_level = logging.DEBUG
+        # Use print since logging isn't configured yet
+        print(f"WARNING: FORCE_DEBUG_LOGGING is enabled - log level set to DEBUG")
+    else:
+        log_level = logging.INFO if settings.PROD else logging.DEBUG
     
     # Create formatter
     formatter = logging.Formatter(
