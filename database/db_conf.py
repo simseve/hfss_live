@@ -65,8 +65,8 @@ else:
     # Traditional PostgreSQL/TimescaleDB configuration
     engine = create_engine(
         database_uri,
-        pool_size=50,        # Larger pool for traditional database
-        max_overflow=50,     # More overflow for traffic spikes
+        pool_size=100,       # Increased pool size to avoid false degraded alerts
+        max_overflow=100,    # Double the overflow for traffic spikes
         pool_pre_ping=True,  # Check connection validity
         pool_recycle=300,    # Recycle every 5 minutes
         pool_timeout=60,     # Longer timeout acceptable

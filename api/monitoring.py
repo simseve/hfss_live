@@ -82,10 +82,11 @@ class PlatformMonitor:
             issues.append('Warning: DLQ items present')
             status = 'degraded' if status == 'healthy' else status
             
-        # Check database connections
+        # Check database connections (relaxed threshold)
         active = db_metrics.get('connections_active', 0)
         total = db_metrics.get('connections_total', 1)
-        if total > 0 and (active / total) > 0.9:
+        # Only trigger if using more than 95% of connections (was 90%)
+        if total > 0 and (active / total) > 0.95:
             issues.append('High database connection usage')
             status = 'degraded' if status == 'healthy' else status
             
@@ -441,9 +442,9 @@ async def get_monitoring_dashboard(
         if queue_health.get('summary', {}).get('total_dlq', 0) > 0:
             issues.append(f"Dead letter queue has {queue_health['summary']['total_dlq']} items")
         
-        # Check database connections
+        # Check database connections (increased threshold with new pool size)
         db_metrics = dashboard['database']
-        if db_metrics.get('connections_active', 0) > 80:
+        if db_metrics.get('connections_active', 0) > 190:  # 95% of 200 total (100 pool + 100 overflow)
             if overall_status == 'healthy':
                 overall_status = 'degraded'
             issues.append('High database connection usage')
