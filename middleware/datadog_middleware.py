@@ -24,6 +24,12 @@ class DatadogMiddleware(BaseHTTPMiddleware):
             from datadog import DogStatsd
             from config import settings
             
+            # Only initialize Datadog in production
+            if not settings.PROD:
+                logger.info("Datadog middleware disabled in development mode")
+                self.statsd_client = None
+                return
+            
             # Initialize DogStatsD client
             self.statsd_client = DogStatsd(
                 host=settings.DD_AGENT_HOST,

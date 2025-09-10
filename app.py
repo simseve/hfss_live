@@ -235,6 +235,22 @@ app.include_router(routes.router, tags=['Tracking'], prefix='/tracking')
 app.include_router(scoring.router, tags=['Scoring'], prefix='/scoring')
 app.include_router(gps_tcp_status_router, tags=['GPS TCP Server'])
 app.include_router(monitoring_router, tags=['Monitoring'])
+
+# Optimized tracker summary endpoints
+try:
+    from api.tracker_summary import router as tracker_summary_router
+    app.include_router(tracker_summary_router, tags=['Tracker Summary'])
+    logger.info("Tracker summary endpoints registered")
+except ImportError:
+    logger.warning("Tracker summary endpoints not available")
+
+# Async delete endpoints
+try:
+    from api.async_delete import router as async_delete_router
+    app.include_router(async_delete_router, tags=['Async Operations'])
+    logger.info("Async delete endpoints registered")
+except ImportError:
+    logger.warning("Async delete endpoints not available")
 app.include_router(queue_admin_router, tags=['Queue Admin'])
 
 # TK905B GPS Tracker endpoint (learning mode)
