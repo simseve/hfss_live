@@ -4977,17 +4977,33 @@ async def get_tasks(
 
 @router.delete("/admin/delete-all-live-flights")
 async def delete_all_live_flights(
-    token: str = Query(..., description="Admin auth token"),
+    credentials: HTTPAuthorizationCredentials = Security(security),
     db: Session = Depends(get_db)
 ):
     """
     Delete all live flights and their associated track points.
     Points are automatically deleted due to CASCADE constraints.
-    Requires admin authentication token.
+    Requires JWT bearer token for authentication.
     """
-    # Simple token check for admin access
-    if token != settings.SECRET_KEY:
-        raise HTTPException(status_code=403, detail="Invalid admin token")
+    # Validate JWT token
+    token = credentials.credentials
+    try:
+        payload = jwt.decode(
+            token,
+            settings.SECRET_KEY,
+            algorithms=["HS256"],
+            audience="api.hikeandfly.app",
+            issuer="hikeandfly.app",
+            verify=True
+        )
+        
+        if not payload.get("sub", "").startswith("contest:"):
+            raise HTTPException(
+                status_code=403,
+                detail="Invalid token subject - must be contest-specific"
+            )
+    except (PyJWTError, jwt.ExpiredSignatureError) as e:
+        raise HTTPException(status_code=403, detail="Invalid or expired token")
     
     try:
         # Count flights before deletion for response
@@ -5021,17 +5037,33 @@ async def delete_all_live_flights(
 
 @router.delete("/admin/delete-all-upload-flights")
 async def delete_all_upload_flights(
-    token: str = Query(..., description="Admin auth token"),
+    credentials: HTTPAuthorizationCredentials = Security(security),
     db: Session = Depends(get_db)
 ):
     """
     Delete all uploaded flights and their associated track points.
     Points are automatically deleted due to CASCADE constraints.
-    Requires admin authentication token.
+    Requires JWT bearer token for authentication.
     """
-    # Simple token check for admin access
-    if token != settings.SECRET_KEY:
-        raise HTTPException(status_code=403, detail="Invalid admin token")
+    # Validate JWT token
+    token = credentials.credentials
+    try:
+        payload = jwt.decode(
+            token,
+            settings.SECRET_KEY,
+            algorithms=["HS256"],
+            audience="api.hikeandfly.app",
+            issuer="hikeandfly.app",
+            verify=True
+        )
+        
+        if not payload.get("sub", "").startswith("contest:"):
+            raise HTTPException(
+                status_code=403,
+                detail="Invalid token subject - must be contest-specific"
+            )
+    except (PyJWTError, jwt.ExpiredSignatureError) as e:
+        raise HTTPException(status_code=403, detail="Invalid or expired token")
     
     try:
         # Count flights before deletion for response
@@ -5085,16 +5117,23 @@ async def delete_pilot_flights(
     Returns:
     - Details about the deleted flights including counts for live and upload flights
     """
-    # Verify JWT token
+    # Validate JWT token
+    token = credentials.credentials
     try:
-        token_data = jwt.decode(
-            credentials.credentials,
+        payload = jwt.decode(
+            token,
             settings.SECRET_KEY,
             algorithms=["HS256"],
             audience="api.hikeandfly.app",
             issuer="hikeandfly.app",
             verify=True
         )
+        
+        if not payload.get("sub", "").startswith("contest:"):
+            raise HTTPException(
+                status_code=403,
+                detail="Invalid token subject - must be contest-specific"
+            )
     except (PyJWTError, jwt.ExpiredSignatureError) as e:
         raise HTTPException(status_code=403, detail="Invalid or expired token")
     
