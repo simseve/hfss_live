@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     APP_NAME: str
     PROD: bool
     SECRET_KEY: str
+    
+    # Debug logging override (use with caution in production)
+    FORCE_DEBUG_LOGGING: bool = False
     ALGORITHM: str
     BUCKET_HOST: str
     BUCKET_ACCESS: str

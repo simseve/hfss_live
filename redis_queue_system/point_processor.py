@@ -129,7 +129,7 @@ class PointProcessor:
         # Update stats
         if total_processed > 0:
             self.stats['processed'] += total_processed
-            logger.info(f"Processed {total_processed} points from {len(items)} chunks")
+            logger.debug(f"Processed {total_processed} points from {len(items)} chunks")
         if total_failed > 0:
             self.stats['failed'] += total_failed
             logger.warning(f"Failed to process {total_failed} points")
@@ -141,9 +141,9 @@ class PointProcessor:
         try:
             # Debug logging to see what we're actually getting
             if points:
-                logger.info(f"Processing {len(points)} live points")
-                logger.info(f"First point keys: {list(points[0].keys()) if points else 'empty'}")
-                logger.info(f"First point data: {points[0] if points else 'empty'}")
+                logger.debug(f"Processing {len(points)} live points")
+                logger.debug(f"First point keys: {list(points[0].keys()) if points else 'empty'}")
+                logger.debug(f"First point data: {points[0] if points else 'empty'}")
             
             with Session() as db:
                 # Use the dictionaries directly for batch insert
@@ -154,7 +154,7 @@ class PointProcessor:
                 db.execute(stmt, points)
                 db.commit()
 
-                logger.info(
+                logger.debug(
                     f"Successfully processed {len(points)} live points")
                 return True
 
