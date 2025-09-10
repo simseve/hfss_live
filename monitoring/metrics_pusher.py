@@ -31,6 +31,12 @@ class MetricsPusher:
     
     def _initialize_statsd(self):
         """Initialize StatsD client"""
+        # Only initialize Datadog in production
+        if not settings.PROD:
+            logger.info("MetricsPusher: Disabled in development mode")
+            self.statsd_client = None
+            return
+            
         try:
             self.statsd_client = DogStatsd(
                 host=settings.DD_AGENT_HOST,

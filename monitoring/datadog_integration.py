@@ -45,6 +45,13 @@ class DatadogMetrics:
             from datadog import DogStatsd, initialize, api
             from config import settings
             
+            # Only initialize Datadog in production
+            if not settings.PROD:
+                logger.info("Datadog disabled in development mode")
+                self.enabled = False
+                self.initialized = True
+                return
+            
             # Initialize with settings
             dd_host = settings.DD_AGENT_HOST
             dd_port = settings.DD_DOGSTATSD_PORT
@@ -89,29 +96,37 @@ class DatadogMetrics:
     
     def gauge(self, metric: str, value: float, tags: List[str] = None):
         """Send gauge metric"""
-        if self.statsd_client:
+        if self.enabled and self.statsd_client:
             self.statsd_client.gauge(metric, value, tags=tags)
+        elif not self.enabled:
+            pass  # Silent in development
         else:
             logger.debug(f"Gauge: {metric}={value} tags={tags}")
     
     def increment(self, metric: str, value: float = 1, tags: List[str] = None):
         """Send counter increment"""
-        if self.statsd_client:
+        if self.enabled and self.statsd_client:
             self.statsd_client.increment(metric, value, tags=tags)
+        elif not self.enabled:
+            pass  # Silent in development
         else:
             logger.debug(f"Increment: {metric}+{value} tags={tags}")
     
     def histogram(self, metric: str, value: float, tags: List[str] = None):
         """Send histogram/distribution metric"""
-        if self.statsd_client:
+        if self.enabled and self.statsd_client:
             self.statsd_client.histogram(metric, value, tags=tags)
+        elif not self.enabled:
+            pass  # Silent in development
         else:
             logger.debug(f"Histogram: {metric}={value} tags={tags}")
     
     def timing(self, metric: str, value: float, tags: List[str] = None):
         """Send timing metric (in milliseconds)"""
-        if self.statsd_client:
+        if self.enabled and self.statsd_client:
             self.statsd_client.timing(metric, value, tags=tags)
+        elif not self.enabled:
+            pass  # Silent in development
         else:
             logger.debug(f"Timing: {metric}={value}ms tags={tags}")
     
@@ -142,8 +157,10 @@ class DatadogMetrics:
     
     async def service_check(self, check_name: str, status: int, message: str = None, tags: List[str] = None):
         """Send service check (0=OK, 1=WARNING, 2=CRITICAL, 3=UNKNOWN)"""
-        if self.statsd_client:
+        if self.enabled and self.statsd_client:
             self.statsd_client.service_check(check_name, status, message=message, tags=tags)
+        elif not self.enabled:
+            pass  # Silent in development
         else:
             status_names = {0: "OK", 1: "WARNING", 2: "CRITICAL", 3: "UNKNOWN"}
             logger.info(f"Service Check: {check_name} = {status_names.get(status, status)} - {message}")
