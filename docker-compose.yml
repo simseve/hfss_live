@@ -5,7 +5,6 @@ services:
     env_file:
       - ./.env
     environment:
-      - PROD=True
       - GPS_TCP_ENABLED=false  # Disabled - using separate GPS service
       - DD_AGENT_HOST=${DD_AGENT_HOST:-datadog-agent}  # Use datadog-agent container when available
       - DD_DOGSTATSD_PORT=8125

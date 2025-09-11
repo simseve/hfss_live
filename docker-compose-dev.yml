@@ -7,7 +7,7 @@ services:
     env_file:
       - ./.env
     environment:
-      - PROD=True
+      # PROD is taken from .env file
       - GPS_TCP_ENABLED=false  # Disabled - no GPS server in dev
     build:
       context: .

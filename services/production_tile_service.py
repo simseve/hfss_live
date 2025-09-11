@@ -43,14 +43,14 @@ class ProductionTileService:
     async def initialize(self):
         """Initialize Redis for distributed caching"""
         try:
-            redis_host = "redis" if settings.PROD else "localhost"
+            redis_url = settings.get_redis_url()
             self.redis_client = await redis.from_url(
-                f"redis://{redis_host}:6379",
+                redis_url,
                 encoding="utf-8",
                 decode_responses=False
             )
             await self.redis_client.ping()
-            logger.info("Production tile service initialized")
+            logger.info(f"Production tile service initialized with Redis")
         except Exception as e:
             logger.warning(f"Redis not available: {str(e)}")
             self.redis_client = None
