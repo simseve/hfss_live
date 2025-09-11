@@ -58,6 +58,16 @@ class TileBroadcastManager:
             try:
                 await asyncio.sleep(10)  # Update every 10 seconds
                 
+                # Log active connections
+                active_races = list(tile_manager.active_connections.keys())
+                if active_races:
+                    logger.info(f"Broadcast loop: Found {len(active_races)} active races: {active_races}")
+                    for race_id in active_races:
+                        viewer_count = len(tile_manager.active_connections.get(race_id, []))
+                        logger.info(f"  Race {race_id}: {viewer_count} viewers")
+                else:
+                    logger.debug("Broadcast loop: No active connections")
+                
                 # Update active tiles list
                 await self.update_active_tiles()
                 
@@ -74,9 +84,10 @@ class TileBroadcastManager:
         try:
             viewer_count = len(tile_manager.active_connections.get(race_id, []))
             if viewer_count == 0:
+                logger.debug(f"Skipping race {race_id} - no viewers")
                 return
                 
-            logger.debug(f"Processing updates for race {race_id} ({viewer_count} viewers)")
+            logger.info(f"Processing updates for race {race_id} ({viewer_count} viewers)")
             
             with ReplicaSession() as db:
                 # Get last update time
