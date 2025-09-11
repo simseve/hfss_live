@@ -165,3 +165,4 @@ pytest test_*.py
 - Never commit `.env` files
 - Secure `alembic.ini` database credentials in production
 - Use environment variables for all sensitive configuration
+- "command docker-compose is deprecated"
