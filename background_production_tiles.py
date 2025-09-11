@@ -173,28 +173,28 @@ class TileBroadcastManager:
                 
                 with ReplicaSession() as db:
                     for race_id in self.active_tiles_by_zoom.keys():
-                        # Pre-generate tiles for common zoom levels
+                        # Pre-generate tiles for active viewports only
+                        tiles_generated = 0
+                        
+                        # Get currently viewed tiles for this race
+                        tiles_by_zoom = self.active_tiles_by_zoom.get(race_id, {})
+                        
                         for zoom in self.pregenerate_zoom_levels:
-                            # Calculate which tiles contain data
-                            tiles_with_data = await production_tile_service.get_tiles_with_data(
-                                race_id, [zoom], db
-                            )
+                            if zoom not in tiles_by_zoom:
+                                continue
+                                
+                            # Pre-generate tiles that are being viewed
+                            tiles_to_generate = list(tiles_by_zoom[zoom])[:self.max_tiles_per_zoom]
                             
-                            # Pre-generate up to max_tiles_per_zoom
-                            tiles_generated = 0
-                            for tile_coords in tiles_with_data.get(zoom, []):
-                                if tiles_generated >= self.max_tiles_per_zoom:
-                                    break
-                                    
-                                x, y = tile_coords
-                                # This will cache the tile
+                            for x, y in tiles_to_generate:
+                                # Get or generate the tile (this will cache it)
                                 await production_tile_service.get_or_generate_tile(
                                     race_id, zoom, x, y, db
                                 )
                                 tiles_generated += 1
                             
-                            if tiles_generated > 0:
-                                logger.debug(f"Pre-generated {tiles_generated} tiles at zoom {zoom} for race {race_id}")
+                        if tiles_generated > 0:
+                            logger.debug(f"Pre-generated {tiles_generated} tiles for race {race_id}")
                                 
             except Exception as e:
                 logger.error(f"Error in tile pre-generation: {str(e)}")
