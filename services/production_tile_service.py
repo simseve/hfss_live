@@ -14,6 +14,7 @@ import redis.asyncio as redis
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from config import settings
+from utils.redis_utils import get_redis_client
 
 logger = logging.getLogger(__name__)
 
@@ -42,18 +43,11 @@ class ProductionTileService:
         
     async def initialize(self):
         """Initialize Redis for distributed caching"""
-        try:
-            redis_host = "redis" if settings.PROD else "localhost"
-            self.redis_client = await redis.from_url(
-                f"redis://{redis_host}:6379",
-                encoding="utf-8",
-                decode_responses=False
-            )
-            await self.redis_client.ping()
-            logger.info("Production tile service initialized")
-        except Exception as e:
-            logger.warning(f"Redis not available: {str(e)}")
-            self.redis_client = None
+        self.redis_client = await get_redis_client(
+            encoding="utf-8",
+            decode_responses=False,
+            service_name="Production tile service"
+        )
 
     async def generate_tile_for_zoom(self, race_id: str, z: int, x: int, y: int, 
                                      db: Session) -> bytes:

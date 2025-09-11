@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from database.db_replica import get_replica_db, get_db
 from database.models import Flight, LiveTrackPoint, Race
 from config import settings
+from utils.redis_utils import get_redis_client
 
 logger = logging.getLogger(__name__)
 
@@ -24,19 +25,11 @@ class TileGenerationService:
         
     async def initialize(self):
         """Initialize Redis connection for tile caching"""
-        try:
-            # Determine Redis hostname based on environment
-            redis_host = "redis" if settings.PROD else "localhost"
-            self.redis_client = await redis.from_url(
-                f"redis://{redis_host}:6379",
-                encoding="utf-8",
-                decode_responses=False  # We'll handle encoding for binary data
-            )
-            await self.redis_client.ping()
-            logger.info("Tile generation service initialized with Redis caching")
-        except Exception as e:
-            logger.warning(f"Redis not available for tile caching: {str(e)}")
-            self.redis_client = None
+        self.redis_client = await get_redis_client(
+            encoding="utf-8",
+            decode_responses=False,  # We'll handle encoding for binary data
+            service_name="Tile generation service"
+        )
 
     async def close(self):
         """Close Redis connection"""
