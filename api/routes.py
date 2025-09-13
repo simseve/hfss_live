@@ -2314,8 +2314,12 @@ async def _generate_daily_tracks_tile(
 ):
     """
     Internal function to generate vector tiles for all tracks from today for a specific race.
+    Applies tracking delay for competition integrity.
     """
     try:
+        # Import settings for tracking delay
+        from config import settings
+
         # Determine table name based on source
         table_name = "live_track_points" if source == "live" else "uploaded_track_points"
 
@@ -2331,6 +2335,10 @@ async def _generate_daily_tracks_tile(
         else:
             # Use today's date
             target_date = datetime.now(timezone.utc).date()
+
+        # Calculate the delay cutoff time (only show points older than this)
+        delay_cutoff = datetime.now(timezone.utc) - timedelta(seconds=settings.TRACKING_DELAY_SECONDS)
+        logger.debug(f"Applying {settings.TRACKING_DELAY_SECONDS}s tracking delay to MVT tiles - cutoff: {delay_cutoff}")
 
         # Calculate start and end of the specified date in UTC
         start_of_day = datetime.combine(
@@ -2495,8 +2503,10 @@ async def _generate_daily_tracks_tile(
             FROM {table_name} t
             JOIN flights f ON t.flight_uuid = f.id
             WHERE t.flight_uuid::text IN {flight_uuids_str}
+            -- Apply tracking delay filter (only show points older than delay cutoff)
+            AND t.datetime <= '{delay_cutoff.strftime('%Y-%m-%d %H:%M:%S')}'::timestamp AT TIME ZONE 'UTC'
             -- Apply basic coordinate validation
-            AND t.lat BETWEEN -90 AND 90 
+            AND t.lat BETWEEN -90 AND 90
             AND t.lon BETWEEN -180 AND 180
         ),
         -- For each flight, find the first and last point to always include

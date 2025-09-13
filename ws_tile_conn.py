@@ -200,7 +200,7 @@ class TileConnectionManager:
                         if flight.pilot_id not in pilot_flights:
                             pilot_flights[flight.pilot_id] = flight
                         else:
-                            # Keep the more recent flight based on created_at
+                            # Always keep the more recent flight based on created_at
                             if flight.created_at > pilot_flights[flight.pilot_id].created_at:
                                 pilot_flights[flight.pilot_id] = flight
                     
@@ -211,7 +211,7 @@ class TileConnectionManager:
                     for flight in flights:
                         if flight.last_fix:
                             last_fix = flight.last_fix
-                            # Check if update is newer than last broadcast
+                            # Check if update is old enough to broadcast (respecting delay)
                             fix_time = last_fix.get('datetime')
                             if fix_time and fix_time <= delayed_time.isoformat():
                                 # Calculate flight dynamics using utility
@@ -294,8 +294,8 @@ class TileConnectionManager:
                 finally:
                     db.close()
                 
-                # Wait 1 second before next update (for smooth interpolation)
-                await asyncio.sleep(1)
+                # Wait 10 seconds before next update (reduce database load)
+                await asyncio.sleep(10)
                 
             except asyncio.CancelledError:
                 logger.info(f"GeoJSON broadcast cancelled for race {race_id}")
