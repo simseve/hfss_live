@@ -2233,11 +2233,25 @@ async def get_postgis_track_tile(
             tile_data = result[0]
             if isinstance(tile_data, memoryview):
                 tile_data = bytes(tile_data)
-            # Return the MVT tile as binary data
-            return Response(content=tile_data, media_type="application/x-protobuf")
+            # Return the MVT tile as binary data with cache headers
+            return Response(
+                content=tile_data,
+                media_type="application/x-protobuf",
+                headers={
+                    "Cache-Control": "public, max-age=10",  # Cache for 10 seconds
+                    "X-Tile-Cache": "HIT" if len(tile_data) > 0 else "MISS"
+                }
+            )
         else:
-            # Return an empty tile
-            return Response(content=b"", media_type="application/x-protobuf")
+            # Return an empty tile with cache headers
+            return Response(
+                content=b"",
+                media_type="application/x-protobuf",
+                headers={
+                    "Cache-Control": "public, max-age=10",  # Cache empty tiles too
+                    "X-Tile-Cache": "EMPTY"
+                }
+            )
 
     except Exception as e:
         logger.error(f"Error generating PostGIS vector tile: {str(e)}")
@@ -2287,6 +2301,27 @@ async def get_public_tracks_tile(
         None, description="Optional pilot ID to filter tracks"),
     db: Session = Depends(get_replica_db)  # Use read replica for heavy PostGIS queries
 ):
+    # Log tile request pattern (temporarily for debugging)
+    import time
+    request_key = f"{race_id}:{z}/{x}/{y}"
+    current_time = time.time()
+
+    # Track request frequency
+    if not hasattr(get_public_tracks_tile, '_request_tracker'):
+        get_public_tracks_tile._request_tracker = {}
+
+    if request_key in get_public_tracks_tile._request_tracker:
+        last_time = get_public_tracks_tile._request_tracker[request_key]
+        if current_time - last_time < 1:  # Same tile requested within 1 second
+            logger.warning(f"Rapid tile request: {request_key} - {current_time - last_time:.2f}s since last request")
+
+    get_public_tracks_tile._request_tracker[request_key] = current_time
+
+    # Clean old entries (older than 60 seconds)
+    get_public_tracks_tile._request_tracker = {
+        k: v for k, v in get_public_tracks_tile._request_tracker.items()
+        if current_time - v < 60
+    }
     """
     Public endpoint to serve vector tiles for all tracks from today for a specific race.
     No authentication required - for public race viewing.
@@ -2338,7 +2373,8 @@ async def _generate_daily_tracks_tile(
 
         # Calculate the delay cutoff time (only show points older than this)
         delay_cutoff = datetime.now(timezone.utc) - timedelta(seconds=settings.TRACKING_DELAY_SECONDS)
-        logger.debug(f"Applying {settings.TRACKING_DELAY_SECONDS}s tracking delay to MVT tiles - cutoff: {delay_cutoff}")
+        # Don't log every tile request - too noisy
+        # logger.debug(f"Applying {settings.TRACKING_DELAY_SECONDS}s tracking delay to MVT tiles - cutoff: {delay_cutoff}")
 
         # Calculate start and end of the specified date in UTC
         start_of_day = datetime.combine(
@@ -2652,11 +2688,25 @@ async def _generate_daily_tracks_tile(
             tile_data = result[0]
             if isinstance(tile_data, memoryview):
                 tile_data = bytes(tile_data)
-            # Return the MVT tile as binary data
-            return Response(content=tile_data, media_type="application/x-protobuf")
+            # Return the MVT tile as binary data with cache headers
+            return Response(
+                content=tile_data,
+                media_type="application/x-protobuf",
+                headers={
+                    "Cache-Control": "public, max-age=10",  # Cache for 10 seconds
+                    "X-Tile-Cache": "HIT" if len(tile_data) > 0 else "MISS"
+                }
+            )
         else:
-            # Return an empty tile
-            return Response(content=b"", media_type="application/x-protobuf")
+            # Return an empty tile with cache headers
+            return Response(
+                content=b"",
+                media_type="application/x-protobuf",
+                headers={
+                    "Cache-Control": "public, max-age=10",  # Cache empty tiles too
+                    "X-Tile-Cache": "EMPTY"
+                }
+            )
 
     except Exception as e:
         logger.error(f"Error generating daily tracks vector tile: {str(e)}")

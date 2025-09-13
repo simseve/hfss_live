@@ -84,16 +84,27 @@ class TileGenerationService:
         except Exception as e:
             logger.error(f"Error caching tile: {str(e)}")
 
-    async def generate_live_tile(self, race_id: str, z: int, x: int, y: int, 
+    async def generate_live_tile(self, race_id: str, z: int, x: int, y: int,
                                 db: Session, since_timestamp: Optional[datetime] = None,
                                 delay_seconds: int = 60) -> bytes:
         """
         Generate MVT tile for live tracking data with optional delay and simplified paths.
-        
+
         Args:
             delay_seconds: Delay in seconds for live data (default 60s for broadcast delay)
         """
         try:
+            # Validate tile coordinates
+            max_coord = 2 ** z
+            if not (0 <= x < max_coord and 0 <= y < max_coord):
+                logger.warning(f"Invalid tile coordinates: {z}/{x}/{y} (max valid: {max_coord-1})")
+                return b''
+
+            # Validate zoom level
+            if not (0 <= z <= 20):
+                logger.warning(f"Invalid zoom level: {z} (must be 0-20)")
+                return b''
+
             # Calculate delayed timestamp for "live" data
             delayed_time = datetime.now(timezone.utc) - timedelta(seconds=delay_seconds)
             logger.debug(f"Generating tile {z}/{x}/{y} for race {race_id}, delayed_time: {delayed_time}")
@@ -243,9 +254,21 @@ class TileGenerationService:
                 ),
                 -- Union all features
                 all_features AS (
-                    SELECT * FROM path_features
+                    SELECT
+                        geom,
+                        flight_id,
+                        pilot_name,
+                        color_index,
+                        feature_type,
+                        start_time,
+                        end_time,
+                        point_count,
+                        NULL::integer as elevation,
+                        NULL::real as heading,
+                        NULL::real as speed_ms
+                    FROM path_features
                     UNION ALL
-                    SELECT 
+                    SELECT
                         geom,
                         flight_id,
                         pilot_name,
@@ -253,7 +276,7 @@ class TileGenerationService:
                         feature_type,
                         NULL as start_time,
                         dt as end_time,
-                        NULL as point_count,
+                        NULL::integer as point_count,
                         elevation,
                         heading,
                         speed_ms
@@ -283,6 +306,11 @@ class TileGenerationService:
             
         except Exception as e:
             logger.error(f"Error generating live tile {z}/{x}/{y}: {str(e)}")
+            # Rollback the transaction if it's in a failed state
+            try:
+                db.rollback()
+            except:
+                pass
             return b""
 
     async def generate_delta_tile(self, race_id: str, z: int, x: int, y: int, 
