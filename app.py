@@ -25,9 +25,9 @@ from api.tile_routes import router as tile_router
 from api.production_tile_routes import router as production_tile_router
 from background_tracking import periodic_tracking_update
 from background_tile_tracking import tile_based_tracking_update, tile_cache_cleanup, tile_pregenerator
-from background_production_tiles import production_tile_updates
+# Removed production_tile_updates - not needed
 from services.tile_generation_service import tile_service
-from services.production_tile_service import production_tile_service
+# from services.production_tile_service import production_tile_service  # Not needed - using routes.py MVT endpoint
 from db_cleanup import setup_scheduler
 from contextlib import asynccontextmanager
 from database.db_conf import engine, test_db_connection
@@ -124,21 +124,7 @@ async def lifespan(app):
     track_task = asyncio.create_task(
         periodic_tracking_update(10))  # Update every 10 seconds
 
-    # Start production tile system for live tracking
-    production_tasks = []
-    try:
-        # Initialize production tile service
-        await production_tile_service.initialize()
-        logger.info("Production tile service initialized")
-        
-        # Start production tile background tasks
-        production_task = asyncio.create_task(production_tile_updates())
-        production_tasks = [production_task]
-        logger.info("Production tile system started (optimized for hundreds of users)")
-        
-    except Exception as e:
-        logger.error(f"Failed to start production tile system: {e}")
-        logger.warning("Production tile system will not be available")
+    # Production tile system removed - using routes.py public-mvt endpoint instead
     
     # Keep old tile system for backwards compatibility (can be removed later)
     tile_tasks = []

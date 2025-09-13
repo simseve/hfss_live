@@ -1,10 +1,13 @@
 from fastapi import WebSocket
 from starlette.websockets import WebSocketState
-from typing import Dict, Set, List, Optional, Tuple
+from typing import Dict, Set, List, Optional, Tuple, Any
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import hashlib
+import json
+import gzip
+import base64
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +36,17 @@ class TileConnectionManager:
         # Client WebSocket mapping for efficient lookups
         # Structure: {client_id: WebSocket}
         self.client_sockets: Dict[str, WebSocket] = {}
+        
+        # Track pilots with sent data to prevent duplicates
+        # Structure: {race_id: {pilot_uuid: last_sent_time}}
+        self.pilots_with_sent_data: Dict[str, Dict[str, datetime]] = {}
+        
+        # Track last GeoJSON update time per race
+        # Structure: {race_id: datetime}
+        self.last_geojson_update: Dict[str, datetime] = {}
+        
+        # Background task for broadcasting updates
+        self.broadcast_tasks: Dict[str, asyncio.Task] = {}
 
     async def connect(self, websocket: WebSocket, race_id: str, client_id: str):
         """Connect a client to a specific race's tile updates"""
@@ -64,6 +78,12 @@ class TileConnectionManager:
         })
         
         logger.info(f"Client {client_id} connected to race {race_id} (tile-based)")
+        
+        # Start broadcast task for this race if not already running
+        if race_id not in self.broadcast_tasks or self.broadcast_tasks[race_id].done():
+            self.broadcast_tasks[race_id] = asyncio.create_task(
+                self._broadcast_geojson_updates(race_id)
+            )
 
     async def disconnect(self, websocket: WebSocket, client_id: str):
         """Disconnect a client from all subscribed races and tiles"""
@@ -98,6 +118,15 @@ class TileConnectionManager:
             del self.client_sockets[client_id]
         
         logger.info(f"Client {client_id} disconnected from tile-based system")
+        
+        # Stop broadcast task if no more clients
+        for race_id in list(self.broadcast_tasks.keys()):
+            if race_id not in self.active_connections or not self.active_connections[race_id]:
+                if race_id in self.broadcast_tasks:
+                    self.broadcast_tasks[race_id].cancel()
+                    del self.broadcast_tasks[race_id]
+                if race_id in self.last_geojson_update:
+                    del self.last_geojson_update[race_id]
 
     async def update_client_viewport(self, client_id: str, race_id: str, 
                                     viewport_tiles: List[Tuple[int, int, int]]):
@@ -133,6 +162,131 @@ class TileConnectionManager:
         
         return {"added": list(tiles_to_add), "removed": list(tiles_to_remove)}
 
+    async def _broadcast_geojson_updates(self, race_id: str):
+        """Background task to broadcast GeoJSON updates every second with 60-second delay"""
+        logger.info(f"Starting GeoJSON broadcast for race {race_id}")
+        
+        # Initialize last update time to 60 seconds ago
+        self.last_geojson_update[race_id] = datetime.now(timezone.utc) - timedelta(seconds=60)
+        
+        while race_id in self.active_connections and self.active_connections[race_id]:
+            try:
+                from database.db_replica import get_read_db_with_fallback
+                from database.models import Flight
+                
+                # Get database session
+                db = next(get_read_db_with_fallback())
+                
+                try:
+                    # Get active flights with 60-second delay
+                    delayed_time = datetime.now(timezone.utc) - timedelta(seconds=60)
+                    # Only get flights that have been active in the last 24 hours
+                    cutoff_time = datetime.now(timezone.utc) - timedelta(hours=24)
+                    
+                    # Query flights directly - only recent ones
+                    all_flights = db.query(Flight).filter(
+                        Flight.race_id == race_id,
+                        Flight.source.like('%live%'),
+                        Flight.last_fix.isnot(None),
+                        Flight.created_at >= cutoff_time  # Only flights created in last 24 hours
+                    ).all()
+                    
+                    # Group by pilot_id and keep only the most recent flight for each pilot
+                    pilot_flights = {}
+                    for flight in all_flights:
+                        if flight.pilot_id not in pilot_flights:
+                            pilot_flights[flight.pilot_id] = flight
+                        else:
+                            # Keep the more recent flight based on created_at
+                            if flight.created_at > pilot_flights[flight.pilot_id].created_at:
+                                pilot_flights[flight.pilot_id] = flight
+                    
+                    # Use only the most recent flight for each pilot
+                    flights = list(pilot_flights.values())
+                    
+                    updates = []
+                    for flight in flights:
+                        if flight.last_fix:
+                            last_fix = flight.last_fix
+                            # Check if update is newer than last broadcast
+                            fix_time = last_fix.get('datetime')
+                            if fix_time and fix_time <= delayed_time.isoformat():
+                                updates.append({
+                                    'pilot_id': flight.pilot_id,
+                                    'pilot_name': flight.pilot_name or 'Unknown',
+                                    'lat': float(last_fix.get('lat', 0)),
+                                    'lon': float(last_fix.get('lon', 0)),
+                                    'elevation': float(last_fix.get('elevation', 0)),
+                                    'timestamp': fix_time,
+                                    'speed': float(last_fix.get('speed', 0)),
+                                    'heading': float(last_fix.get('heading', 0)),
+                                    'vario': float(last_fix.get('vario', 0))
+                                })
+                    
+                    if updates:
+                        # Create delta update format expected by frontend
+                        delta_data = {
+                            'type': 'delta',
+                            'timestamp': datetime.now(timezone.utc).isoformat(),
+                            'updates': updates
+                        }
+                        
+                        # Compress the delta data
+                        json_str = json.dumps(delta_data)
+                        compressed = gzip.compress(json_str.encode('utf-8'), compresslevel=6)
+                        
+                        # Broadcast to all connected clients for this race
+                        message = {
+                            "type": "delta_update",
+                            "race_id": race_id,
+                            "data": base64.b64encode(compressed).decode('utf-8'),
+                            "timestamp": delta_data['timestamp'],
+                            "compression": "gzip",
+                            "update_count": len(updates)
+                        }
+                        
+                        await self.broadcast_to_race(race_id, message)
+                        logger.debug(f"Broadcasted {len(updates)} pilot updates for race {race_id}")
+                    
+                    # Update last broadcast time
+                    self.last_geojson_update[race_id] = datetime.now(timezone.utc) - timedelta(seconds=60)
+                    
+                finally:
+                    db.close()
+                
+                # Wait 1 second before next update (for smooth interpolation)
+                await asyncio.sleep(1)
+                
+            except asyncio.CancelledError:
+                logger.info(f"GeoJSON broadcast cancelled for race {race_id}")
+                break
+            except Exception as e:
+                logger.error(f"Error in GeoJSON broadcast for race {race_id}: {e}")
+                await asyncio.sleep(5)  # Wait longer on error
+        
+        logger.info(f"Stopped GeoJSON broadcast for race {race_id}")
+    
+    async def broadcast_to_race(self, race_id: str, message: Dict[str, Any]):
+        """Broadcast a message to all clients connected to a race"""
+        if race_id not in self.active_connections:
+            return
+        
+        disconnected = []
+        
+        for websocket in self.active_connections[race_id]:
+            try:
+                if websocket.client_state == WebSocketState.CONNECTED:
+                    await websocket.send_json(message)
+                else:
+                    disconnected.append(websocket)
+            except Exception as e:
+                logger.error(f"Error broadcasting to client: {e}")
+                disconnected.append(websocket)
+        
+        # Clean up disconnected clients
+        for ws in disconnected:
+            self.active_connections[race_id].discard(ws)
+    
     async def send_tile_to_client(self, client_id: str, race_id: str, 
                                   tile_coords: Tuple[int, int, int], 
                                   tile_data: bytes, is_delta: bool = False):
@@ -264,6 +418,16 @@ class TileConnectionManager:
             "active_viewers": len(self.active_connections.get(race_id, [])),
             "tiles_with_viewers": len(self.get_tiles_with_viewers(race_id))
         }
+    
+    def get_active_viewers(self, race_id: str) -> int:
+        """Get the number of active viewers for a race"""
+        return len(self.active_connections.get(race_id, []))
+    
+    def add_pilot_with_sent_data(self, race_id: str, pilot_uuid: str, last_sent_time: datetime):
+        """Track pilots that have had data sent to prevent duplicates"""
+        if race_id not in self.pilots_with_sent_data:
+            self.pilots_with_sent_data[race_id] = {}
+        self.pilots_with_sent_data[race_id][pilot_uuid] = last_sent_time
 
 
 # Create a global tile connection manager for the application
