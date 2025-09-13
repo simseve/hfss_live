@@ -39,7 +39,10 @@ class Settings(BaseSettings):
     # GPS TCP Server configuration
     GPS_TCP_PORT: int = 9090
     GPS_TCP_ENABLED: bool = False
-    
+
+    # Tracking delay configuration
+    TRACKING_DELAY_SECONDS: int = 60  # Default 60 seconds for competition, set to 2 for testing
+
     # Redis configuration
     # Full Redis URL (overrides individual settings)
     REDIS_URL: Optional[str] = None

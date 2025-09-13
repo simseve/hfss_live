@@ -163,11 +163,14 @@ class TileConnectionManager:
         return {"added": list(tiles_to_add), "removed": list(tiles_to_remove)}
 
     async def _broadcast_geojson_updates(self, race_id: str):
-        """Background task to broadcast GeoJSON updates every second with minimal delay"""
-        logger.info(f"Starting GeoJSON broadcast for race {race_id}")
+        """Background task to broadcast GeoJSON updates every second with configurable delay"""
+        from config import settings
+        delay_seconds = settings.TRACKING_DELAY_SECONDS
 
-        # Initialize last update time to 2 seconds ago (minimal delay for processing)
-        self.last_geojson_update[race_id] = datetime.now(timezone.utc) - timedelta(seconds=2)
+        logger.info(f"Starting GeoJSON broadcast for race {race_id} with {delay_seconds}-second delay")
+
+        # Initialize last update time to configured delay ago
+        self.last_geojson_update[race_id] = datetime.now(timezone.utc) - timedelta(seconds=delay_seconds)
         
         while race_id in self.active_connections and self.active_connections[race_id]:
             try:
@@ -178,8 +181,8 @@ class TileConnectionManager:
                 db = next(get_read_db_with_fallback())
                 
                 try:
-                    # Get active flights with minimal delay (2 seconds for processing)
-                    delayed_time = datetime.now(timezone.utc) - timedelta(seconds=2)
+                    # Get active flights with configurable delay
+                    delayed_time = datetime.now(timezone.utc) - timedelta(seconds=delay_seconds)
                     # Only get flights that have been active in the last 24 hours
                     cutoff_time = datetime.now(timezone.utc) - timedelta(hours=24)
                     
@@ -261,16 +264,6 @@ class TileConnectionManager:
                                 })
                     
                     if updates:
-                        # Log the delta update content for debugging
-                        logger.info(f"Delta update for race {race_id}:")
-                        for update in updates:
-                            logger.info(f"  Pilot: {update['pilot_name']} ({update['pilot_id']})")
-                            logger.info(f"    Position: {update['lat']:.6f}, {update['lon']:.6f} @ {update['elevation']:.0f}m")
-                            logger.info(f"    Dynamics: Speed={update['speed']:.1f}m/s, Heading={update['heading']:.0f}°, Vario={update['vario']:.2f}m/s")
-                            logger.info(f"    Flight: State={update['flight_state']}, Time={update['flight_time']:.0f}s, Points={update['total_points']}")
-                            if update.get('flight_state_info'):
-                                logger.info(f"    State Info: {update['flight_state_info']}")
-
                         # Create delta update format expected by frontend
                         delta_data = {
                             'type': 'delta',
@@ -295,8 +288,8 @@ class TileConnectionManager:
                         await self.broadcast_to_race(race_id, message)
                         logger.debug(f"Broadcasted {len(updates)} pilot updates for race {race_id}")
                     
-                    # Update last broadcast time
-                    self.last_geojson_update[race_id] = datetime.now(timezone.utc) - timedelta(seconds=2)
+                    # Update last broadcast time (maintain configured delay)
+                    self.last_geojson_update[race_id] = datetime.now(timezone.utc) - timedelta(seconds=delay_seconds)
                     
                 finally:
                     db.close()
