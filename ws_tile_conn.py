@@ -209,61 +209,75 @@ class TileConnectionManager:
                     
                     updates = []
                     for flight in flights:
-                        if flight.last_fix:
-                            last_fix = flight.last_fix
-                            # Check if update is old enough to broadcast (respecting delay)
-                            fix_time = last_fix.get('datetime')
-                            if fix_time and fix_time <= delayed_time.isoformat():
-                                # Calculate flight dynamics using utility
-                                from utils.flight_dynamics import calculate_flight_dynamics
-                                from database.models import LiveTrackPoint
+                        # For active flights, get the most recent point that's old enough to send
+                        from database.models import LiveTrackPoint
 
-                                # Get recent points for calculations (fetch 5 for better smoothing)
-                                recent_points = []
-                                if flight.source == 'live':
-                                    recent_points = db.query(LiveTrackPoint).filter(
-                                        LiveTrackPoint.flight_uuid == flight.id
-                                    ).order_by(LiveTrackPoint.datetime.desc()).limit(5).all()
+                        # Get the most recent point that's older than the delay
+                        delayed_point = db.query(LiveTrackPoint).filter(
+                            LiveTrackPoint.flight_uuid == flight.id,
+                            LiveTrackPoint.datetime <= delayed_time
+                        ).order_by(LiveTrackPoint.datetime.desc()).first()
 
-                                # Calculate dynamics with smoothed vario
-                                dynamics = calculate_flight_dynamics(
-                                    recent_points=recent_points,
-                                    flight_state=flight.flight_state,
-                                    vario_smoothing=3  # Use 3 points for vario averaging
-                                )
+                        if delayed_point:
+                            # Use the delayed point as our "current" position
+                            delayed_fix = {
+                                'lat': delayed_point.lat,
+                                'lon': delayed_point.lon,
+                                'elevation': delayed_point.elevation,
+                                'datetime': delayed_point.datetime.isoformat()
+                            }
 
-                                # Calculate flight time from first_fix to last_fix
-                                flight_time = 0
-                                if flight.first_fix and flight.last_fix:
-                                    first_time_str = flight.first_fix.get('datetime')
-                                    last_time_str = flight.last_fix.get('datetime')
-                                    if first_time_str and last_time_str:
-                                        from dateutil import parser
-                                        first_time = parser.parse(first_time_str)
-                                        last_time = parser.parse(last_time_str)
-                                        flight_time = (last_time - first_time).total_seconds()
+                            # Calculate flight dynamics using utility
+                            from utils.flight_dynamics import calculate_flight_dynamics
 
-                                updates.append({
-                                    'pilot_id': flight.pilot_id,
-                                    'pilot_name': flight.pilot_name or 'Unknown',
-                                    'flight_id': str(flight.id),
-                                    'lat': float(last_fix.get('lat', 0)),
-                                    'lon': float(last_fix.get('lon', 0)),
-                                    'elevation': float(last_fix.get('elevation', 0)),
-                                    'timestamp': fix_time,
-                                    'speed': dynamics['speed'],
-                                    'heading': dynamics['heading'],
-                                    'vario': dynamics['vario'],
-                                    'flight_time': flight_time,  # in seconds
-                                    'source': flight.source,
-                                    'total_points': flight.total_points,
-                                    'flight_state': flight.flight_state.get('state', 'unknown') if flight.flight_state else 'unknown',
-                                    'flight_state_info': flight.flight_state if flight.flight_state else {},
-                                    'first_fix': flight.first_fix if flight.first_fix else None,
-                                    'last_fix': flight.last_fix if flight.last_fix else None
-                                })
+                            # Get recent points around the delayed point for calculations
+                            recent_points = db.query(LiveTrackPoint).filter(
+                                LiveTrackPoint.flight_uuid == flight.id,
+                                LiveTrackPoint.datetime <= delayed_point.datetime
+                            ).order_by(LiveTrackPoint.datetime.desc()).limit(5).all()
+
+                            # Calculate dynamics with smoothed vario
+                            dynamics = calculate_flight_dynamics(
+                                recent_points=recent_points,
+                                flight_state=flight.flight_state,
+                                vario_smoothing=3  # Use 3 points for vario averaging
+                            )
+
+                            # Calculate flight time from first_fix to delayed point
+                            flight_time = 0
+                            if flight.first_fix:
+                                first_time_str = flight.first_fix.get('datetime')
+                                if first_time_str:
+                                    from dateutil import parser
+                                    first_time = parser.parse(first_time_str)
+                                    flight_time = (delayed_point.datetime - first_time).total_seconds()
+
+                            updates.append({
+                                'pilot_id': flight.pilot_id,
+                                'pilot_name': flight.pilot_name or 'Unknown',
+                                'flight_id': str(flight.id),
+                                'lat': float(delayed_fix['lat']),
+                                'lon': float(delayed_fix['lon']),
+                                'elevation': float(delayed_fix['elevation']),
+                                'timestamp': delayed_fix['datetime'],
+                                'speed': dynamics['speed'],
+                                'heading': dynamics['heading'],
+                                'vario': dynamics['vario'],
+                                'flight_time': flight_time,  # in seconds
+                                'source': flight.source,
+                                'total_points': flight.total_points,
+                                'flight_state': flight.flight_state.get('state', 'unknown') if flight.flight_state else 'unknown',
+                                'flight_state_info': flight.flight_state if flight.flight_state else {},
+                                'first_fix': flight.first_fix if flight.first_fix else None,
+                                'last_fix': flight.last_fix if flight.last_fix else None,
+                                'delay_applied': delay_seconds  # So frontend knows the delay
+                            })
                     
+                    else:
+                        logger.debug(f"No updates to send for race {race_id} - all fixes too recent (< {delay_seconds}s old)")
+
                     if updates:
+                        logger.info(f"Sending {len(updates)} delta updates for race {race_id}")
                         # Create delta update format expected by frontend
                         delta_data = {
                             'type': 'delta',
