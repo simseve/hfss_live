@@ -233,6 +233,9 @@ session_id_run = str(uuid.uuid4())
 # Initialize logging at the start of your application
 configure_logging(session_id_run=session_id_run, enable_db_logging=False)
 
+# Set specific logger levels to reduce noise
+logging.getLogger('database.db_replica').setLevel(logging.INFO)
+
 # Create a logger for each module
 logger = logging.getLogger(__name__)
 

@@ -204,7 +204,7 @@ def get_replica_db():
                 break
     
     # Fallback to primary database for reads
-    logger.info(f"[SESSION_ID: {session_id}] Using primary database for read operation (replica unavailable or same as primary)")
+    logger.debug(f"[SESSION_ID: {session_id}] Using primary database for read operation (replica unavailable or same as primary)")
     for attempt in range(max_retries):
         try:
             session = PrimarySession()
