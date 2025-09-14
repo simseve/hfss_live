@@ -2229,11 +2229,29 @@ async def get_postgis_track_tile(
         result = db.execute(text(query)).fetchone()
 
         if result and result[0]:
-            # Return the MVT tile as binary data
-            return Response(content=result[0], media_type="application/x-protobuf")
+            # Convert memoryview to bytes if necessary
+            tile_data = result[0]
+            if isinstance(tile_data, memoryview):
+                tile_data = bytes(tile_data)
+            # Return the MVT tile as binary data with cache headers
+            return Response(
+                content=tile_data,
+                media_type="application/x-protobuf",
+                headers={
+                    "Cache-Control": "public, max-age=10",  # Cache for 10 seconds
+                    "X-Tile-Cache": "HIT" if len(tile_data) > 0 else "MISS"
+                }
+            )
         else:
-            # Return an empty tile
-            return Response(content=b"", media_type="application/x-protobuf")
+            # Return an empty tile with cache headers
+            return Response(
+                content=b"",
+                media_type="application/x-protobuf",
+                headers={
+                    "Cache-Control": "public, max-age=10",  # Cache empty tiles too
+                    "X-Tile-Cache": "EMPTY"
+                }
+            )
 
     except Exception as e:
         logger.error(f"Error generating PostGIS vector tile: {str(e)}")
@@ -2266,7 +2284,77 @@ async def get_daily_tracks_tile(
     - source: Either 'live' or 'upload' to specify data source
     - date: Optional date parameter (YYYY-MM-DD). If not provided, uses today
     """
+    return await _generate_daily_tracks_tile(z, x, y, race_id, source, date, pilot_id, db)
+
+
+@router.get("/public-mvt/{race_id}/{z}/{x}/{y}")
+async def get_public_tracks_tile(
+    race_id: str,
+    z: int,
+    x: int,
+    y: int,
+    source: str = Query("live", regex="^.*(?:live|upload).*$",
+                        description="Source containing 'live' or 'upload'"),
+    date: Optional[str] = Query(
+        None, description="Date in YYYY-MM-DD format. If not provided, uses today"),
+    pilot_id: Optional[str] = Query(
+        None, description="Optional pilot ID to filter tracks"),
+    db: Session = Depends(get_replica_db)  # Use read replica for heavy PostGIS queries
+):
+    # Log tile request pattern (temporarily for debugging)
+    import time
+    request_key = f"{race_id}:{z}/{x}/{y}"
+    current_time = time.time()
+
+    # Track request frequency
+    if not hasattr(get_public_tracks_tile, '_request_tracker'):
+        get_public_tracks_tile._request_tracker = {}
+
+    if request_key in get_public_tracks_tile._request_tracker:
+        last_time = get_public_tracks_tile._request_tracker[request_key]
+        if current_time - last_time < 1:  # Same tile requested within 1 second
+            logger.warning(f"Rapid tile request: {request_key} - {current_time - last_time:.2f}s since last request")
+
+    get_public_tracks_tile._request_tracker[request_key] = current_time
+
+    # Clean old entries (older than 60 seconds)
+    get_public_tracks_tile._request_tracker = {
+        k: v for k, v in get_public_tracks_tile._request_tracker.items()
+        if current_time - v < 60
+    }
+    """
+    Public endpoint to serve vector tiles for all tracks from today for a specific race.
+    No authentication required - for public race viewing.
+    Returns track points and lines with different colors per pilot.
+
+    Parameters:
+    - race_id: Race ID to filter tracks (in URL path)
+    - z/x/y: Tile coordinates
+    - source: Either 'live' or 'upload' to specify data source
+    - date: Optional date parameter (YYYY-MM-DD). If not provided, uses today
+    - pilot_id: Optional pilot ID to filter tracks
+    """
+    return await _generate_daily_tracks_tile(z, x, y, race_id, source, date, pilot_id, db)
+
+
+async def _generate_daily_tracks_tile(
+    z: int,
+    x: int,
+    y: int,
+    race_id: str,
+    source: str,
+    date: Optional[str],
+    pilot_id: Optional[str],
+    db: Session
+):
+    """
+    Internal function to generate vector tiles for all tracks from today for a specific race.
+    Applies tracking delay for competition integrity.
+    """
     try:
+        # Import settings for tracking delay
+        from config import settings
+
         # Determine table name based on source
         table_name = "live_track_points" if source == "live" else "uploaded_track_points"
 
@@ -2283,6 +2371,11 @@ async def get_daily_tracks_tile(
             # Use today's date
             target_date = datetime.now(timezone.utc).date()
 
+        # Calculate the delay cutoff time (only show points older than this)
+        delay_cutoff = datetime.now(timezone.utc) - timedelta(seconds=settings.TRACKING_DELAY_SECONDS)
+        # Don't log every tile request - too noisy
+        # logger.debug(f"Applying {settings.TRACKING_DELAY_SECONDS}s tracking delay to MVT tiles - cutoff: {delay_cutoff}")
+
         # Calculate start and end of the specified date in UTC
         start_of_day = datetime.combine(
             target_date, time.min, tzinfo=timezone.utc)
@@ -2292,7 +2385,7 @@ async def get_daily_tracks_tile(
         # First, find all flights from today for this race
         all_flights_today = db.query(Flight).filter(
             Flight.race_id == race_id,
-            Flight.source == source,
+            Flight.source.contains(source),  # Changed to LIKE for partial match
             # Filter by pilot_id if it's provided
             *([] if pilot_id is None else [Flight.pilot_id == pilot_id]),
             # Either the flight was created today
@@ -2373,8 +2466,9 @@ async def get_daily_tracks_tile(
         # use_preserve_topology = z >= 8
         # simplify_func = "ST_SimplifyPreserveTopology" if use_preserve_topology else "ST_Simplify"
 
+        # Disable all simplification to show full track detail
         simplify_tolerance = 0
-        min_distance = 0
+        min_distance = -1  # Set to -1 to include ALL points (any distance is >= -1)
 
         # if z <= 3:
         #     simplify_tolerance = 100  # Drastically reduced from 1000
@@ -2445,8 +2539,10 @@ async def get_daily_tracks_tile(
             FROM {table_name} t
             JOIN flights f ON t.flight_uuid = f.id
             WHERE t.flight_uuid::text IN {flight_uuids_str}
+            -- Apply tracking delay filter (only show points older than delay cutoff)
+            AND t.datetime <= '{delay_cutoff.strftime('%Y-%m-%d %H:%M:%S')}'::timestamp AT TIME ZONE 'UTC'
             -- Apply basic coordinate validation
-            AND t.lat BETWEEN -90 AND 90 
+            AND t.lat BETWEEN -90 AND 90
             AND t.lon BETWEEN -180 AND 180
         ),
         -- For each flight, find the first and last point to always include
@@ -2494,11 +2590,16 @@ async def get_daily_tracks_tile(
                 adp.pilot_id,
                 adp.pilot_name,
                 adp.color_index,
-                -- Apply simplification to the track - resolves the issue with tiny stationary variations
-                {simplify_func}(
-                    ST_MakeLine(adp.geom ORDER BY adp.datetime), 
-                    {simplify_tolerance}
-                ) AS full_track_geom
+                -- No simplification when tolerance is 0 - show full detail
+                CASE 
+                    WHEN {simplify_tolerance} = 0 THEN 
+                        ST_MakeLine(adp.geom ORDER BY adp.datetime)
+                    ELSE 
+                        {simplify_func}(
+                            ST_MakeLine(adp.geom ORDER BY adp.datetime), 
+                            {simplify_tolerance}
+                        )
+                END AS full_track_geom
             FROM all_pilot_points adp
             GROUP BY adp.pilot_id, adp.pilot_name, adp.color_index
         ),
@@ -2583,11 +2684,29 @@ async def get_daily_tracks_tile(
         result = db.execute(text(query)).fetchone()
 
         if result and result[0]:
-            # Return the MVT tile as binary data
-            return Response(content=result[0], media_type="application/x-protobuf")
+            # Convert memoryview to bytes if necessary
+            tile_data = result[0]
+            if isinstance(tile_data, memoryview):
+                tile_data = bytes(tile_data)
+            # Return the MVT tile as binary data with cache headers
+            return Response(
+                content=tile_data,
+                media_type="application/x-protobuf",
+                headers={
+                    "Cache-Control": "public, max-age=10",  # Cache for 10 seconds
+                    "X-Tile-Cache": "HIT" if len(tile_data) > 0 else "MISS"
+                }
+            )
         else:
-            # Return an empty tile
-            return Response(content=b"", media_type="application/x-protobuf")
+            # Return an empty tile with cache headers
+            return Response(
+                content=b"",
+                media_type="application/x-protobuf",
+                headers={
+                    "Cache-Control": "public, max-age=10",  # Cache empty tiles too
+                    "X-Tile-Cache": "EMPTY"
+                }
+            )
 
     except Exception as e:
         logger.error(f"Error generating daily tracks vector tile: {str(e)}")
@@ -4974,6 +5093,106 @@ async def get_tasks(
 
 
 
+@router.get("/tasks/race/{race_id}", status_code=200)
+async def get_tasks_by_race_id(
+    race_id: str,
+    db: Session = Depends(get_replica_db)  # Use read replica for fetching
+):
+    """
+    Get tasks from HFSS server for the specified race using race_id directly.
+    This endpoint doesn't require authentication - useful for public display.
+
+    Parameters:
+    - race_id: The race identifier
+
+    Returns:
+    - Task data from HFSS server
+    """
+    try:
+        # Validate race_id format
+        if not race_id:
+            logger.warning("Empty race_id provided")
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid race_id"
+            )
+
+        # Construct HFSS server URL
+        hfss_url = f"{settings.HFSS_SERVER.rstrip('/')}/tasks/{race_id}"
+
+        logger.info(f"Fetching tasks from HFSS server: {hfss_url}")
+
+        # Use aiohttp for async HTTP requests
+        timeout = aiohttp.ClientTimeout(total=10)  # 10 second timeout
+
+        async with ClientSession(timeout=timeout) as session:
+            try:
+                async with session.get(hfss_url) as response:
+                    if response.status == 200:
+                        tasks_data = await response.json()
+
+                        logger.info(
+                            f"Successfully retrieved tasks for race {race_id}")
+
+                        # Add metadata to response
+                        return {
+                            "success": True,
+                            "race_id": race_id,
+                            "retrieved_at": datetime.now(timezone.utc).isoformat(),
+                            "source": "hfss_server",
+                            "tasks": tasks_data
+                        }
+
+                    elif response.status == 404:
+                        logger.warning(
+                            f"Tasks not found on HFSS server for race {race_id}")
+                        return {
+                            "success": True,
+                            "race_id": race_id,
+                            "tasks": []  # Return empty array instead of error
+                        }
+
+                    elif response.status == 403:
+                        logger.error(
+                            f"Access forbidden for race {race_id} on HFSS server")
+                        raise HTTPException(
+                            status_code=403,
+                            detail="Access forbidden to HFSS server"
+                        )
+
+                    else:
+                        error_text = await response.text()
+                        logger.error(
+                            f"HFSS server returned status {response.status}: {error_text}")
+                        raise HTTPException(
+                            status_code=response.status,
+                            detail=f"HFSS server error: {response.status}"
+                        )
+
+            except asyncio.TimeoutError:
+                logger.error(
+                    f"Timeout connecting to HFSS server for race {race_id}")
+                raise HTTPException(
+                    status_code=504,
+                    detail="Timeout connecting to HFSS server"
+                )
+
+            except aiohttp.ClientError as e:
+                logger.error(
+                    f"Client error connecting to HFSS server: {str(e)}")
+                raise HTTPException(
+                    status_code=503,
+                    detail="Failed to connect to HFSS server"
+                )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error retrieving tasks: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Internal server error while retrieving tasks"
+        )
 
 
 @router.post("/admin/persist-live-flight")

@@ -23,36 +23,41 @@ async def websocket_tile_tracking_endpoint(
     websocket: WebSocket,
     race_id: str,
     client_id: str = Query(...),
-    token: str = Query(...)
+    token: Optional[str] = Query(None)
 ):
     """WebSocket endpoint for tile-based real-time tracking updates"""
     db = None
-    try:
-        # Verify token (same as existing WebSocket)
-        try:
-            token_data = jwt.decode(
-                token,
-                settings.SECRET_KEY,
-                algorithms=["HS256"],
-                audience="api.hikeandfly.app",
-                issuer="hikeandfly.app",
-                verify=True
-            )
 
-            if not token_data.get("sub", "").startswith("contest:"):
+    # Accept the WebSocket connection first
+    await websocket.accept()
+
+    try:
+        # Token verification is now optional
+        if token:
+            try:
+                token_data = jwt.decode(
+                    token,
+                    settings.SECRET_KEY,
+                    algorithms=["HS256"],
+                    audience="api.hikeandfly.app",
+                    issuer="hikeandfly.app",
+                    verify=True
+                )
+
+                if not token_data.get("sub", "").startswith("contest:"):
+                    await websocket.close(code=1008, reason="Invalid token")
+                    return
+
+                token_race_id = token_data["sub"].split(":")[1]
+
+                # Verify race_id matches token
+                if race_id != token_race_id:
+                    await websocket.close(code=1008, reason="Token not valid for this race")
+                    return
+
+            except (PyJWTError, jwt.ExpiredSignatureError) as e:
                 await websocket.close(code=1008, reason="Invalid token")
                 return
-
-            token_race_id = token_data["sub"].split(":")[1]
-
-            # Verify race_id matches token
-            if race_id != token_race_id:
-                await websocket.close(code=1008, reason="Token not valid for this race")
-                return
-
-        except (PyJWTError, jwt.ExpiredSignatureError) as e:
-            await websocket.close(code=1008, reason="Invalid token")
-            return
 
         # Connect this client to the tile-based system
         await tile_manager.connect(websocket, race_id, client_id)
@@ -74,7 +79,50 @@ async def websocket_tile_tracking_endpoint(
             await websocket.close(code=1008, reason="Race not found")
             return
 
-        # Send initial race metadata
+        # Fetch public races list and tasks from HFSS API
+        import aiohttp
+        public_races = []
+        tasks = []
+
+        async with aiohttp.ClientSession() as session:
+            # Fetch public races
+            try:
+                async with session.get(
+                    f"{settings.HFSS_SERVER}public/races",
+                    headers={"accept": "application/json"},
+                    timeout=aiohttp.ClientTimeout(total=5)
+                ) as response:
+                    if response.status == 200:
+                        public_races = await response.json()
+                        logger.info(f"Fetched {len(public_races)} public races from HFSS API")
+                    else:
+                        logger.warning(f"Failed to fetch public races: status {response.status}")
+            except Exception as e:
+                logger.error(f"Error fetching public races: {e}")
+
+            # Fetch tasks for this race
+            try:
+                async with session.get(
+                    f"{settings.HFSS_SERVER}tasks/{race_id}",
+                    headers={"accept": "application/json"},
+                    timeout=aiohttp.ClientTimeout(total=5)
+                ) as response:
+                    if response.status == 200:
+                        tasks_data = await response.json()
+                        # HFSS server returns GeoJSON FeatureCollection
+                        if isinstance(tasks_data, dict) and tasks_data.get("type") == "FeatureCollection":
+                            tasks = tasks_data.get("features", [])
+                        elif isinstance(tasks_data, list):
+                            tasks = tasks_data
+                        else:
+                            tasks = []
+                        logger.info(f"Fetched {len(tasks)} tasks for race {race_id}")
+                    else:
+                        logger.warning(f"Failed to fetch tasks for race {race_id}: status {response.status}")
+            except Exception as e:
+                logger.error(f"Error fetching tasks for race {race_id}: {e}")
+
+        # Send initial race metadata with public races list and tasks
         await websocket.send_json({
             "type": "race_metadata",
             "race_id": race_id,
@@ -86,7 +134,9 @@ async def websocket_tile_tracking_endpoint(
                 "max_lat": 90,
                 "min_lon": -180,
                 "max_lon": 180
-            }
+            },
+            "tasks": tasks,  # Include tasks for this race
+            "public_races": public_races  # Include the full list of public races
         })
 
         # Keep connection alive and handle client messages
