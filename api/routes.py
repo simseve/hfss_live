@@ -5206,7 +5206,7 @@ async def persist_live_flight(
     """
     Convert a specific live tracking flight to upload points for permanent storage.
     Creates a duplicate flight record with source='[device]_upload' to distinguish from live data.
-    This prevents live data from being deleted after 2 days by the hypertable retention policy.
+    This prevents live data from being deleted after 5 days by the cleanup retention policy.
     The original live flight and points are preserved.
     
     Parameters:
