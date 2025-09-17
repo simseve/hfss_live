@@ -73,7 +73,7 @@ pytest test_*.py
 
 **Time-Series Data**:
 - TimescaleDB hypertables for `live_track_points`, `uploaded_track_points`, and `scoring_tracks`
-- Automatic 48-hour retention for live flight data
+- Automatic 5-day retention for live flight data
 - Batch insertion via Redis queue system
 
 **Authentication & Security**:

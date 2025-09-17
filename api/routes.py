@@ -2,7 +2,7 @@ from api.flight_state import determine_if_landed, detect_flight_state
 from fastapi import APIRouter, Depends, HTTPException, Query, Security, WebSocket, WebSocketDisconnect, Response, UploadFile, File, Form, Request
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
-from database.schemas import LiveTrackingRequest, LiveTrackPointCreate, FlightResponse, TrackUploadRequest, NotificationCommand, SubscriptionRequest, UnsubscriptionRequest, NotificationRequest, SentNotificationResponse
+from database.schemas import LiveTrackingRequest, LiveTrackPointCreate, FlightResponse, TrackUploadRequest, NotificationCommand, SubscriptionRequest, UnsubscriptionRequest, NotificationRequest, SentNotificationResponse, TrackingTokenRequest, TrackingTokenResponse
 from database.models import UploadedTrackPoint, Flight, LiveTrackPoint, Race, NotificationTokenDB, SentNotification, DeviceRegistration
 from typing import Dict, Optional, List
 from database.db_replica import get_db, get_replica_db, get_read_db_with_fallback, get_replica_health
@@ -5206,7 +5206,7 @@ async def persist_live_flight(
     """
     Convert a specific live tracking flight to upload points for permanent storage.
     Creates a duplicate flight record with source='[device]_upload' to distinguish from live data.
-    This prevents live data from being deleted after 2 days by the hypertable retention policy.
+    This prevents live data from being deleted after 5 days by the cleanup retention policy.
     The original live flight and points are preserved.
     
     Parameters:
@@ -6274,4 +6274,109 @@ async def delete_device_by_uuid(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to delete device: {str(e)}"
+        )
+
+
+@router.get("/external/races")
+async def get_external_races():
+    """
+    Fetch races from the external HFSS API and return them.
+    Acts as a proxy to the score.hikeandfly.app API.
+    """
+    logger = logging.getLogger(__name__)
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = "https://score.hikeandfly.app/api/public/races"
+            headers = {"accept": "application/json"}
+
+            async with session.get(url, headers=headers) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    logger.info(f"Successfully fetched {len(data)} races from external API")
+                    return data
+                else:
+                    error_text = await response.text()
+                    logger.error(f"External API returned status {response.status}: {error_text}")
+                    raise HTTPException(
+                        status_code=response.status,
+                        detail=f"External API error: {error_text}"
+                    )
+
+    except aiohttp.ClientError as e:
+        logger.error(f"Network error fetching external races: {str(e)}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to connect to external API: {str(e)}"
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error fetching external races: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error: {str(e)}"
+        )
+
+
+@router.post("/generate-token", response_model=TrackingTokenResponse)
+async def generate_tracking_token(request: TrackingTokenRequest):
+    """
+    Generate a tracking token for a pilot in a race.
+
+    The token will be valid until the race end date (23:59:59 UTC).
+    """
+    logger = logging.getLogger(__name__)
+
+    try:
+        # Parse the end date and set to end of day
+        end_date = datetime.strptime(request.race_end_date, '%Y-%m-%d')
+        end_date = end_date.replace(hour=23, minute=59, second=59, tzinfo=timezone.utc)
+
+        # Create token payload
+        token_payload = {
+            'pilot_id': request.pilot_id,
+            'race_id': request.race_id,
+            'pilot_name': request.pilot_name,
+            'exp': int(end_date.timestamp()),
+            'race': {
+                'name': request.race_name,
+                'date': request.race_date,
+                'timezone': request.race_timezone,
+                'location': request.race_location,
+                'end_date': request.race_end_date
+            },
+            'endpoints': {
+                'live': '/tracking/live',
+                'upload': '/tracking/upload'
+            }
+        }
+
+        # Generate token
+        token = jwt.encode(
+            token_payload,
+            settings.SECRET_KEY,
+            algorithm='HS256'
+        )
+
+        logger.info(f"Generated tracking token for pilot {request.pilot_id} in race {request.race_id}")
+
+        return TrackingTokenResponse(
+            token=token,
+            expires_at=end_date,
+            endpoints={
+                'live': '/tracking/live',
+                'upload': '/tracking/upload'
+            }
+        )
+
+    except ValueError as e:
+        logger.error(f"Invalid date format: {str(e)}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid date format. Use YYYY-MM-DD format."
+        )
+    except Exception as e:
+        logger.error(f"Error generating tracking token: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate tracking token: {str(e)}"
         )

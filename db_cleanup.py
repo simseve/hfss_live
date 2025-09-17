@@ -13,14 +13,14 @@ logger = logging.getLogger(__name__)
 
 async def cleanup_old_flights():
     """
-    Delete all live flight tracking data that is older than 48 hours.
+    Delete all live flight tracking data that is older than 5 days.
     This task runs at midnight every night.
     """
     try:
         logger.info("Starting cleanup of old live flight data")
 
-        # Calculate the cutoff time (48 hours ago)
-        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=48)
+        # Calculate the cutoff time (5 days ago)
+        cutoff_time = datetime.now(timezone.utc) - timedelta(days=5)
 
         # Create a new database session
         with Session() as db:
@@ -32,7 +32,7 @@ async def cleanup_old_flights():
                 )
             ).count()
 
-            # Delete records older than 48 hours
+            # Delete records older than 5 days
             delete_stmt = delete(Flight).where(
                 and_(
                     Flight.source == 'live',

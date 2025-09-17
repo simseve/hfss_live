@@ -119,7 +119,7 @@ RETURNS void AS $$
 BEGIN
     DELETE FROM flights
     WHERE source = 'live'
-    AND created_at < (NOW() - INTERVAL '48 hours');
+    AND created_at < (NOW() - INTERVAL '5 days');
     -- All associated live_track_points will be automatically deleted due to CASCADE
 END;
 $$ LANGUAGE plpgsql;
