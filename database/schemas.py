@@ -477,3 +477,50 @@ class MVTRequest(BaseModel):
 
 # Flymaster schemas removed - data now goes directly to live_track_points
 # Flymaster devices are tracked through the flights table with source='flymaster'
+
+
+class TrackingTokenRequest(BaseModel):
+    """Schema for generating a tracking token"""
+    pilot_id: int = Field(..., description="Pilot ID from the race")
+    race_id: str = Field(..., description="Race ID")
+    pilot_name: str = Field(..., description="Full name of the pilot")
+    race_name: str = Field(..., description="Name of the race")
+    race_date: str = Field(..., description="Race start date in YYYY-MM-DD format")
+    race_end_date: str = Field(..., description="Race end date in YYYY-MM-DD format")
+    race_timezone: str = Field(..., description="Race timezone (e.g., 'Europe/Rome')")
+    race_location: str = Field(..., description="Race location")
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "pilot_id": 1,
+                "race_id": "68aadbb85da525060edaaebf",
+                "pilot_name": "Simone Severini",
+                "race_name": "HFSS App Testing",
+                "race_date": "2025-01-01",
+                "race_end_date": "2026-12-01",
+                "race_timezone": "Europe/Rome",
+                "race_location": "Laveno"
+            }
+        }
+    }
+
+
+class TrackingTokenResponse(BaseModel):
+    """Schema for tracking token response"""
+    token: str = Field(..., description="JWT tracking token")
+    expires_at: datetime = Field(..., description="Token expiration timestamp")
+    endpoints: Dict[str, str] = Field(..., description="Available endpoints for this token")
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+                "expires_at": "2026-12-01T23:59:59Z",
+                "endpoints": {
+                    "live": "/tracking/live",
+                    "upload": "/tracking/upload"
+                }
+            }
+        }
+    }
