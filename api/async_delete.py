@@ -31,8 +31,12 @@ async def delete_flight_admin_background(
     """Admin background task to delete a flight by UUID only"""
     db = None
     try:
-        # Get a new database session for background task
-        from database.db_conf import Session
+        # Use connection pool properly for background task
+        from database.db_conf import Session, engine
+        from sqlalchemy import text
+
+        # Dispose of stale connections before starting
+        engine.dispose()
         db = Session()
         
         # Update status
@@ -62,9 +66,16 @@ async def delete_flight_admin_background(
         total_points = flight.total_points or 0
         pilot_name = flight.pilot_name or "Unknown"
         source = flight.source
-        
+
         # Delete the flight (cascade will delete all track points)
+        # Use a shorter transaction to avoid locking
         db.delete(flight)
+        db.flush()  # Execute delete but don't commit yet
+
+        # Small delay to allow other operations
+        await asyncio.sleep(0.1)
+
+        # Now commit the transaction
         db.commit()
         
         # Update final status
@@ -109,8 +120,12 @@ async def delete_single_flight_background(
     """Background task to delete a single flight with potentially thousands of points"""
     db = None
     try:
-        # Get a new database session for background task
-        from database.db_conf import Session
+        # Use connection pool properly for background task
+        from database.db_conf import Session, engine
+        from sqlalchemy import text
+
+        # Dispose of stale connections before starting
+        engine.dispose()
         db = Session()
         
         # Update status
@@ -143,9 +158,16 @@ async def delete_single_flight_background(
         # Track statistics
         total_points = flight.total_points or 0
         pilot_name = flight.pilot_name or "Unknown"
-        
+
         # Delete the flight (cascade will delete all track points)
+        # Use a shorter transaction to avoid locking
         db.delete(flight)
+        db.flush()  # Execute delete but don't commit yet
+
+        # Small delay to allow other operations
+        await asyncio.sleep(0.1)
+
+        # Now commit the transaction
         db.commit()
         
         # Update final status
@@ -188,8 +210,12 @@ async def delete_pilot_flights_background(
     """Background task to delete pilot flights"""
     db = None
     try:
-        # Get a new database session for background task
-        from database.db_conf import Session
+        # Use connection pool properly for background task
+        from database.db_conf import Session, engine
+        from sqlalchemy import text
+
+        # Dispose of stale connections before starting
+        engine.dispose()
         db = Session()
         
         # Update status
@@ -222,23 +248,32 @@ async def delete_pilot_flights_background(
         deleted_count = 0
         total_points = 0
         
-        # Delete in batches to avoid locking
+        # Delete in smaller batches to avoid locking
         for flight in flights:
             total_points += flight.total_points or 0
             db.delete(flight)
             deleted_count += 1
-            
-            # Commit every 10 flights to avoid long transactions
-            if deleted_count % 10 == 0:
+
+            # Commit every 3 flights to reduce transaction time
+            # This prevents long-running locks on the database
+            if deleted_count % 3 == 0:
+                db.flush()  # Execute pending deletes
+                await asyncio.sleep(0.05)  # Brief pause to allow other operations
                 db.commit()
+
                 # Update progress
                 await redis_queue.redis_client.hset(
                     f"deletion:{deletion_id}",
                     "progress", f"{deleted_count}/{len(flights)}"
                 )
-        
-        # Final commit
-        db.commit()
+
+                # Longer pause every 10 flights to prevent overwhelming the database
+                if deleted_count % 10 == 0:
+                    await asyncio.sleep(0.2)
+
+        # Final commit for any remaining flights
+        if deleted_count % 3 != 0:
+            db.commit()
         
         # Update final status
         await redis_queue.redis_client.hset(

@@ -27,7 +27,7 @@ class RedisPointQueue:
             self.redis_client = redis.from_url(
                 redis_url,
                 decode_responses=True,
-                max_connections=getattr(settings, 'REDIS_MAX_CONNECTIONS', 20)
+                max_connections=getattr(settings, 'REDIS_MAX_CONNECTIONS', 50)
             )
             await self.redis_client.ping()
             logger.info(f"Redis connection established: {redis_url}")
