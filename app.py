@@ -373,7 +373,7 @@ async def health():
                 'created_connections': getattr(pool, 'created_connections', 'N/A'),
                 'available_connections': len(getattr(pool, '_available_connections', [])),
                 'in_use_connections': len(getattr(pool, '_in_use_connections', [])),
-                'max_connections': getattr(settings, 'REDIS_MAX_CONNECTIONS', 10)
+                'max_connections': getattr(settings, 'REDIS_MAX_CONNECTIONS', 50)
             }
     except Exception as e:
         redis_pool_info = {'error': str(e)}

@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     REDIS_PORT: int = 6379
     REDIS_DB: int = 0
     REDIS_PASSWORD: Optional[str] = None
-    REDIS_MAX_CONNECTIONS: int = 20
+    REDIS_MAX_CONNECTIONS: int = 50  # Increased from 20 to prevent pool exhaustion
     
     # Datadog configuration (optional)
     DD_API_KEY: Optional[str] = None

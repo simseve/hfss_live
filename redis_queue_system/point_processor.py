@@ -26,8 +26,12 @@ class PointProcessor:
         self.stats = {
             'processed': 0,
             'failed': 0,
-            'last_processed': None
+            'last_processed': None,
+            'queue_stats': {},
+            'processing_times': {},
+            'last_health_check': None
         }
+        self.health_check_interval = 30  # Health check every 30 seconds
 
     async def start_processing(self):
         """Start the background processing loop"""
@@ -57,37 +61,67 @@ class PointProcessor:
         logger.info("Stopping point processor")
 
     async def _process_queue_loop(self, queue_name: str):
-        """Main processing loop for a specific queue"""
+        """Main processing loop for a specific queue with adaptive sleep"""
         logger.info(f"Starting processing loop for {queue_name}")
         cycle_count = 0
+        consecutive_empty = 0  # Track consecutive empty queue reads
+        last_health_check = datetime.now(timezone.utc)
+
         while self.processing:
             try:
                 cycle_count += 1
-                if cycle_count % 10 == 1:  # Log every 10 cycles
-                    logger.debug(f"Processing cycle {cycle_count} for {queue_name}")
-                
-                # Process batches from this queue
-                await self._process_queue_batch(queue_name)
 
-                # Small delay between processing cycles
-                await asyncio.sleep(1)
+                # Perform health check periodically
+                now = datetime.now(timezone.utc)
+                if (now - last_health_check).total_seconds() > self.health_check_interval:
+                    await self.perform_health_check()
+                    last_health_check = now
+
+                if cycle_count % 10 == 1:  # Log every 10 cycles
+                    queue_size = await redis_queue.get_queue_size(queue_name)
+                    logger.debug(f"Processing cycle {cycle_count} for {queue_name}, queue size: {queue_size}")
+
+                # Process batches from this queue
+                items_processed = await self._process_queue_batch(queue_name)
+
+                # Adaptive sleep based on queue activity
+                if items_processed == 0:
+                    consecutive_empty += 1
+                    # Gradually increase sleep time if queue is empty (max 3 seconds)
+                    sleep_time = min(0.1 * (1.5 ** consecutive_empty), 3.0)
+                else:
+                    consecutive_empty = 0
+                    # If we processed items, check queue size to determine sleep
+                    queue_size = await redis_queue.get_queue_size(queue_name)
+                    if queue_size > 100:
+                        sleep_time = 0.01  # Very short sleep when queue is busy
+                    elif queue_size > 10:
+                        sleep_time = 0.1   # Short sleep for moderate queue
+                    else:
+                        sleep_time = 0.5   # Normal sleep for small queue
+
+                await asyncio.sleep(sleep_time)
 
             except Exception as e:
                 logger.error(f"Error processing {queue_name}: {e}, traceback: {traceback.format_exc()}")
                 await asyncio.sleep(5)  # Longer delay on error
 
-    async def _process_queue_batch(self, queue_name: str):
-        """Process a single batch from the queue"""
+    async def _process_queue_batch(self, queue_name: str) -> int:
+        """Process a single batch from the queue
+
+        Returns:
+            Number of items processed
+        """
         # Get batch of items to process
-        # Process up to 10 queue items per cycle
+        # Increase batch size for better throughput
         try:
-            items = await redis_queue.dequeue_batch(queue_name, batch_size=10)
+            items = await redis_queue.dequeue_batch(queue_name, batch_size=20)
         except Exception as e:
             logger.error(f"Failed to dequeue from {queue_name}: {e}")
-            return
+            return 0
 
         if not items:
-            return
+            return 0
 
         logger.info(f"Processing {len(items)} queue items from {queue_name}")
 
@@ -135,6 +169,9 @@ class PointProcessor:
             logger.warning(f"Failed to process {total_failed} points")
         
         self.stats['last_processed'] = datetime.now(timezone.utc).isoformat()
+
+        # Return the number of items processed
+        return len(items)
 
     async def _process_live_points(self, points: List[Dict]) -> bool:
         """Process live tracking points"""
@@ -397,6 +434,48 @@ class PointProcessor:
     def get_stats(self) -> Dict:
         """Get processing statistics"""
         return self.stats.copy()
+
+    async def perform_health_check(self):
+        """Perform health check on queue system"""
+        try:
+            health = {
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'processing_active': self.processing,
+                'queues': {}
+            }
+
+            # Check each queue
+            for queue_type, queue_name in QUEUE_NAMES.items():
+                queue_size = await redis_queue.get_queue_size(queue_name)
+                health['queues'][queue_type] = {
+                    'size': queue_size,
+                    'status': 'healthy' if queue_size < 1000 else 'warning' if queue_size < 5000 else 'critical'
+                }
+
+                # Log warnings for large queues
+                if queue_size > 1000:
+                    logger.warning(f"Queue {queue_name} has {queue_size} pending items")
+
+                # Update stats
+                self.stats['queue_stats'][queue_type] = queue_size
+
+            # Check processing rate
+            if self.stats['last_processed']:
+                last_processed = datetime.fromisoformat(self.stats['last_processed'].replace('Z', '+00:00'))
+                time_since_last = (datetime.now(timezone.utc) - last_processed).total_seconds()
+
+                if time_since_last > 60 and any(health['queues'][q]['size'] > 0 for q in health['queues']):
+                    logger.warning(f"No items processed in last {time_since_last:.0f} seconds despite non-empty queues")
+                    health['processing_status'] = 'stalled'
+                else:
+                    health['processing_status'] = 'active'
+
+            self.stats['last_health_check'] = health['timestamp']
+            return health
+
+        except Exception as e:
+            logger.error(f"Health check failed: {e}")
+            return {'status': 'error', 'error': str(e)}
 
     async def start(self):
         """Start background processing tasks"""

@@ -36,8 +36,8 @@ class RedisPointQueue:
             # Use the new get_redis_url method from settings
             redis_url = settings.get_redis_url()
             
-            # Use lower default to prevent exhaustion
-            max_connections = getattr(settings, 'REDIS_MAX_CONNECTIONS', 10)
+            # Use configured value with higher default to prevent exhaustion
+            max_connections = getattr(settings, 'REDIS_MAX_CONNECTIONS', 50)
 
             self.redis_client = redis.from_url(
                 redis_url,
@@ -56,14 +56,15 @@ class RedisPointQueue:
             await self.redis_client.aclose()
             await self.redis_client.connection_pool.disconnect()
 
-    async def queue_points(self, queue_name: str, points: List[Dict[str, Any]], priority: int = 0):
+    async def queue_points(self, queue_name: str, points: List[Dict[str, Any]], priority: int = 0, timeout: float = 5.0):
         """
-        Queue points for batch processing
+        Queue points for batch processing with timeout
 
         Args:
             queue_name: Name of the queue (e.g., 'live_points', 'upload_points', 'flymaster_points')
             points: List of point dictionaries to queue
             priority: Priority score (higher = more priority)
+            timeout: Maximum time to wait for Redis operation (default 5 seconds)
         """
         try:
             # Add metadata
@@ -74,12 +75,19 @@ class RedisPointQueue:
                 'queue_type': queue_name
             }
 
-            # Add to priority queue (primary storage)
-            await self.redis_client.zadd(
-                f"queue:{queue_name}",
-                {json.dumps(queue_item, cls=DateTimeEncoder): priority}
-            )
-            
+            # Add to priority queue with timeout
+            try:
+                await asyncio.wait_for(
+                    self.redis_client.zadd(
+                        f"queue:{queue_name}",
+                        {json.dumps(queue_item, cls=DateTimeEncoder): priority}
+                    ),
+                    timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                logger.error(f"Redis operation timed out after {timeout}s while queueing {len(points)} points")
+                return False
+
             # Note: Not adding to list anymore to avoid duplication
             # The dequeue_batch method will read from priority queue if list is empty
 

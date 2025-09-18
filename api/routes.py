@@ -174,7 +174,7 @@ async def live_tracking(
 
             if queued:
                 # Flight is already committed, update state asynchronously
-                asyncio.create_task(update_flight_state(flight.id, db, source='live'))
+                asyncio.create_task(update_flight_state(flight.id, source='live'))
                 logger.info(
                     f"Successfully queued {len(track_points_data)} track points for flight {data.flight_id}")
 
@@ -193,7 +193,7 @@ async def live_tracking(
                 )
                 db.execute(stmt, track_points_data)
                 db.commit()
-                asyncio.create_task(update_flight_state(flight.id, db, source='live'))
+                asyncio.create_task(update_flight_state(flight.id, source='live'))
                 logger.info(
                     f"Successfully saved track points for flight {data.flight_id} (fallback)")
 
@@ -367,7 +367,7 @@ async def upload_track(
                     db.commit()
                     # Asynchronously update the flight state with 'upload' source
                     asyncio.create_task(update_flight_state(
-                        flight.id, db, source='upload'))
+                        flight.id, source='upload'))
                     logger.info(
                         f"Successfully queued upload for flight {upload_data.flight_id}")
 
@@ -386,7 +386,7 @@ async def upload_track(
 
                     # Asynchronously update the flight state with 'upload' source
                     asyncio.create_task(update_flight_state(
-                        flight.id, db, source='upload'))
+                        flight.id, source='upload'))
                     logger.info(
                         f"Successfully processed upload for flight {upload_data.flight_id} (fallback)")
                     return flight
@@ -3753,39 +3753,48 @@ async def get_flight_state_endpoint(
         )
 
 
-async def update_flight_state(flight_uuid, db, source=None):
+async def update_flight_state(flight_uuid, source=None):
     """
     Update the flight state for a specific flight and broadcast it to WebSocket clients
     This is designed to be called as an async background task
 
     Args:
         flight_uuid: UUID of the flight
-        db: Database session
         source: Source of the flight data ('live' or 'upload') - if None, will be determined from the flight record
     """
+    db_session = None
     try:
         # Import here to avoid circular imports
         from api.flight_state import update_flight_state_in_db
+        from database.db_replica import PrimarySession
 
-        # Use proper context manager for session handling
-        from database.db_replica import primary_db_context
-        
-        with primary_db_context() as db_session:
-            # If source wasn't provided, determine it from the flight record
-            if source is None:
-                flight_info = db_session.query(Flight).filter(
-                    Flight.id == flight_uuid).first()
-                if flight_info:
-                    source = flight_info.source
+        # Create a new session for this background task
+        db_session = PrimarySession()
 
-            # Update the flight state with the appropriate source
-            state, state_info = update_flight_state_in_db(
-                flight_uuid, db_session, source=source)
+        # If source wasn't provided, determine it from the flight record
+        if source is None:
+            flight_info = db_session.query(Flight).filter(
+                Flight.id == flight_uuid).first()
+            if flight_info:
+                source = flight_info.source
 
-            # No need to broadcast separately as flight state will be included in regular track updates
+        # Update the flight state with the appropriate source
+        state, state_info = update_flight_state_in_db(
+            flight_uuid, db_session, source=source)
+
+        # Commit the session
+        db_session.commit()
+
+        # No need to broadcast separately as flight state will be included in regular track updates
     except Exception as e:
         # Log but don't raise - this is a background task
         logger.error(f"Error updating flight state: {str(e)}")
+        if db_session:
+            db_session.rollback()
+    finally:
+        # Always close the session
+        if db_session:
+            db_session.close()
 
 
 @router.get("/flight/bounds/{flight_uuid}")
