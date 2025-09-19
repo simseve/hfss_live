@@ -87,6 +87,8 @@ class PointProcessor:
                 # Adaptive sleep based on queue activity
                 if items_processed == 0:
                     consecutive_empty += 1
+                    # Cap consecutive_empty to prevent overflow (1.5^20 ≈ 3325, which * 0.1 > 3.0)
+                    consecutive_empty = min(consecutive_empty, 20)
                     # Gradually increase sleep time if queue is empty (max 3 seconds)
                     sleep_time = min(0.1 * (1.5 ** consecutive_empty), 3.0)
                 else:
