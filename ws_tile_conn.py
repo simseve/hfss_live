@@ -252,6 +252,50 @@ class TileConnectionManager:
                                     first_time = parser.parse(first_time_str)
                                     flight_time = (delayed_point.datetime - first_time).total_seconds()
 
+                            # Get last sent time for this flight
+                            flight_id_str = str(flight.id)
+                            last_sent_time = self.get_last_update_time(race_id, flight_id_str)
+
+                            # Query for all points since last update (up to the delayed time)
+                            track_points = []
+                            if last_sent_time:
+                                # Get points since last update
+                                new_points = db.query(LiveTrackPoint).filter(
+                                    LiveTrackPoint.flight_uuid == flight.id,
+                                    LiveTrackPoint.datetime > last_sent_time,
+                                    LiveTrackPoint.datetime <= delayed_time
+                                ).order_by(LiveTrackPoint.datetime.asc()).all()
+
+                                # Format points for frontend
+                                for point in new_points:
+                                    track_points.append({
+                                        'lat': float(point.lat),
+                                        'lon': float(point.lon),
+                                        'elevation': float(point.elevation) if point.elevation else 0,
+                                        'datetime': point.datetime.isoformat()
+                                    })
+                            else:
+                                # First update - send last N points to establish initial track
+                                initial_points = db.query(LiveTrackPoint).filter(
+                                    LiveTrackPoint.flight_uuid == flight.id,
+                                    LiveTrackPoint.datetime <= delayed_time
+                                ).order_by(LiveTrackPoint.datetime.desc()).limit(100).all()
+
+                                # Reverse to get chronological order
+                                initial_points.reverse()
+
+                                for point in initial_points:
+                                    track_points.append({
+                                        'lat': float(point.lat),
+                                        'lon': float(point.lon),
+                                        'elevation': float(point.elevation) if point.elevation else 0,
+                                        'datetime': point.datetime.isoformat()
+                                    })
+
+                            # Update last sent time to the most recent point
+                            if delayed_point:
+                                self.add_pilot_with_sent_data(race_id, flight_id_str, delayed_point.datetime)
+
                             updates.append({
                                 'pilot_id': flight.pilot_id,
                                 'pilot_name': flight.pilot_name or 'Unknown',
@@ -270,6 +314,7 @@ class TileConnectionManager:
                                 'flight_state_info': flight.flight_state if flight.flight_state else {},
                                 'first_fix': flight.first_fix if flight.first_fix else None,
                                 'last_fix': flight.last_fix if flight.last_fix else None,
+                                'track_points': track_points,  # New: array of points since last update
                                 'delay_applied': delay_seconds  # So frontend knows the delay
                             })
                     
@@ -497,6 +542,12 @@ class TileConnectionManager:
         if race_id not in self.pilots_with_sent_data:
             self.pilots_with_sent_data[race_id] = {}
         self.pilots_with_sent_data[race_id][pilot_uuid] = last_sent_time
+
+    def get_last_update_time(self, race_id: str, pilot_uuid: str) -> datetime:
+        """Get the last time data was sent for a specific pilot in a race"""
+        if race_id in self.pilots_with_sent_data and pilot_uuid in self.pilots_with_sent_data[race_id]:
+            return self.pilots_with_sent_data[race_id][pilot_uuid]
+        return None
 
 
 # Create a global tile connection manager for the application
