@@ -123,6 +123,13 @@ async def live_tracking(
                 detail="Not authorized to update this flight"
             )
         else:
+            # Check if flight is closed
+            if flight.closed_at is not None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Flight is closed ({flight.closed_by}) and cannot accept new track points"
+                )
+
             # Only update pilot name if it changed
             # Triggers will handle first_fix, last_fix, and total_points
             if flight.pilot_name != pilot_name:
@@ -293,6 +300,7 @@ async def upload_track(
 
             # Create new flight without first_fix/last_fix/total_points
             # These will be automatically updated by database triggers
+            # Uploaded flights are closed immediately since upload is complete
             flight = Flight(
                 flight_id=upload_data.flight_id,
                 race_uuid=race.id,
@@ -301,7 +309,9 @@ async def upload_track(
                 pilot_name=pilot_name,
                 created_at=datetime.now(timezone.utc),
                 source='upload',
-                device_id=device_id
+                device_id=device_id,
+                closed_at=datetime.now(timezone.utc),
+                closed_by='upload_complete'
             )
             db.add(flight)
 
@@ -5300,6 +5310,7 @@ async def persist_live_flight(
             
             if not existing_upload_flight:
                 # Create a new flight record for the upload version
+                # Uploaded flights are closed immediately since upload is complete
                 upload_flight = Flight(
                     flight_id=upload_flight_id,
                     race_uuid=flight.race_uuid,
@@ -5311,7 +5322,9 @@ async def persist_live_flight(
                     device_id=flight.device_id,
                     first_fix=flight.first_fix,
                     last_fix=flight.last_fix,
-                    total_points=flight.total_points
+                    total_points=flight.total_points,
+                    closed_at=datetime.now(timezone.utc),
+                    closed_by='upload_complete'
                 )
                 db.add(upload_flight)
                 db.commit()
@@ -6323,6 +6336,74 @@ async def get_external_races():
         raise HTTPException(
             status_code=500,
             detail=f"Internal server error: {str(e)}"
+        )
+
+
+@router.post("/flights/{flight_id}/close", response_model=FlightResponse)
+async def close_flight(
+    flight_id: str,
+    token: str = Query(..., description="Authentication token"),
+    token_data: Dict = Depends(verify_tracking_token),
+    db: Session = Depends(get_db)
+):
+    """
+    Manually close a flight to prevent further track point updates.
+    Only the pilot who owns the flight can close it.
+    """
+    logger = logging.getLogger(__name__)
+
+    try:
+        # Get the flight
+        flight = db.query(Flight).filter(Flight.flight_id == flight_id).first()
+
+        if not flight:
+            raise HTTPException(status_code=404, detail="Flight not found")
+
+        # Verify the pilot owns this flight
+        if flight.pilot_id != token_data['pilot_id']:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only close your own flights"
+            )
+
+        # Check if already closed
+        if flight.closed_at is not None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Flight already closed at {flight.closed_at.isoformat()}"
+            )
+
+        # Close the flight
+        flight.closed_at = datetime.now(timezone.utc)
+        flight.closed_by = 'manual'
+
+        db.commit()
+        db.refresh(flight)
+
+        logger.info(f"Flight {flight_id} closed manually by pilot {token_data['pilot_id']}")
+
+        # Broadcast flight closure to WebSocket clients
+        await manager.broadcast_to_race(flight.race_id, {
+            "type": "flight_closed",
+            "data": {
+                "flight_id": flight.flight_id,
+                "pilot_id": flight.pilot_id,
+                "pilot_name": flight.pilot_name,
+                "closed_at": flight.closed_at.isoformat(),
+                "closed_by": flight.closed_by
+            }
+        })
+
+        return flight
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error closing flight {flight_id}: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to close flight: {str(e)}"
         )
 
 

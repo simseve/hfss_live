@@ -61,6 +61,10 @@ class Flight(Base):
     # {state, confidence, avg_speed, max_speed, altitude_change, last_updated}
     flight_state = Column(JSON, nullable=True)
 
+    # Flight closure tracking
+    closed_at = Column(DateTime(timezone=True), nullable=True)
+    closed_by = Column(String, nullable=True)  # 'manual', 'inactivity', 'race_end', etc.
+
     # Relationships
     race = relationship("Race", back_populates="flights")
     live_track_points = relationship(
