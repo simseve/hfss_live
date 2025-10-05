@@ -6342,6 +6342,7 @@ async def get_external_races():
 @router.post("/flights/{flight_id}/close", response_model=FlightResponse)
 async def close_flight(
     flight_id: str,
+    token: str = Query(..., description="Authentication token"),
     token_data: Dict = Depends(verify_tracking_token),
     db: Session = Depends(get_db)
 ):
