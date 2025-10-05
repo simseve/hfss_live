@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     TRACKING_DELAY_SECONDS: int = 60  # Default 60 seconds for competition, set to 2 for testing
 
     # Flight closure configuration
-    FLIGHT_INACTIVITY_HOURS: int = 12  # Auto-close flights after 12 hours of inactivity (allows for long flights with coverage gaps)
+    FLIGHT_INACTIVITY_HOURS: int = 24  # Auto-close flights after 24 hours of inactivity (allows for multi-day races and long flights with coverage gaps)
 
     # Redis configuration
     # Full Redis URL (overrides individual settings)
