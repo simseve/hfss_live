@@ -184,6 +184,8 @@ class FlightResponse(FlightBase):
     end_time: Optional[datetime] = None
     flight_metadata: Optional[Dict[str, Any]] = None
     flight_state: Optional[FlightState] = None
+    closed_at: Optional[datetime] = None
+    closed_by: Optional[str] = None
     race: RaceResponse
 
     model_config = {
