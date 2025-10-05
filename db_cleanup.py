@@ -26,19 +26,20 @@ async def auto_close_inactive_flights():
         with Session() as db:
             # Find open flights (closed_at is NULL) where last_fix is older than threshold
             # We need to extract the datetime from the JSON last_fix field
-            from sqlalchemy import func, cast, Text
+            from sqlalchemy import func, text
 
             cutoff_time = datetime.now(timezone.utc) - timedelta(hours=inactivity_hours)
 
             # Query for flights that need to be closed
+            # Use SQL text expression for JSON extraction (PostgreSQL specific)
             flights_to_close = db.query(Flight).filter(
                 and_(
                     Flight.closed_at.is_(None),  # Not already closed
                     Flight.last_fix.isnot(None),  # Has at least one point
-                    # Extract datetime from JSON and compare
-                    cast(Flight.last_fix['datetime'].astext, Text) < cutoff_time.isoformat()
+                    # Extract datetime from JSON using ->> operator and compare as text
+                    text("(last_fix->>'datetime')::timestamp < :cutoff")
                 )
-            ).all()
+            ).params(cutoff=cutoff_time).all()
 
             closed_count = 0
             for flight in flights_to_close:
