@@ -6382,8 +6382,17 @@ async def close_flight(
 
         logger.info(f"Flight {flight_id} closed manually by pilot {token_data['pilot_id']}")
 
-        # Broadcast update via WebSocket
-        await manager.broadcast_flight_update(flight.race_id, flight)
+        # Broadcast flight closure to WebSocket clients
+        await manager.broadcast_to_race(flight.race_id, {
+            "type": "flight_closed",
+            "data": {
+                "flight_id": flight.flight_id,
+                "pilot_id": flight.pilot_id,
+                "pilot_name": flight.pilot_name,
+                "closed_at": flight.closed_at.isoformat(),
+                "closed_by": flight.closed_by
+            }
+        })
 
         return flight
 
