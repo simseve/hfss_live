@@ -77,7 +77,7 @@ async def periodic_tracking_update(interval_seconds: int = 30):
                                 utc_day_start.strftime('%Y-%m-%dT%H:%M:%SZ')) &
                             (func.json_extract_path_text(Flight.last_fix, 'datetime') <=
                                 utc_day_end.strftime('%Y-%m-%dT%H:%M:%SZ')),
-                            Flight.source.in_(['live', 'flymaster_live', 'tk905b_live'])
+                            Flight.source.in_(['live', 'flymaster_live', 'tk905b_live', 'digifly'])
                         )
                         .order_by(Flight.created_at.desc())
                         .all()

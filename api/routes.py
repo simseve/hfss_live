@@ -4862,6 +4862,133 @@ async def upload_flymaster_file(
         return PlainTextResponse("NOK", status_code=500)
 
 
+@router.post("/digifly/upload")
+async def upload_digifly_data(
+    data: LiveTrackingRequest,
+    device_id: str = Query(..., description="Digifly device serial number"),
+    db: Session = Depends(get_db)
+):
+    """
+    Upload Digifly live tracking data.
+    Validates device registration and associates points with the registered pilot.
+
+    Parameters:
+    - device_id: Digifly device serial number
+    - data: Live tracking data (track_points array with lat, lon, elevation, datetime)
+
+    Returns: OK on success, NOK on failure
+    """
+    try:
+        # Check if device is registered and active
+        logger.info(f"Checking registration for Digifly device {device_id}")
+        registration = db.query(DeviceRegistration).filter(
+            DeviceRegistration.serial_number == device_id,
+            DeviceRegistration.device_type == 'digifly',
+            DeviceRegistration.is_active == True
+        ).first()
+
+        if not registration:
+            logger.warning(f"Digifly device {device_id} not registered or inactive - returning OK but discarding data")
+            return PlainTextResponse("OK", status_code=200)
+
+        logger.info(f"Found registration for Digifly device {device_id}: pilot={registration.pilot_name}, race={registration.race_id}")
+
+        # Extract pilot and race info from registration
+        pilot_id = registration.pilot_id
+        pilot_name = registration.pilot_name
+        race_id = registration.race_id
+
+        # Check/create race record
+        race = db.query(Race).filter(Race.race_id == race_id).first()
+        if not race:
+            logger.error(f"Race {race_id} not found for Digifly device {device_id}")
+            return PlainTextResponse("NOK", status_code=400)
+
+        # Generate or use provided flight_id
+        flight_id = data.flight_id if data.flight_id else f"digifly_{device_id}_{datetime.now(timezone.utc).strftime('%Y%m%d')}"
+
+        # Check for existing flight
+        flight = db.query(Flight).filter(
+            Flight.flight_id == flight_id,
+            Flight.source == 'digifly'
+        ).first()
+
+        if not flight:
+            # Create new flight with source='digifly'
+            flight = Flight(
+                flight_id=flight_id,
+                race_uuid=race.id,
+                race_id=race_id,
+                pilot_id=pilot_id,
+                pilot_name=pilot_name,
+                created_at=datetime.now(timezone.utc),
+                source='digifly',
+                device_id=device_id
+            )
+            db.add(flight)
+            logger.info(f"Created new Digifly flight {flight_id} for pilot {pilot_name}")
+        elif flight.closed_at is not None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Flight is closed and cannot accept new track points"
+            )
+
+        # Commit flight before adding points
+        db.commit()
+        db.refresh(flight)
+
+        # Prepare track points data for queueing
+        track_points_data = []
+        for point in data.track_points:
+            point_data = {
+                "flight_id": flight_id,
+                "flight_uuid": flight.id,
+                "datetime": datetime.fromisoformat(
+                    point['datetime'].replace('Z', '+00:00'))
+                .astimezone(timezone.utc)
+                .strftime('%Y-%m-%dT%H:%M:%SZ'),
+                "lat": point['lat'],
+                "lon": point['lon'],
+                "elevation": point.get('elevation'),
+                "barometric_altitude": point.get('barometric_altitude'),
+                "device_id": device_id
+            }
+            track_points_data.append(point_data)
+
+        logger.info(f"Queueing {len(track_points_data)} Digifly track points for flight {flight_id}")
+
+        # Queue points for background processing
+        queued = await redis_queue.queue_points(
+            QUEUE_NAMES['live'],
+            track_points_data,
+            priority=1
+        )
+
+        if queued:
+            asyncio.create_task(update_flight_state(flight.id, source='digifly'))
+            logger.info(f"Successfully queued {len(track_points_data)} Digifly points for flight {flight_id}")
+        else:
+            # Fallback to direct insertion
+            stmt = insert(LiveTrackPoint).on_conflict_do_nothing(
+                index_elements=['flight_id', 'lat', 'lon', 'datetime']
+            )
+            db.execute(stmt, track_points_data)
+            db.commit()
+            asyncio.create_task(update_flight_state(flight.id, source='digifly'))
+            logger.info(f"Successfully saved Digifly points for flight {flight_id} (fallback)")
+
+        return PlainTextResponse("OK", status_code=200)
+
+    except SQLAlchemyError as e:
+        db.rollback()
+        logger.error(f"Database error during Digifly upload: {str(e)}")
+        return PlainTextResponse("NOK", status_code=500)
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error during Digifly upload: {str(e)}")
+        return PlainTextResponse("NOK", status_code=500)
+
+
 @router.get("/flymaster/points/{serial_id}/raw")
 async def flymaster_points(
     serial_id: int,
