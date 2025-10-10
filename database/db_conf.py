@@ -27,8 +27,8 @@ if is_neon:
         engine = create_engine(
             database_uri,
             poolclass=QueuePool,  # Local pool management (Neon handles the real pooling)
-            pool_size=15,        # For 15k users: ~1500 req/sec needs 150-200 connections
-            max_overflow=15,     # Total 500 - handles traffic spikes gracefully
+            pool_size=200,        # For 15k users: ~1500 req/sec needs 150-200 connections
+            max_overflow=300,     # Total 500 - handles traffic spikes gracefully
             pool_pre_ping=True,   # CRITICAL: Check connection validity before using
             pool_recycle=300,     # Recycle every 5 minutes (longer is OK with pooler)
             pool_timeout=30,      # Timeout waiting for connection from pool
