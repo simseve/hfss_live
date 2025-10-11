@@ -4910,11 +4910,11 @@ async def upload_digifly_data(
         # Check for existing flight
         flight = db.query(Flight).filter(
             Flight.flight_id == flight_id,
-            Flight.source == 'digifly'
+            Flight.source == 'digifly_live'
         ).first()
 
         if not flight:
-            # Create new flight with source='digifly'
+            # Create new flight with source='digifly_live'
             flight = Flight(
                 flight_id=flight_id,
                 race_uuid=race.id,
@@ -4922,7 +4922,7 @@ async def upload_digifly_data(
                 pilot_id=pilot_id,
                 pilot_name=pilot_name,
                 created_at=datetime.now(timezone.utc),
-                source='digifly',
+                source='digifly_live',
                 device_id=device_id
             )
             db.add(flight)
@@ -4965,7 +4965,7 @@ async def upload_digifly_data(
         )
 
         if queued:
-            asyncio.create_task(update_flight_state(flight.id, source='digifly'))
+            asyncio.create_task(update_flight_state(flight.id, source='digifly_live'))
             logger.info(f"Successfully queued {len(track_points_data)} Digifly points for flight {flight_id}")
         else:
             # Fallback to direct insertion
@@ -4974,7 +4974,7 @@ async def upload_digifly_data(
             )
             db.execute(stmt, track_points_data)
             db.commit()
-            asyncio.create_task(update_flight_state(flight.id, source='digifly'))
+            asyncio.create_task(update_flight_state(flight.id, source='digifly_live'))
             logger.info(f"Successfully saved Digifly points for flight {flight_id} (fallback)")
 
         return PlainTextResponse("OK", status_code=200)
@@ -5427,6 +5427,8 @@ async def persist_live_flight(
                 upload_source = 'flymaster_upload'
             elif flight.source == 'tk905b_live':
                 upload_source = 'tk905b_upload'
+            elif flight.source == 'digifly_live':
+                upload_source = 'digifly_upload'
             else:
                 upload_source = 'upload'  # Default for standard 'live' source
             
